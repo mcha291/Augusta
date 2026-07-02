@@ -1,283 +1,274 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, ScrollView, StyleSheet, View } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import {
+  ActivityIndicator,
+  Dimensions,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View
+} from 'react-native';
 import {
   Avatar,
   Button,
-  Card,
   IconButton,
-  Text,
-  useTheme,
+  Surface,
+  Text
 } from 'react-native-paper';
 
-// --- Define Types for your Lambda Data ---
-interface Appointment {
-  id: number;
-  user_id: number;
-  appointment_date: string; // From DB: 2026-03-13T10:00:00.000Z
-  doctor_name: string;      // maps to example 'name'
-  title: string;            // maps to example 'desc'
-  hospital: string;         // maps to example 'hospital'
-  department: string;
-  room_number: string;
-  appointment_number: string;
-  details: string;
-  status_id: number;      // The ID (e.g., 2)
-  status_label: string;   // The text (e.g., "Upcoming")
-  status_color: string;   // The color (e.g., "#4CAF50")
-}
-interface Medication {
-  id: number;
-  user_id: number;
-  name: string;
-  dosage: string;
-  frequency: string;
-  status: 'active' | 'inactive';
-}
-
-interface Announcement {
-  id: number;
-  author_id: number;
-  title: string;
-  content: string;
-  type: 'announcement' | 'news';
-}
-
-// Replace this with your actual Lambda Function URL
-const API_BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
+// Import our new professional styling system
+import { apiRequest } from '@/utils/api';
+import { COLORS, SHADOWS, SPACING } from '../../constants/theme';
+import { useAuth } from '../../context/AuthContext';
+import { GlobalStyles } from '../../styles/globalstyles';
 
 export default function HomeScreen() {
-  const theme = useTheme();
-  const router = useRouter(); // <--- ADD THIS LINE inside the component
+  const router = useRouter();
+  const { user } = useAuth();
 
-  // Explicitly type the states so TypeScript knows what fields exist
-  const [loading, setLoading] = useState<boolean>(true);
-  const [lastAppointment, setLastAppointment] = useState<Appointment | null>(null);
-  const [nextAppointment, setNextAppointment] = useState<Appointment | null>(null);
-  const [nextMedication, setNextMedication] = useState<Medication | null>(null);
-  const [latestNews, setLatestNews] = useState<Announcement | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<any>({ appointments: [], meds: [], news: [] });
+  const [checkInAppt, setCheckInAppt] = useState<any>(null);
 
-  useEffect(() => {
-    fetchDashboardData();
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      fetchDashboardData();
-    }, [])
-  );
-
-  const fetchDashboardData = async () => {
+  const fetchData = async () => {
+    if (!user || user.id === 0) return;
     try {
       setLoading(true);
-
-      const [apptRes, medRes, newsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/appointments`),
-        fetch(`${API_BASE_URL}/medications`),
-        fetch(`${API_BASE_URL}/announcements`)
+      const [apptRes, newsRes, medRes] = await Promise.all([
+        apiRequest(`/appointments`, {}, user?.id),
+        apiRequest(`/announcements`, {}, user?.id),
+        apiRequest(`/medication-reminders`, {}, user?.id)
       ]);
 
-      const appts: Appointment[] = await apptRes.json();
-      const meds: Medication[] = await medRes.json();
-      const news: Announcement[] = await newsRes.json();
+      const appts = await apptRes.json();
+      const news = await newsRes.json();
+      const meds = await medRes.json();
+      console.log("Fetched Data:", { appts, news, meds });
       const now = new Date();
+      // Logic: Find the soonest appointment with "New" status for the Hero Card
+      const overdueOrSoon = appts?.find((a: any) => a.status_label === 'New');
 
-      // FIX: Change 'scheduled' to 'Upcoming' to match your new seed data
-      const upcoming = appts
-        .filter(a => a.status_id === 1 && new Date(a.appointment_date) > now)
-        .sort((a, b) => new Date(a.appointment_date).getTime() - new Date(b.appointment_date).getTime())[0];
-
-      setNextAppointment(upcoming || null);
-      const lastcoming = appts
-        .filter(a => a.status_id === 1 && new Date(a.appointment_date) < now)
-        .sort((a, b) => new Date(a.appointment_date).getTime() - new Date(b.appointment_date).getTime())[0];
-
-      setLastAppointment(lastcoming || null);
-      setNextAppointment(upcoming || null);
-      setNextMedication(meds.find(m => m.status === 'active') || null);
-      setLatestNews(news[news.length - 1] || null);
-
-    } catch (error) {
-      console.error("Error fetching data:", error);
+      setData({ appointments: appts, meds, news });
+      setCheckInAppt(overdueOrSoon || null);
+    } catch (e) {
+      console.error("Dashboard Load Error:", e);
     } finally {
       setLoading(false);
     }
   };
-  const handleComplete = () => updateAppointmentStatus(3);
-  const handleMissed = () => updateAppointmentStatus(4);
 
-  const updateAppointmentStatus = async (statusId: number) => {
-    if (!lastAppointment) return;
+  useFocusEffect(useCallback(() => { fetchData(); }, []));
 
-    try {
-      setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/appointments`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: lastAppointment.id,
-          status_id: statusId
-        })
-      });
-
-      if (res.ok) {
-        // Success: Re-fetch data. The current appt is no longer 'Upcoming',
-        // so the card will either show the next one or be empty.
-        fetchDashboardData();
-      } else {
-        throw new Error("Failed to update status");
-      }
-    } catch (e) {
-      Alert.alert("Error", "Could not update appointment.");
-      setLoading(false);
-    }
+  const updateStatus = async (id: number, statusId: number) => {
+    setLoading(true);
+    await apiRequest(`/appointments`, {
+      method: 'PUT',
+      body: { id, status_id: statusId }
+    }, user?.id);
+    fetchData();
   };
 
-
-  if (loading) {
+  if (loading && !data.appointments.length) {
     return (
-      <View style={[styles.container, styles.centered, { backgroundColor: theme.colors.background }]}>
-        <ActivityIndicator size="large" color={theme.colors.primary} />
+      <View style={GlobalStyles.centered}>
+        <ActivityIndicator color={COLORS.primary} size="large" />
       </View>
     );
   }
 
   return (
-    <ScrollView
-      style={[styles.container, { backgroundColor: theme.colors.background }]}
-      contentContainerStyle={styles.scrollContent}
-    >
-      <View style={styles.header}>
-        
-                <IconButton
-                  icon="account-circle-outline"
-                  iconColor={theme.colors.primary}
-                  size={28}
-                  onPress={() => router.push('/profile')} // Add this line
-                />
-        <IconButton icon="refresh" size={24} onPress={fetchDashboardData} />
+    <View style={GlobalStyles.container}>
+      {/* 1. PROFESSIONAL HEADER (Uses GlobalStyles) */}
+      <View style={GlobalStyles.header}>
+        <View>
+          <Text style={styles.greeting}>Good Morning,</Text>
+          <Text style={styles.userName}>{user?.username || 'Agent'}</Text>
+        </View>
+        <Pressable onPress={() => router.push('/profile')}>
+          <Avatar.Image
+            size={52}
+            source={{ uri: `https://api.dicebear.com/7.x/initials/svg?seed=${user?.username}&backgroundColor=6366f1` }}
+          />
+        </Pressable>
       </View>
 
-      <Text variant="headlineMedium" style={styles.mainTitle}>Dashboard</Text>
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={GlobalStyles.scrollContent}
+      >
 
-      {/* --- NEW: THE CHECK-IN CARD --- */}
-      {lastAppointment && (
-        <Card style={[styles.card, { backgroundColor: theme.colors.primaryContainer }]} mode="elevated">
-          <Card.Title
-            title="Appointment Check-in"
-            subtitle="Action required for your next visit"
-            titleStyle={styles.bold}
-            left={(props) => <Avatar.Icon {...props} icon="bell-ring" />}
-          />
-          <Card.Content style={styles.checkInContent}>
-            <Text variant="titleMedium" style={styles.bold}>{lastAppointment.doctor_name}</Text>
-            <Text variant="bodyMedium">{lastAppointment.title}</Text>
-            <Text variant="labelSmall" style={{ marginTop: 4 }}>
-              {new Date(lastAppointment.appointment_date).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+        {/* 2. HERO ACTION CARD (Check-in) */}
+        {checkInAppt ? (
+          <Surface style={styles.heroCard} elevation={0}>
+            <View style={styles.statusPill}>
+              <View style={styles.pulseDot} />
+              <Text style={styles.statusText}>PENDING ACTION</Text>
+            </View>
+            <Text style={styles.heroTitle}>{checkInAppt.title}</Text>
+            <Text style={styles.heroSubtitle}>
+              {checkInAppt.doctor_name} • {new Date(checkInAppt.appointment_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </Text>
-          </Card.Content>
-          <Card.Actions>
-            <Button
-              mode="outlined"
-              onPress={() => handleComplete()}
-              textColor={theme.colors.error}
-              style={{ borderColor: theme.colors.error }}
-            >
-              Missed
-            </Button>
-            <Button
-              mode="contained"
-              onPress={() => handleMissed()}
-              buttonColor={theme.colors.primary}
-            >
-              Completed
-            </Button>
-          </Card.Actions>
-        </Card>
-      )}
 
-      {loading && !nextAppointment ? (
-        <ActivityIndicator size="large" style={{ marginTop: 20 }} />
-      ) : (
-        <>
-          <Card style={styles.card} mode="outlined">
-            <Card.Title title="Recent News" left={(props) => <Avatar.Icon {...props} icon="newspaper" />} />
-            <Card.Content><Text>Check the latest updates from WISE HQ.</Text></Card.Content>
-          </Card>
-        </>
-      )}
+            <View style={styles.heroActions}>
+              <Button
+                mode="contained"
+                buttonColor={COLORS.surface}
+                textColor={COLORS.ink}
+                onPress={() => updateStatus(checkInAppt.id, 4)} // Completed
+                style={styles.heroBtn}
+                labelStyle={{ fontWeight: 'bold' }}
+              >
+                Mark Completed
+              </Button>
+              <IconButton
+                icon="close"
+                iconColor={COLORS.surface}
+                size={24}
+                onPress={() => updateStatus(checkInAppt.id, 2)} // Missed/Cancel
+              />
+            </View>
+          </Surface>
+        ) : (
+          <Surface style={[styles.heroCard, { backgroundColor: COLORS.success }]} elevation={0}>
+            <Text style={styles.heroTitle}>All Clear</Text>
+            <Text style={styles.heroSubtitle}>No pending appointments at this time.</Text>
+          </Surface>
+        )}
 
-      {/* Card 1: Next Appointment */}
-      <Card style={styles.card} mode="outlined">
-        <View style={styles.horizontalCard}>
-          <Avatar.Icon size={40} icon="calendar-clock" />
-          <View style={styles.cardHeaderInfo}>
-            <Text variant="titleMedium" style={styles.bold}>
-              {nextAppointment?.title || "No Upcoming Appointments"}
-            </Text>
-            <Text variant="bodySmall">
-              {/* FIX: Use doctor_name and hospital */}
-              {nextAppointment ? `${nextAppointment.doctor_name} • ${nextAppointment.hospital}` : "---"}
-            </Text>
-          </View>
-          <View style={[styles.placeholderSmall, { backgroundColor: theme.colors.surfaceVariant }]}>
-            <Text variant="labelSmall" style={{ fontWeight: 'bold', textAlign: 'center' }}>
-              {/* FIX: Use room_number */}
-              {nextAppointment?.room_number || "N/A"}
-            </Text>
-          </View>
+        {/* 3. METRICS ROW */}
+        <View style={styles.metricsRow}>
+          <MetricItem icon="calendar-month" label="Appointments" value={data.appointments.length} onPress={() => router.push('/appointments')} />
+          <MetricItem icon="pill" label="Meds" value={data.meds.length} onPress={() => router.push('/medications')} />
+          <MetricItem icon="flask-outline" label="Reports" value="12" onPress={() => router.push('/results')} />
         </View>
-      </Card>
 
-      {/* Card 2: Medication */}
-      <Card style={styles.card} mode="outlined">
-        <Card.Title
-          title="Next Medication"
-          subtitle={nextMedication ? "Active" : "None"}
-          titleStyle={styles.bold}
-          left={(props) => <Avatar.Icon {...props} icon="pill" />}
-        />
-        <Card.Content>
-          <Text variant="titleMedium" style={styles.bold}>
-            {nextMedication?.name || "No medications set"}
-          </Text>
-          <Text variant="bodyMedium">
-            {nextMedication ? `${nextMedication.dosage} - ${nextMedication.frequency}` : "Stay healthy!"}
-          </Text>
-        </Card.Content>
-        <Card.Actions>
-          <Button mode="contained" disabled={!nextMedication}>Mark Taken</Button>
-        </Card.Actions>
-      </Card>
+        {/* 4. UPCOMING LIST (Uses GlobalStyles.listItem) */}
+        <View style={GlobalStyles.sectionHeader}>
+          <Text style={GlobalStyles.sectionTitle}>Upcoming Schedule</Text>
+          <Button textColor={COLORS.primary} onPress={() => router.push('/appointments')}>View All</Button>
+        </View>
 
-      {/* Card 3: News */}
-      {latestNews && (
-        <Card style={styles.card} mode="outlined">
-          <Card.Title
-            title={latestNews.type === 'news' ? "Latest News" : "Announcement"}
-            left={(props) => <Avatar.Icon {...props} icon="newspaper" />}
-          />
-          <Card.Content>
-            <Text variant="titleMedium" style={styles.bold}>{latestNews.title}</Text>
-            <Text variant="bodyMedium">{latestNews.content}</Text>
-          </Card.Content>
-        </Card>
-      )}
-    </ScrollView>
+        {data.appointments.filter((a: any) => a.status_label === 'New').slice(0, 3).map((item: any) => (
+          <Pressable key={item.id} onPress={() => router.push('/appointments')}>
+            <Surface style={GlobalStyles.listItem} elevation={0}>
+              <View style={styles.itemDateBox}>
+                <Text style={styles.itemDateDay}>{new Date(item.appointment_date).getDate()}</Text>
+                <Text style={styles.itemDateMonth}>
+                  {new Date(item.appointment_date).toLocaleString('default', { month: 'short' })}
+                </Text>
+              </View>
+              <View style={styles.itemInfo}>
+                <Text style={styles.itemTitle}>{item.doctor_name}</Text>
+                <Text style={styles.itemSub}>{item.hospital}</Text>
+              </View>
+              <MaterialCommunityIcons name="chevron-right" size={20} color={COLORS.secondary} />
+            </Surface>
+          </Pressable>
+        ))}
+
+        {/* 5. NEWS SECTION */}
+        <View style={GlobalStyles.sectionHeader}>
+          <Text style={GlobalStyles.sectionTitle}>News & Announcements</Text>
+        </View>
+
+        {data.news.slice(0, 1).map((item: any) => (
+          <Surface key={item.id} style={GlobalStyles.card} elevation={0}>
+            <View style={styles.newsTag}>
+              <Text style={styles.newsTagText}>{item.type.toUpperCase()}</Text>
+            </View>
+            <Text style={styles.newsHeadline}>{item.title}</Text>
+            <Text numberOfLines={2} style={styles.newsContent}>{item.content}</Text>
+          </Surface>
+        ))}
+
+      </ScrollView>
+    </View>
+  );
+}
+
+/**
+ * Internal Sub-component for Metrics
+ */
+function MetricItem({ icon, label, value, onPress }: any) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => ({ opacity: pressed ? 0.7 : 1 })}>
+      <Surface style={styles.metricItem} elevation={0}>
+        <MaterialCommunityIcons name={icon} size={20} color={COLORS.primary} />
+        <Text style={styles.metricValue}>{value}</Text>
+        <Text style={styles.metricLabel}>{label.toUpperCase()}</Text>
+      </Surface>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  centered: { justifyContent: 'center', alignItems: 'center' },
-  scrollContent: { padding: 16, paddingTop: 40, paddingBottom: 100 },
-  header: { flexDirection: 'row', justifyContent: 'space-between' },
-  mainTitle: { fontWeight: 'bold', marginBottom: 20 },
-  card: { marginBottom: 16, borderRadius: 12 },
-  horizontalCard: { flexDirection: 'row', alignItems: 'center', padding: 12 },
-  cardHeaderInfo: { flex: 1, marginLeft: 12 },
-  bold: { fontWeight: '600' },
-  placeholderSmall: { height: 60, width: 90, borderRadius: 8, justifyContent: 'center', padding: 4 },
-  centerText: { textAlign: 'center' },
-  checkInContent: { marginVertical: 8 },
+  // Typography
+  greeting: { fontSize: 14, color: COLORS.slate, fontWeight: '500' },
+  userName: { fontSize: 26, fontWeight: '800', color: COLORS.ink, letterSpacing: -0.5 },
+
+  // Hero Card (The large dark action card)
+  heroCard: {
+    backgroundColor: COLORS.ink,
+    borderRadius: 32,
+    padding: 24,
+    ...SHADOWS.medium, // Uses the stronger shadow from Theme.ts
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 100,
+    alignSelf: 'flex-start',
+    marginBottom: 16
+  },
+  pulseDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.success, marginRight: 8 },
+  statusText: { color: 'white', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+  heroTitle: { color: 'white', fontSize: 22, fontWeight: '800', marginBottom: 4 },
+  heroSubtitle: { color: 'rgba(255,255,255,0.5)', fontSize: 14, marginBottom: 24 },
+  heroActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  heroBtn: { borderRadius: 16, flex: 1, height: 48, justifyContent: 'center' },
+
+  // Metrics Row
+  metricsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: SPACING.xl },
+  metricItem: {
+    width: (Dimensions.get('window').width / 3) - 24,
+    backgroundColor: COLORS.surface,
+    padding: 16,
+    borderRadius: 24,
+    alignItems: 'center',
+    ...SHADOWS.soft
+  },
+  metricValue: { fontSize: 20, fontWeight: '800', color: COLORS.ink, marginTop: 6 },
+  metricLabel: { fontSize: 9, color: COLORS.secondary, fontWeight: '700', letterSpacing: 0.5 },
+
+  // List Specifics
+  itemDateBox: {
+    width: 48,
+    height: 48,
+    backgroundColor: COLORS.background,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
+  itemDateDay: { fontSize: 18, fontWeight: '800', color: COLORS.ink },
+  itemDateMonth: { fontSize: 10, fontWeight: '700', color: COLORS.secondary, textTransform: 'uppercase' },
+  itemInfo: { flex: 1, marginLeft: 16 },
+  itemTitle: { fontSize: 16, fontWeight: '700', color: COLORS.ink },
+  itemSub: { fontSize: 13, color: COLORS.slate, marginTop: 2 },
+
+  // News Specifics
+  newsTag: {
+    backgroundColor: COLORS.background,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6,
+    marginBottom: 10
+  },
+  newsTagText: { fontSize: 10, fontWeight: '800', color: COLORS.primary },
+  newsHeadline: { fontSize: 18, fontWeight: '800', color: COLORS.ink, marginBottom: 6 },
+  newsContent: { fontSize: 14, color: COLORS.slate, lineHeight: 20 }
 });

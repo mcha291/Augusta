@@ -1,3 +1,4 @@
+import { apiRequest } from '@/utils/api';
 import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
@@ -10,7 +11,7 @@ interface AppointmentStatus {
   color: string;
 }
 
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
+
 
 export default function AddAppointmentScreen() {
   const theme = useTheme();
@@ -40,7 +41,7 @@ export default function AddAppointmentScreen() {
   useEffect(() => {
     const loadConfig = async () => {
       try {
-        const res = await fetch(`${BASE_URL}/appointment-statuses`);
+        const res = await apiRequest(`/appointment-statuses`);
         const data: AppointmentStatus[] = await res.json();
         setDbStatuses(data);
         const defaultStatus = data.find(s => s.label === 'New');
@@ -95,9 +96,8 @@ export default function AddAppointmentScreen() {
         status_id: selectedStatusId
       };
 
-      const response = await fetch(`${BASE_URL}/appointments`, {
+      const response = await apiRequest(`/appointments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 

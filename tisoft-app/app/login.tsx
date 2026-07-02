@@ -1,67 +1,172 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { signIn } from 'aws-amplify/auth';
 import { useRouter } from 'expo-router';
 import React, { useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Alert, Platform, ScrollView, StyleSheet, View } from 'react-native';
 import { Button, Text, TextInput, useTheme } from 'react-native-paper';
+
+import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginScreen() {
   const theme = useTheme();
   const router = useRouter();
-  const { login } = useAuth();
+  const { checkUser } = useAuth(); // We need this to refresh the global state
 
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [identifier, setIdentifier] = useState(''); // renamed for clarity
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
 
   const handleLogin = async () => {
-    setLoading(true);
+    if (!identifier.trim() || !password) {
+      notifyUser("Error", "Please enter both identifier and password.");
+      return;
+    }
+
     try {
-      const res = await fetch('https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ identifier, password }) // send as 'identifier'
+      setLoading(true);
+      
+      // 1. Authenticate with Cognito via Amplify
+      const { isSignedIn, nextStep } = await signIn({
+        username: identifier.trim(),
+        password: password,
       });
-      const data = await res.json();
-      if (res.ok) {
-        login(data);
-      } else {
-        setError(data.error || "Login failed");
+
+      if (isSignedIn) {
+        // 2. CRITICAL: Sync the Cognito session with your RDS profile 
+        // before navigating. This populates the 'user' object.
+        await checkUser(); 
+        
+        // 3. Move to the main app
+        router.replace('/(tabs)');
+      } else if (nextStep.signInStep === 'CONFIRM_SIGN_UP') {
+        // Handle users who signed up but haven't verified their email code
+        Alert.alert("Verify Account", "Please verify your email before logging in.");
+        router.push('/signup'); 
       }
-    } catch (e) {
-      setError("Server connection failed");
+    } catch (error: any) {
+      console.error("Login Error:", error);
+      notifyUser("Login Failed", error.message || "Invalid credentials.");
     } finally {
       setLoading(false);
     }
   };
 
+  const notifyUser = (title: string, message: string) => {
+    if (Platform.OS === 'web') {
+      window.alert(`${title}: ${message}`);
+    } else {
+      Alert.alert(title, message);
+    }
+  };
+
   return (
-    <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
-      <Text variant="headlineLarge" style={styles.title}>WISE Login</Text>
-      <Text variant="bodyMedium" style={styles.subtitle}>Enter your credentials, Agent.</Text>
-      <TextInput
-        label="Email or Phone Number"
-        value={identifier}
-        onChangeText={setIdentifier}
-        mode="outlined"
-        style={styles.input}
-        autoCapitalize="none"
-        keyboardType="email-address" // Works for both on most keyboards
-      />
-      <TextInput label="Password" value={password} onChangeText={setPassword} mode="outlined" style={styles.input} secureTextEntry />
+    <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.brandSection}>
+        <View style={styles.logoCircle}>
+          <MaterialCommunityIcons name="shield-key" size={40} color="white" />
+        </View>
+        <Text variant="headlineLarge" style={styles.title}>WISE Command</Text>
+        <Text variant="bodyMedium" style={styles.subtitle}>
+          Secure Intelligence Portal Login
+        </Text>
+      </View>
 
-      {error ? <Text style={{ color: theme.colors.error, marginBottom: 10 }}>{error}</Text> : null}
+      <View style={styles.formCard}>
+        <TextInput
+          label="Email or Codename"
+          value={identifier}
+          onChangeText={setIdentifier}
+          mode="outlined"
+          outlineColor={COLORS.background}
+          activeOutlineColor={COLORS.primary}
+          style={styles.input}
+          autoCapitalize="none"
+          keyboardType="email-address"
+          left={<TextInput.Icon icon="account" />}
+        />
 
-      <Button mode="contained" onPress={handleLogin} loading={loading} style={styles.button}>Sign In</Button>
-      <Button mode="text" onPress={() => router.push('/signup')}>Don't have an account? Sign Up</Button>
-    </View>
+        <TextInput 
+          label="Password" 
+          value={password} 
+          onChangeText={setPassword} 
+          mode="outlined" 
+          outlineColor={COLORS.background}
+          activeOutlineColor={COLORS.primary}
+          style={styles.input} 
+          secureTextEntry 
+          left={<TextInput.Icon icon="lock" />}
+        />
+
+        <Button 
+          mode="contained" 
+          onPress={handleLogin} 
+          loading={loading} 
+          disabled={loading}
+          style={styles.button}
+          contentStyle={{ height: 56 }}
+        >
+          Authenticate
+        </Button>
+      </View>
+
+      <Button 
+        mode="text" 
+        onPress={() => router.push('/signup')}
+        textColor={COLORS.slate}
+        style={{ marginTop: 20 }}
+      >
+        New Agent? Request Credentials
+      </Button>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 30, justifyContent: 'center' },
-  title: { fontWeight: 'bold', textAlign: 'center' },
-  subtitle: { textAlign: 'center', marginBottom: 30, opacity: 0.6 },
-  input: { marginBottom: 12 },
-  button: { marginTop: 10, paddingVertical: 5, borderRadius: 8 }
+  container: { 
+    flexGrow: 1, 
+    padding: 30, 
+    justifyContent: 'center', 
+    backgroundColor: COLORS.background 
+  },
+  brandSection: { 
+    alignItems: 'center', 
+    marginBottom: 40 
+  },
+  logoCircle: { 
+    width: 80, 
+    height: 80, 
+    borderRadius: 40, 
+    backgroundColor: COLORS.ink, 
+    justifyContent: 'center', 
+    alignItems: 'center',
+    marginBottom: 20,
+    ...SHADOWS.medium
+  },
+  title: { 
+    fontWeight: '800', 
+    color: COLORS.ink, 
+    letterSpacing: -1 
+  },
+  subtitle: { 
+    textAlign: 'center', 
+    opacity: 0.6, 
+    color: COLORS.slate,
+    marginTop: 4 
+  },
+  formCard: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: RADIUS.xl,
+    ...SHADOWS.soft,
+    gap: 15
+  },
+  input: { 
+    backgroundColor: 'white',
+  },
+  button: { 
+    marginTop: 10, 
+    borderRadius: RADIUS.lg,
+    ...SHADOWS.medium 
+  }
 });

@@ -5,7 +5,6 @@ import {
   Alert,
   Platform,
   Pressable,
-  RefreshControl,
   ScrollView,
   StyleSheet,
   useWindowDimensions,
@@ -13,31 +12,32 @@ import {
 } from 'react-native';
 import { LineChart } from "react-native-chart-kit";
 import {
-  Avatar,
   Button,
-  Chip,
   Divider,
   IconButton,
-  List,
   Surface,
   Text,
   useTheme
 } from 'react-native-paper';
 
-// --- Types & Helpers ---
+// Design System
+import { useAuth } from '@/context/AuthContext';
+import { apiRequest } from '@/utils/api';
+import { COLORS, RADIUS, SHADOWS, SPACING } from '../../constants/theme';
+import { GlobalStyles } from '../../styles/globalstyles';
+
+// --- Types ---
 interface TestConfig { field_number: number; display_name: string; units: string; }
-interface TestResult { id: number; test_date: string; [key: string]: any; }
-const isValidDate = (d: any) => d instanceof Date && !isNaN(d.getTime());
-const formatDateForWeb = (date: Date) => date.toISOString().split('T')[0];
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
-const PADDING = 16;
-const GAPS = 12;
+interface TestResult { id: number; test_date: string;[key: string]: any; }
+
+
 
 export default function ResultsScreen() {
   const theme = useTheme();
   const router = useRouter();
   const { width: windowWidth } = useWindowDimensions();
-  
+  const { user, activeDependent } = useAuth();
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [configs, setConfigs] = useState<TestConfig[]>([]);
@@ -54,12 +54,12 @@ export default function ResultsScreen() {
   const loadData = async () => {
     try {
       const [configRes, resultsRes] = await Promise.all([
-        fetch(`${BASE_URL}/test-config`),
-        fetch(`${BASE_URL}/test-results`)
+        apiRequest(`/test-config`, {}, activeDependent?.id),
+        apiRequest(`/test-results`, {}, activeDependent?.id)
       ]);
       setConfigs(await configRes.json());
       setResults(await resultsRes.json());
-    } catch (e) { console.error(e); } finally {
+    } finally {
       setLoading(false);
       setRefreshing(false);
     }
@@ -67,11 +67,34 @@ export default function ResultsScreen() {
 
   useFocusEffect(useCallback(() => { loadData(); }, []));
 
-  // --- NEW: DELETE LOGIC ---
+  const filteredResults = useMemo(() => {
+    const s = new Date(startDate).setHours(0, 0, 0, 0);
+    const e = new Date(endDate).setHours(23, 59, 59, 999);
+    return results.filter((r) => {
+      const d = new Date(r.test_date).getTime();
+      return d >= s && d <= e;
+    });
+  }, [results, startDate, endDate]);
+
+  const getChartDataForField = useCallback((fieldNum: number) => {
+    const dataPoints = filteredResults
+      .filter(r => r[`field_${fieldNum}`] !== null && r[`field_${fieldNum}`] !== undefined)
+      .sort((a, b) => new Date(a.test_date).getTime() - new Date(b.test_date).getTime());
+
+    if (dataPoints.length < 2) return null;
+    return {
+      labels: dataPoints.slice(-6).map(r => new Date(r.test_date).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })),
+      datasets: [{ data: dataPoints.slice(-6).map(r => parseFloat(r[`field_${fieldNum}`])) }]
+    };
+  }, [filteredResults]);
+
+  const numColumns = windowWidth > 600 ? 3 : 2;
+  const dynamicCardWidth = (windowWidth - (SPACING.xl * 2) - (12 * (numColumns - 1))) / numColumns;
+  const chartKey = `${startDate.getTime()}-${endDate.getTime()}-${selectedField}`;
   const handleDelete = (id: number) => {
     const performDelete = async () => {
       try {
-        const res = await fetch(`${BASE_URL}/test-results`, {
+        const res = await apiRequest(`/test-results`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id })
@@ -91,148 +114,195 @@ export default function ResultsScreen() {
       ]);
     }
   };
-
   const navigateToEdit = (item: any) => {
     router.push({ pathname: '/results-form', params: { result: JSON.stringify(item) } });
   };
 
-  // --- Filtering Logic ---
-  const filteredResults = useMemo(() => {
-    const s = new Date(startDate).setHours(0, 0, 0, 0);
-    const e = new Date(endDate).setHours(23, 59, 59, 999);
-    return results.filter((r) => {
-      const d = new Date(r.test_date).getTime();
-      return d >= s && d <= e;
-    });
-  }, [results, startDate, endDate]);
+  // --- REFINED CHART CONFIGS ---
+  const mainChartConfig = {
+    backgroundGradientFrom: "#ffffff",
+    backgroundGradientTo: "#ffffff",
+    decimalPlaces: 1,
+    color: (opacity = 1) => `rgba(99, 102, 241, ${opacity})`,
+    labelColor: (opacity = 1) => `rgba(30, 41, 59, ${opacity})`, // Darker labels for readability
+    style: { borderRadius: 16 },
+    propsForDots: { r: "4", strokeWidth: "2", stroke: "#fff" },
+    propsForBackgroundLines: { stroke: "rgba(0,0,0,0.05)", strokeDasharray: "0" }, // Faint lines for scale
+    fillShadowGradientOpacity: 0.1,
+  };
 
-  const getChartDataForField = useCallback((fieldNum: number) => {
-    const dataPoints = filteredResults
-      .filter(r => r[`field_${fieldNum}`] !== null && r[`field_${fieldNum}`] !== undefined)
-      .sort((a, b) => new Date(a.test_date).getTime() - new Date(b.test_date).getTime());
-    if (dataPoints.length < 2) return null;
-    return {
-      labels: dataPoints.slice(-6).map(r => new Date(r.test_date).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })),
-      datasets: [{ data: dataPoints.slice(-6).map(r => parseFloat(r[`field_${fieldNum}`])) }]
-    };
-  }, [filteredResults]);
-
-  const numColumns = windowWidth > 600 ? 3 : 2;
-  const dynamicCardWidth = (windowWidth - (PADDING * 2) - (GAPS * (numColumns - 1))) / numColumns;
-  const chartKey = `${startDate.getTime()}-${endDate.getTime()}-${selectedField}`;
+  const miniChartConfig = {
+    ...mainChartConfig,
+    color: (opacity = 1) => `rgba(99, 102, 241, ${opacity})`,
+    propsForDots: { r: "0" },
+    propsForBackgroundLines: { strokeWidth: 0 }, // Keep minis clean
+  };
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.colors.background }]}>
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <IconButton icon="account-circle-outline" iconColor={theme.colors.primary} size={28} onPress={() => router.push('/profile')} />
-          <IconButton icon={viewMode === 'dashboard' ? "view-list" : "chart-areaspline"} size={28} onPress={() => setViewMode(viewMode === 'dashboard' ? 'list' : 'dashboard')} />
+    <View style={GlobalStyles.container}>
+      <View style={GlobalStyles.header}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <IconButton icon="account-circle-outline" iconColor={COLORS.primary} size={28} onPress={() => router.push('/profile')} />
+          <IconButton icon={viewMode === 'dashboard' ? "view-list" : "chart-areaspline"} iconColor={COLORS.ink} size={24} onPress={() => setViewMode(viewMode === 'dashboard' ? 'list' : 'dashboard')} />
         </View>
-        <IconButton icon="plus-circle-outline" size={28} onPress={() => router.push('/results-form')} />
+        <IconButton icon="plus-circle-outline" iconColor={COLORS.ink} size={28} onPress={() => router.push('/results-form')} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => {setRefreshing(true); loadData();}} />}>
-        <Text variant="headlineMedium" style={styles.title}>{viewMode === 'dashboard' ? 'Analytics' : 'Lab Reports'}</Text>
+      <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={false}>
+        <Text style={styles.pageTitle}>{viewMode === 'dashboard' ? 'Analytics' : 'Reports'}</Text>
+        {/* 2. REFACTORED DATE SELECTOR BAR */}
+        <Surface style={styles.dateSelectorBar} elevation={0}>
 
-        {/* Date Selector */}
-        <Surface style={styles.dateSelectorBar} elevation={1}>
-          <View style={styles.dateControl}><Text variant="labelSmall" style={styles.dateLabel}>START DATE</Text>
-            {Platform.OS === 'web' ? <input type="date" value={formatDateForWeb(startDate)} style={webInputStyle} onChange={(e) => setStartDate(new Date(e.target.value))} /> : <Button mode="outlined" compact onPress={() => setShowStartPicker(true)}>{startDate.toLocaleDateString()}</Button>}
+          {/* Start Date */}
+          <View style={styles.dateControl}>
+            <Text style={GlobalStyles.labelMini}>Start</Text>
+            {Platform.OS === 'web' ? (
+              <input
+                type="date"
+                value={startDate.toISOString().split('T')[0]}
+                style={webInputStyle}
+                onChange={(e) => setStartDate(new Date(e.target.value))}
+              />
+            ) : (
+              <Pressable onPress={() => setShowStartPicker(true)} style={styles.dateInputRow}>
+                <MaterialCommunityIcons name="calendar-month" size={16} color={COLORS.primary} style={styles.dateIcon} />
+                <Text style={styles.dateVal}>{startDate.toLocaleDateString()}</Text>
+              </Pressable>
+            )}
           </View>
-          <IconButton icon="arrow-right" size={20} style={{marginTop: 15}} />
-          <View style={styles.dateControl}><Text variant="labelSmall" style={styles.dateLabel}>END DATE</Text>
-            {Platform.OS === 'web' ? <input type="date" value={formatDateForWeb(endDate)} style={webInputStyle} onChange={(e) => setEndDate(new Date(e.target.value))} /> : <Button mode="outlined" compact onPress={() => setShowEndPicker(true)}>{endDate.toLocaleDateString()}</Button>}
+
+          {/* Middle Spacer Arrow */}
+          <MaterialCommunityIcons
+            name="arrow-right"
+            size={16}
+            color={COLORS.secondary}
+            style={{ marginHorizontal: 12, marginTop: 14 }}
+          />
+
+          {/* End Date */}
+          <View style={styles.dateControl}>
+            <Text style={GlobalStyles.labelMini}>End</Text>
+            {Platform.OS === 'web' ? (
+              <input
+                type="date"
+                value={endDate.toISOString().split('T')[0]}
+                style={webInputStyle}
+                onChange={(e) => setEndDate(new Date(e.target.value))}
+              />
+            ) : (
+              <Pressable onPress={() => setShowEndPicker(true)} style={styles.dateInputRow}>
+                <MaterialCommunityIcons name="calendar-month" size={16} color={COLORS.primary} style={styles.dateIcon} />
+                <Text style={styles.dateVal}>{endDate.toLocaleDateString()}</Text>
+              </Pressable>
+            )}
           </View>
         </Surface>
 
         {viewMode === 'dashboard' ? (
           <View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
-              {configs.map(cfg => (<Chip key={cfg.field_number} selected={selectedField === cfg.field_number} onPress={() => setSelectedField(cfg.field_number)} style={styles.chip}>{cfg.display_name}</Chip>))}
-            </ScrollView>
-            <Surface style={styles.mainChartContainer} elevation={1}>
-              {getChartDataForField(selectedField) ? <LineChart key={`main-${chartKey}`} data={getChartDataForField(selectedField)!} width={windowWidth - 64} height={200} chartConfig={chartConfig(theme)} bezier style={styles.chartStyle} /> : <View style={styles.noData}><Text variant="bodySmall" style={{opacity:0.5}}>No data in range</Text></View>}
+            {/* Main Chart */}
+            <Surface style={styles.mainChartContainer} elevation={0}>
+              <View style={styles.chartHeader}>
+                <Text style={GlobalStyles.labelMini}>Trend Analysis</Text>
+                <Text style={styles.activeLabel}>{configs.find(c => c.field_number === selectedField)?.display_name}</Text>
+              </View>
+              {getChartDataForField(selectedField) ? (
+                <LineChart
+                  key={`main-${chartKey}`}
+                  data={getChartDataForField(selectedField)!}
+                  width={windowWidth - 72} // Adjusted for inner padding
+                  height={220}
+                  chartConfig={mainChartConfig}
+                  bezier
+                  style={styles.chart}
+                  yAxisSuffix={` ${configs.find(c => c.field_number === selectedField)?.units || ''}`}
+                  verticalLabelRotation={0}
+                />
+              ) : <View style={styles.noData}><Text style={styles.noDataText}>Insufficient data in range</Text></View>}
             </Surface>
-            <View style={[styles.miniGrid, { gap: GAPS }]}>
-              {[1, 2, 3, 4].map(num => (
-                <Pressable key={num} onPress={() => setSelectedField(num)} style={{ width: dynamicCardWidth }}>
-                  <Surface style={[styles.miniCard, { width: dynamicCardWidth, borderColor: selectedField === num ? theme.colors.primary : 'transparent', borderWidth: selectedField === num ? 2 : 0 }]} elevation={1}>
-                    <Text variant="labelSmall" numberOfLines={1}>{configs.find(c => c.field_number === num)?.display_name}</Text>
-                    {getChartDataForField(num) ? <View pointerEvents="none"><LineChart key={`mini-${num}-${chartKey}`} data={getChartDataForField(num)!} width={dynamicCardWidth} height={80} withDots={false} chartConfig={{...chartConfig(theme), color: () => theme.colors.secondary}} style={{ marginLeft: -12 }} /></View> : <Text style={{fontSize:9, marginTop:20, opacity:0.3}}>No Data</Text>}
-                  </Surface>
-                </Pressable>
-              ))}
+
+            {/* Quick View Grid */}
+            <Text style={[GlobalStyles.sectionTitle, { marginTop: 24, marginBottom: 16 }]}>Quick Stats</Text>
+            <View style={styles.miniGrid}>
+              {[1, 2, 3, 4].map(num => {
+                const data = getChartDataForField(num);
+                const isSelected = selectedField === num;
+                const config = configs.find(c => c.field_number === num);
+
+                return (
+                  <Pressable
+                    key={num}
+                    onPress={() => setSelectedField(num)}
+                    style={{ width: dynamicCardWidth, marginBottom: 12 }}
+                  >
+                    <View style={[
+                      styles.miniCardWrapper,
+                      isSelected && { borderColor: COLORS.primary, borderWidth: 2 }
+                    ]}>
+                      <Surface style={styles.miniCardInner} elevation={0}>
+                        <Text variant="labelSmall" numberOfLines={1} style={[styles.miniTitle, isSelected && { color: COLORS.primary }]}>
+                          {config?.display_name || `Field ${num}`}
+                        </Text>
+                        {data ? (
+                          <View pointerEvents="none" style={styles.miniChartBox}>
+                            <LineChart
+                              key={`mini-${num}-${chartKey}`}
+                              data={data}
+                              width={dynamicCardWidth - 10}
+                              height={60}
+                              withDots={false}
+                              withHorizontalLabels={false}
+                              withVerticalLabels={false}
+                              chartConfig={miniChartConfig}
+                              style={{ paddingRight: 0, paddingLeft: 0 }}
+                            />
+                          </View>
+                        ) : <Text style={styles.emptyMiniText}>Empty</Text>}
+                      </Surface>
+                    </View>
+                  </Pressable>
+                );
+              })}
             </View>
           </View>
         ) : (
-          /* --- LIST VIEW WITH DELETE BUTTONS --- */
+          /* 5. List View (Mirrored from Appointments) */
           <View style={styles.listContainer}>
             {filteredResults.map(report => (
-              <View key={report.id} style={styles.listItemContainer}>
-                <View style={styles.accordionRow}>
-                  <List.Accordion
-                    title={`Report - ${new Date(report.test_date).toLocaleDateString()}`}
-                    expanded={expandedId === report.id}
-                    onPress={() => setExpandedId(expandedId === report.id ? null : report.id)}
-                    left={p => <Avatar.Icon {...p} icon="flask" size={40} />}
-                    right={() => null}
-                    style={styles.accordion}
-                  >
-                    <View style={[styles.detailsBox, { backgroundColor: theme.colors.surfaceVariant }]}>
-                      {configs.map(cfg => {
-                        const val = report[`field_${cfg.field_number}`];
-                        return val ? (
-                          <View key={cfg.field_number} style={styles.dataRow}>
-                            <Text variant="bodySmall" style={{flex: 1, opacity: 0.7}}>{cfg.display_name}</Text>
-                            <Text variant="bodySmall" style={{fontWeight: 'bold'}}>{val} {cfg.units}</Text>
-                          </View>
-                        ) : null;
-                      })}
-                      
-                      <Divider style={styles.divider} />
-                      
-                      {/* Side-by-side buttons inside expansion */}
-                      <View style={styles.actionButtonRow}>
-                        <Button 
-                          mode="outlined" 
-                          icon="delete" 
-                          onPress={() => handleDelete(report.id)} 
-                          style={{ flex: 1, borderColor: theme.colors.error }}
-                          textColor={theme.colors.error}
-                        >
-                          Delete
-                        </Button>
-                        <Button 
-                          mode="contained-tonal" 
-                          icon="pencil" 
-                          onPress={() => navigateToEdit(report)} 
-                          style={{ flex: 1, marginLeft: 8 }}
-                        >
-                          Edit
-                        </Button>
-                      </View>
-                    </View>
-                  </List.Accordion>
-
-                  {/* Icons in the collapsed row */}
-                  <View style={styles.rightActionGroup}>
-                    <IconButton 
-                      icon="delete-outline" 
-                      size={20} 
-                      iconColor={theme.colors.error} 
-                      onPress={() => handleDelete(report.id)} 
-                    />
-                    <IconButton 
-                      icon="pencil-outline" 
-                      size={20} 
-                      onPress={() => navigateToEdit(report)} 
-                    />
-                    <Pressable onPress={() => setExpandedId(expandedId === report.id ? null : report.id)} style={styles.chevron}>
-                      <MaterialCommunityIcons name={expandedId === report.id ? 'chevron-up' : 'chevron-down'} size={24} color="#bbb" />
-                    </Pressable>
+              <Surface key={report.id} style={styles.reportCard} elevation={0}>
+                <View style={styles.cardHeaderRow}>
+                  <View style={styles.flaskIconBox}>
+                    <MaterialCommunityIcons name="flask-outline" size={22} color={COLORS.primary} />
+                  </View>
+                  <View style={styles.mainInfo}>
+                    <Text style={styles.reportTitle}>Lab Report</Text>
+                    <Text style={styles.reportDate}>{new Date(report.test_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</Text>
+                  </View>
+                  <View style={styles.actionGroup}>
+                    <IconButton icon="pencil-outline" size={18} onPress={() => navigateToEdit(report)} />
+                    <IconButton icon={expandedId === report.id ? "chevron-up" : "chevron-down"} size={22} onPress={() => setExpandedId(expandedId === report.id ? null : report.id)} />
                   </View>
                 </View>
-              </View>
+
+                {expandedId === report.id && (
+                  <View style={styles.expandedDetails}>
+                    <Divider style={styles.divider} />
+                    {configs.map(cfg => {
+                      const val = report[`field_${cfg.field_number}`];
+                      return val ? (
+                        <View key={cfg.field_number} style={styles.dataRow}>
+                          <Text style={styles.dataLabel}>{cfg.display_name}</Text>
+                          <Text style={styles.dataValue}>{val} <Text style={styles.unitText}>{cfg.units}</Text></Text>
+                        </View>
+                      ) : null;
+                    })}
+                    <View style={styles.footerActions}>
+                      <Button mode="text" textColor={COLORS.error} onPress={() => handleDelete(report.id)}>Delete</Button>
+                      <Button mode="contained-tonal" onPress={() => navigateToEdit(report)} style={{ borderRadius: 12 }}>Edit Report</Button>
+                    </View>
+                  </View>
+                )}
+              </Surface>
             ))}
           </View>
         )}
@@ -241,34 +311,84 @@ export default function ResultsScreen() {
   );
 }
 
-const webInputStyle = { padding: '8px', borderRadius: '8px', border: '1px solid #ccc', backgroundColor: 'transparent', width: '100%', textAlign: 'center' as const };
-const chartConfig = (theme: any) => ({ backgroundColor: "#fff", backgroundGradientFrom: "#fff", backgroundGradientTo: "#fff", color: (o=1) => theme.colors.primary, labelColor: () => theme.colors.onSurfaceVariant, decimalPlaces: 1, paddingRight: 0 });
+const webInputStyle = { border: 'none', fontSize: 14, fontWeight: '700', color: COLORS.ink, cursor: 'pointer', background: 'transparent' };
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', paddingTop: Platform.OS === 'ios' ? 50 : 40, paddingHorizontal: 8 },
-  headerLeft: { flexDirection: 'row' },
-  scrollContent: { padding: PADDING, paddingBottom: 100 },
-  title: { fontWeight: 'bold', marginBottom: 15 },
-  dateSelectorBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12, borderRadius: 12, marginBottom: 20, backgroundColor: 'rgba(0,0,0,0.02)' },
-  dateControl: { flex: 1, alignItems: 'center' },
-  dateLabel: { opacity: 0.5, marginBottom: 4, fontWeight: 'bold', fontSize: 10 },
-  chipRow: { flexDirection: 'row', marginBottom: 16 },
-  chip: { marginRight: 8 },
-  mainChartContainer: { padding: 12, borderRadius: 16, alignItems: 'center', marginBottom: 20 },
-  chartStyle: { borderRadius: 16 },
-  miniGrid: { flexDirection: 'row', flexWrap: 'wrap' },
-  miniCard: { padding: 10, borderRadius: 12, height: 130, alignItems: 'center', overflow: 'hidden', justifyContent: 'space-between' },
-  listContainer: { marginTop: 10 },
-  listItemContainer: { marginBottom: 4 },
-  accordionRow: { position: 'relative' },
-  accordion: { backgroundColor: 'transparent', paddingRight: 110 },
-  rightActionGroup: { position: 'absolute', right: 0, top: 0, flexDirection: 'row', alignItems: 'center', height: 72, paddingRight: 8 },
-  chevron: { padding: 8 },
-  detailsBox: { padding: 16, marginLeft: 52, marginRight: 16, borderRadius: 12, marginTop: -8, marginBottom: 16 },
-  dataRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  divider: { marginVertical: 12, opacity: 0.2 },
-  actionButtonRow: { flexDirection: 'row', marginTop: 8 },
-  noData: { height: 200, justifyContent: 'center' },
-  pickerContainer: { backgroundColor: 'white', padding: 10, borderRadius: 12, marginBottom: 20, borderWidth: 1, borderColor: '#eee' }
+  pageTitle: { fontSize: 28, fontWeight: '800', color: COLORS.ink, marginBottom: 20 },
+
+  dateSelectorBar: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: RADIUS.lg,
+    backgroundColor: 'white',
+    marginBottom: 24,
+    ...SHADOWS.soft,
+    alignItems: 'center',
+    justifyContent: 'flex-start' // Changed to keep content aligned together
+  },
+  dateControl: {
+    // Removed fixed alignment to allow natural left-to-right flow
+    minWidth: 100,
+  },
+  dateInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4, // More space under the label
+  },
+  dateVal: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.ink
+  },
+  dateIcon: {
+    marginRight: 8, // Gap between icon and text
+    opacity: 0.9
+  },
+  // Dashboard
+  mainChartContainer: { backgroundColor: 'white', borderRadius: RADIUS.xl, padding: 20, ...SHADOWS.soft },
+  chartHeader: { marginBottom: 15 },
+  activeLabel: { fontSize: 18, fontWeight: '800', color: COLORS.ink },
+  chart: { marginTop: 10, marginLeft: -15 }, // Shifted slightly for Y-axis labels
+  noData: { height: 180, justifyContent: 'center', alignItems: 'center' },
+  noDataText: { color: COLORS.secondary, fontSize: 12 },
+
+  // Mini Grid Fixes
+  miniGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
+  miniCardWrapper: {
+    borderRadius: RADIUS.lg,
+    overflow: 'hidden',
+    backgroundColor: 'white',
+    ...SHADOWS.soft
+  },
+  miniCardInner: {
+    padding: 12,
+    height: 120,
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+  miniChartBox: {
+    marginTop: 10,
+    width: '100%',
+    alignItems: 'center'
+  },
+  miniTitle: { fontSize: 10, fontWeight: '800', color: COLORS.slate, textAlign: 'center', textTransform: 'uppercase' },
+  emptyMiniText: { fontSize: 10, opacity: 0.3, marginTop: 15 },
+  listContainer: { gap: 10 },
+  // List View
+  reportCard: { backgroundColor: 'white', borderRadius: RADIUS.lg, padding: 12, ...SHADOWS.soft },
+  cardHeaderRow: { flexDirection: 'row', alignItems: 'center' },
+  flaskIconBox: { width: 44, height: 44, backgroundColor: COLORS.background, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+  mainInfo: { flex: 1, marginLeft: 16 },
+  reportTitle: { fontSize: 15, fontWeight: '700', color: COLORS.ink },
+  reportDate: { fontSize: 12, color: COLORS.slate },
+  actionGroup: { flexDirection: 'row', alignItems: 'center' },
+
+  expandedDetails: { marginTop: 10 },
+  divider: { marginVertical: 12, backgroundColor: COLORS.background },
+  dataRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+  dataLabel: { fontSize: 13, color: COLORS.slate },
+  dataValue: { fontSize: 13, fontWeight: '700', color: COLORS.ink },
+  unitText: { fontSize: 10, fontWeight: 'normal', color: COLORS.secondary },
+  footerActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 10 }
 });

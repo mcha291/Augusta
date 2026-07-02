@@ -4,7 +4,8 @@ import React, { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Appbar, Button, Chip, Text, TextInput, useTheme } from 'react-native-paper';
 
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
+import { apiRequest } from '@/utils/api';
+
 
 export default function EditAppointmentScreen() {
   const theme = useTheme();
@@ -30,7 +31,7 @@ export default function EditAppointmentScreen() {
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    fetch(`${BASE_URL}/appointment-statuses`).then(res => res.json()).then(setDbStatuses);
+    apiRequest(`/appointment-statuses`).then(res => res.json()).then(setDbStatuses);
   }, []);
 
   const handleUpdate = async () => {
@@ -51,7 +52,7 @@ export default function EditAppointmentScreen() {
         status_id: selectedStatusId
       };
 
-      const response = await fetch(`${BASE_URL}/appointments`, {
+      const response = await apiRequest(`/appointments`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),

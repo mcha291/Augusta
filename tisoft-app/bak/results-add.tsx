@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { ActivityIndicator, Appbar, Button, Text, TextInput, useTheme } from 'react-native-paper';
 
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
+
 
 export default function AddResultScreen() {
   const theme = useTheme();
