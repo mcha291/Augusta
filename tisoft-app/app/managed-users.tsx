@@ -81,12 +81,12 @@ export default function ManagedUsersScreen() {
       {/* Request Access Dialog */}
       <Portal>
         <Dialog visible={requestDialog} onDismiss={() => { setRequestDialog(false); setHandshakeCode(null); }}>
-          <Dialog.Title>Security Clearance Request</Dialog.Title>
+          <Dialog.Title>Requesting Access Authorization</Dialog.Title>
           <Dialog.Content>
             {!handshakeCode ? (
               <>
-                <Text style={{ marginBottom: 15 }}>Enter the Email or Codename of the agent you wish to manage.</Text>
-                <TextInput label="Email / Codename" mode="outlined" value={searchQuery} onChangeText={setSearchQuery} autoCapitalize="none" />
+                <Text style={{ marginBottom: 15 }}>Enter the Email, Phone Number, or Username of the dependent's account you wish to manage.</Text>
+                <TextInput label="Email / Phone# / Username" mode="outlined" value={searchQuery} onChangeText={setSearchQuery} autoCapitalize="none" />
               </>
             ) : (
               <View style={{ alignItems: 'center' }}>

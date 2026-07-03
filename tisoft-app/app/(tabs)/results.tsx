@@ -21,6 +21,7 @@ import {
 } from 'react-native-paper';
 
 // Design System
+import ProfileHeader from '@/components/profile-header';
 import { useAuth } from '@/context/AuthContext';
 import { apiRequest } from '@/utils/api';
 import { COLORS, RADIUS, SHADOWS, SPACING } from '../../constants/theme';
@@ -140,13 +141,15 @@ export default function ResultsScreen() {
 
   return (
     <View style={GlobalStyles.container}>
-      <View style={GlobalStyles.header}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <IconButton icon="account-circle-outline" iconColor={COLORS.primary} size={28} onPress={() => router.push('/profile')} />
-          <IconButton icon={viewMode === 'dashboard' ? "view-list" : "chart-areaspline"} iconColor={COLORS.ink} size={24} onPress={() => setViewMode(viewMode === 'dashboard' ? 'list' : 'dashboard')} />
-        </View>
-        <IconButton icon="plus-circle-outline" iconColor={COLORS.ink} size={28} onPress={() => router.push('/results-form')} />
-      </View>
+      {/* --- 2. THE REFACTORED HEADER --- */}
+      <ProfileHeader
+        rightActions={
+          <View style={{ flexDirection: 'row' }}>
+            <IconButton icon={viewMode === 'dashboard' ? "view-list" : "chart-areaspline"} iconColor={COLORS.ink} size={26} onPress={() => setViewMode(viewMode === 'dashboard' ? 'list' : 'dashboard')} />
+            <IconButton icon="plus-circle-outline" iconColor={COLORS.ink} size={26} onPress={() => router.push('/results-form')} />
+          </View>
+        }
+      />
 
       <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={false}>
         <Text style={styles.pageTitle}>{viewMode === 'dashboard' ? 'Analytics' : 'Reports'}</Text>
@@ -224,46 +227,51 @@ export default function ResultsScreen() {
             {/* Quick View Grid */}
             <Text style={[GlobalStyles.sectionTitle, { marginTop: 24, marginBottom: 16 }]}>Quick Stats</Text>
             <View style={styles.miniGrid}>
-              {[1, 2, 3, 4].map(num => {
-                const data = getChartDataForField(num);
-                const isSelected = selectedField === num;
-                const config = configs.find(c => c.field_number === num);
+              {[1, 2, 3, 4]
+                .filter(num => getChartDataForField(num) !== null)   // <-- hide fields with no data
+                .map(num => {
+                  const data = getChartDataForField(num);
+                  const isSelected = selectedField === num;
+                  const config = configs.find(c => c.field_number === num);
 
-                return (
-                  <Pressable
-                    key={num}
-                    onPress={() => setSelectedField(num)}
-                    style={{ width: dynamicCardWidth, marginBottom: 12 }}
-                  >
-                    <View style={[
-                      styles.miniCardWrapper,
-                      isSelected && { borderColor: COLORS.primary, borderWidth: 2 }
-                    ]}>
-                      <Surface style={styles.miniCardInner} elevation={0}>
-                        <Text variant="labelSmall" numberOfLines={1} style={[styles.miniTitle, isSelected && { color: COLORS.primary }]}>
-                          {config?.display_name || `Field ${num}`}
-                        </Text>
-                        {data ? (
-                          <View pointerEvents="none" style={styles.miniChartBox}>
-                            <LineChart
-                              key={`mini-${num}-${chartKey}`}
-                              data={data}
-                              width={dynamicCardWidth - 10}
-                              height={60}
-                              withDots={false}
-                              withHorizontalLabels={false}
-                              withVerticalLabels={false}
-                              chartConfig={miniChartConfig}
-                              style={{ paddingRight: 0, paddingLeft: 0 }}
-                            />
-                          </View>
-                        ) : <Text style={styles.emptyMiniText}>Empty</Text>}
-                      </Surface>
-                    </View>
-                  </Pressable>
-                );
-              })}
+                  return (
+                    <Pressable
+                      key={num}
+                      onPress={() => setSelectedField(num)}
+                      style={{ width: dynamicCardWidth, marginBottom: 12 }}
+                    >
+                      <View style={[
+                        styles.miniCardWrapper,
+                        isSelected && { borderColor: COLORS.primary, borderWidth: 2 }
+                      ]}>
+                        <Surface style={styles.miniCardInner} elevation={0}>
+                          <Text variant="labelSmall" numberOfLines={1} style={[styles.miniTitle, isSelected && { color: COLORS.primary }]}>
+                            {config?.display_name || `Field ${num}`}
+                          </Text>
+                          {data ? (
+                            <View pointerEvents="none" style={styles.miniChartBox}>
+                              <LineChart
+                                key={`mini-${num}-${chartKey}`}
+                                data={data}
+                                width={dynamicCardWidth - 10}
+                                height={60}
+                                withDots={false}
+                                withHorizontalLabels={false}
+                                withVerticalLabels={false}
+                                chartConfig={miniChartConfig}
+                                style={{ paddingRight: 0, paddingLeft: 0 }}
+                              />
+                            </View>
+                          ) : <Text style={styles.noDataText}>Empty</Text>}
+                        </Surface>
+                      </View>
+                    </Pressable>
+                  );
+                })}
             </View>
+            {[1, 2, 3, 4].every(num => getChartDataForField(num) === null) && (
+              <Text style={styles.noDataText}>No data available for this range</Text>
+            )}
           </View>
         ) : (
           /* 5. List View (Mirrored from Appointments) */

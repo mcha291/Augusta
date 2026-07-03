@@ -25,27 +25,27 @@ import { GeneralOption } from '../constants/interfaces';
 
 // Design System
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
+import { useAuth } from '../context/AuthContext';
 import { GlobalStyles } from '../styles/globalstyles';
 import { apiRequest } from '../utils/api';
 
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
-
 export default function SignupScreen() {
   const router = useRouter();
+  const { user, checkUser } = useAuth();
 
-  const [step, setStep] = useState<'form' | 'confirm'>('form');
+  // 'profile' = Cognito account already exists (id === 0) and just needs an RDS profile
+  const [step, setStep] = useState<'form' | 'confirm' | 'profile'>('form');
   const [loading, setLoading] = useState(false);
   const [fetchingOptions, setFetchingOptions] = useState(true);
 
   const [genders, setGenders] = useState<GeneralOption[]>([]);
   const [conditions, setConditions] = useState<GeneralOption[]>([]);
 
-
   // --- FORM STATE ---
   const [form, setForm] = useState({
     username: '',
     email: '',
-    phone_number: '', // Added back
+    phone_number: '',
     password: '',
     full_name: '',
     role: 'civilian',
@@ -57,18 +57,6 @@ export default function SignupScreen() {
   const [authCode, setAuthCode] = useState('');
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [menus, setMenus] = useState({ gender: false, condition: false });
-
-
-  const [genderVisible, setGenderVisible] = useState(false);
-  const [selectedGender, setSelectedGender] = useState<GeneralOption>();
-
-  const openGendersMenu = () => setGenderVisible(true);
-  const closeGendersMenu = () => setGenderVisible(false);
-
-  const handleSelect = (value: GeneralOption) => {
-    setSelectedGender(value);
-    closeGendersMenu();
-  };
 
   // 1. Helper for alerts
   const notifyUser = (title: string, message: string) => {
@@ -82,6 +70,22 @@ export default function SignupScreen() {
     return phone === "" || regex.test(phone);
   };
 
+  // 3. Detect an already-authenticated-but-incomplete-profile user.
+  // This happens when Cognito signup/login succeeded but RDS profile
+  // creation failed previously — the person is bounced here by _layout.tsx.
+  // We must NOT call signUp() again (the Cognito user already exists),
+  // just prefill what we know and let them finish the profile directly.
+  useEffect(() => {
+    if (user && user.id === 0) {
+      setStep('profile');
+      setForm(prev => ({
+        ...prev,
+        username: user.username || prev.username,
+        email: user.email || prev.email,
+      }));
+    }
+  }, [user]);
+
   useEffect(() => {
     async function loadLookupData() {
       try {
@@ -91,7 +95,6 @@ export default function SignupScreen() {
         ]);
         setGenders(await gRes.json());
         setConditions(await cRes.json());
-        console.log("Lookup data fetched successfully:", { genders, conditions });
       } catch (e) {
         console.error("Lookup error", e);
       } finally {
@@ -101,7 +104,7 @@ export default function SignupScreen() {
     loadLookupData();
   }, []);
 
-  // --- STEP 1: SIGN UP ---
+  // --- STEP 1: SIGN UP (brand new account) ---
   const handleSignUp = async () => {
     const cleanUser = form.username.trim();
     const cleanEmail = form.email.trim().toLowerCase();
@@ -118,7 +121,6 @@ export default function SignupScreen() {
       return;
     }
 
-    // Validate phone format if provided
     if (cleanPhone && !validatePhone(cleanPhone)) {
       notifyUser("Invalid Phone", "Phone number must be in international format (e.g., +61412345678).");
       return;
@@ -133,7 +135,6 @@ export default function SignupScreen() {
           userAttributes: {
             email: cleanEmail,
             name: form.full_name,
-            // Only attach phone if user provided one
             ...(cleanPhone ? { phone_number: cleanPhone } : {}),
           }
         }
@@ -146,7 +147,7 @@ export default function SignupScreen() {
     }
   };
 
-  // --- STEP 2: CONFIRM ---
+  // --- STEP 2: CONFIRM (brand new account) ---
   const handleConfirm = async () => {
     setLoading(true);
     try {
@@ -157,8 +158,7 @@ export default function SignupScreen() {
 
       await signIn({ username: form.username.trim(), password: form.password });
 
-      // Sync to RDS
-      let regres = await apiRequest('/register-profile', {
+      const regres = await apiRequest('/register-profile', {
         method: 'POST',
         body: {
           username: form.username.trim(),
@@ -171,28 +171,69 @@ export default function SignupScreen() {
         }
       });
 
-      console.log(await regres.json())
+      if (!regres.ok) {
+        const errBody = await regres.json().catch(() => ({}));
+        throw new Error(errBody.error || "Profile creation failed on the server.");
+      }
 
       router.replace('/(tabs)');
     } catch (e: any) {
-      //notifyUser("Verification Failed", e.message);
-      
-    console.error("Setup Error:", e.message);
-    
-    // --- THE CLEANUP ---
-    // If we reached this point, the user might be signed into Cognito 
-    // but we have no RDS record. We must log out.
-    try {
-      await signOut(); 
-    } catch (signOutError) {
-      // Ignore errors during signout if already signed out
+      console.error("Setup Error:", e.message);
+
+      // Unlike before, we do NOT sign the user out here. They're now correctly
+      // authenticated in Cognito; _layout.tsx will detect the missing RDS
+      // profile (id === 0) and route them straight back into the 'profile'
+      // step above so they can retry without redoing signup from scratch.
+      notifyUser(
+        "Setup Error",
+        e.message + "\n\nYour account was verified, but profile creation failed. Please try again."
+      );
+
+      await checkUser(); // refresh auth state — this will flip step to 'profile' via the effect above
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // --- STEP 3: COMPLETE PROFILE (Cognito already authenticated, id === 0) ---
+  const handleCompleteProfile = async () => {
+    if (!form.full_name || !form.gender_id) {
+      notifyUser("Required", "Please fill in all mandatory (*) fields.");
+      return;
     }
 
-    notifyUser("Setup Error", e.message + "\n\nYour account was verified but profile creation failed. Please try logging in again to retry profile setup.");
-    
-    // Send them back to Login so they can try to sign in (which should trigger a profile check)
-    router.replace('/login'); 
-    
+    const cleanPhone = form.phone_number.trim();
+    if (cleanPhone && !validatePhone(cleanPhone)) {
+      notifyUser("Invalid Phone", "Phone number must be in international format (e.g., +61412345678).");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const regres = await apiRequest('/register-profile', {
+        method: 'POST',
+        body: {
+          username: form.username.trim(),
+          full_name: form.full_name,
+          birth_date: form.birth_date.toISOString(),
+          gender_id: form.gender_id,
+          condition_id: form.condition_id,
+          phone_number: cleanPhone || null,
+          role: form.role
+        }
+      });
+
+      if (!regres.ok) {
+        const errBody = await regres.json().catch(() => ({}));
+        throw new Error(errBody.error || "Profile creation failed on the server.");
+      }
+
+      await checkUser(); // pulls the new RDS profile in, sets user.id !== 0
+      router.replace('/(tabs)');
+    } catch (e: any) {
+      console.error("Profile completion error:", e.message);
+      notifyUser("Setup Error", e.message || "Failed to complete your profile. Please try again.");
+      // Stay authenticated and on this screen so they can retry — no signOut here.
     } finally {
       setLoading(false);
     }
@@ -236,6 +277,109 @@ export default function SignupScreen() {
       </View>
     );
   }
+
+  if (step === 'profile') {
+    return (
+      <View style={GlobalStyles.container}>
+        <Appbar.Header style={{ backgroundColor: COLORS.background }}>
+          <Appbar.Content title="Complete Your Profile" titleStyle={{ fontWeight: '800' }} />
+        </Appbar.Header>
+
+        <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={true}>
+          <Text style={styles.pageTitle}>Almost there</Text>
+          <Text style={styles.stepSubtitle}>
+            Your account ({form.email || form.username}) is verified. Finish setting up your
+            medical profile to continue.
+          </Text>
+
+          <View style={[styles.fieldContainer, { marginTop: 20 }]}>
+            <Text style={styles.fieldLabel}>Full Name *</Text>
+            <TextInput
+              mode="outlined"
+              value={form.full_name}
+              autoComplete="name"
+              style={styles.input}
+              onChangeText={v => setForm({ ...form, full_name: v })}
+            />
+          </View>
+
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>Phone Number</Text>
+            <TextInput
+              value={form.phone_number}
+              autoComplete="tel"
+              keyboardType="phone-pad"
+              mode="outlined"
+              placeholder="+886912345678"
+              style={styles.input}
+              onChangeText={v => setForm({ ...form, phone_number: v })}
+            />
+            <HelperText type="info">Must start with + and country code</HelperText>
+          </View>
+
+          <View style={styles.sectionHeader}><Text style={styles.sectionHeaderText}>MEDICAL PROFILE</Text></View>
+
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>Gender *</Text>
+            <Menu
+              visible={menus.gender}
+              onDismiss={() => setMenus({ ...menus, gender: false })}
+              anchor={
+                <Button mode="outlined" onPress={() => setMenus({ ...menus, gender: true })} style={styles.pickerBtn} textColor={form.gender_id ? COLORS.ink : COLORS.slate}>
+                  {genders.find(c => c.id === form.gender_id)?.name || "Select..."}
+                </Button>
+              }
+            >
+              {genders.map(g => <Menu.Item key={g.id} onPress={() => { setForm({ ...form, gender_id: g.id }); setMenus({ ...menus, gender: false }); }} title={g.name} />)}
+            </Menu>
+          </View>
+
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>Condition</Text>
+            <Menu
+              visible={menus.condition}
+              onDismiss={() => setMenus({ ...menus, condition: false })}
+              anchor={
+                <Button mode="outlined" onPress={() => setMenus({ ...menus, condition: true })} style={styles.pickerBtn} textColor={form.condition_id ? COLORS.ink : COLORS.slate}>
+                  {conditions.find(c => c.id === form.condition_id)?.name || "Select..."}
+                </Button>
+              }
+            >
+              {conditions.map(c => <Menu.Item key={c.id} onPress={() => { setForm({ ...form, condition_id: c.id }); setMenus({ ...menus, condition: false }); }} title={c.name} />)}
+            </Menu>
+          </View>
+
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>Birth Date *</Text>
+            <Pressable onPress={() => setShowDatePicker(true)}>
+              <Surface style={styles.dateSurface} elevation={0}>
+                <MaterialCommunityIcons name="calendar-account" size={20} color={COLORS.primary} style={{ marginRight: 12 }} />
+                <Text style={styles.dateText}>{form.birth_date.toLocaleDateString()}</Text>
+              </Surface>
+            </Pressable>
+          </View>
+
+          {showDatePicker && (
+            <DateTimePicker value={form.birth_date} mode="date" display="default" onChange={(e, d) => { setShowDatePicker(false); if (d) setForm({ ...form, birth_date: d }); }} />
+          )}
+
+          <Button mode="contained" onPress={handleCompleteProfile} loading={loading} style={styles.saveButton}>
+            Complete Profile
+          </Button>
+
+          <Button
+            mode="text"
+            onPress={async () => { await signOut(); router.replace('/login'); }}
+            textColor={COLORS.slate}
+            style={{ marginTop: 10 }}
+          >
+            Sign Out
+          </Button>
+        </ScrollView>
+      </View>
+    );
+  }
+
   return (
     <View style={GlobalStyles.container}>
       <Appbar.Header style={{ backgroundColor: COLORS.background }}>
@@ -295,7 +439,6 @@ export default function SignupScreen() {
           <HelperText type="info">Must start with + and country code</HelperText>
         </View>
 
-
         <View style={styles.fieldContainer}>
           <Text style={styles.fieldLabel}>Password *</Text>
           <TextInput
@@ -312,7 +455,7 @@ export default function SignupScreen() {
           <Text style={styles.fieldLabel}>Gender *</Text>
           <Menu
             visible={menus.gender}
-            onDismiss={closeGendersMenu}
+            onDismiss={() => setMenus({ ...menus, gender: false })}
             anchor={
               <Button mode="outlined" onPress={() => setMenus({ ...menus, gender: true })} style={styles.pickerBtn} textColor={form.gender_id ? COLORS.ink : COLORS.slate}>
                 {genders.find(c => c.id === form.gender_id)?.name || "Select..."}

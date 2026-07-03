@@ -24,6 +24,8 @@ import {
 } from 'react-native-paper';
 
 // Design System Imports
+import { useAuth } from '@/context/AuthContext';
+import { apiRequest } from '@/utils/api';
 import { COLORS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 
@@ -33,10 +35,10 @@ interface MedicationLibraryItem {
   default_dosage: string;
 }
 
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws/medication-library';
 
 export default function MedicationLibraryScreen() {
   const router = useRouter();
+  const { user, activeDependent } = useAuth();
 
   // Data State
   const [medications, setMedications] = useState<MedicationLibraryItem[]>([]);
@@ -53,7 +55,7 @@ export default function MedicationLibraryScreen() {
 
   const loadLibrary = async () => {
     try {
-      const res = await fetch(BASE_URL);
+      const res = await apiRequest('/medication-library',);
       const data = await res.json();
       setMedications(data);
     } catch (e) {
@@ -74,11 +76,10 @@ export default function MedicationLibraryScreen() {
 
     try {
       setIsSaving(true);
-      const res = await fetch(BASE_URL, {
+      const res = await apiRequest('/medication-library', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName, default_dosage: newDosage })
-      });
+        body: JSON.stringify({ name: newName, default_dosage: newDosage }),
+      }, activeDependent?.id);
 
       if (res.ok) {
         setNewName('');
@@ -95,7 +96,7 @@ export default function MedicationLibraryScreen() {
   };
 
   // Filter logic for search
-  const filteredMeds = medications.filter(med => 
+  const filteredMeds = medications.filter(med =>
     med.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -117,13 +118,13 @@ export default function MedicationLibraryScreen() {
         />
       </View>
 
-      <ScrollView 
+      <ScrollView
         contentContainerStyle={GlobalStyles.scrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadLibrary(); }} tintColor={COLORS.primary} />}
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.sectionInfo}>
-            Select or add medications to the master list. Standardized dosages help ensure accurate tracking.
+          Select or add medications to the master list. Standardized dosages help ensure accurate tracking.
         </Text>
 
         {loading && !refreshing ? (
@@ -131,23 +132,23 @@ export default function MedicationLibraryScreen() {
         ) : (
           <View style={styles.listContainer}>
             {filteredMeds.length === 0 ? (
-                <View style={styles.emptyState}>
-                    <MaterialCommunityIcons name="pill-off" size={48} color={COLORS.secondary} />
-                    <Text style={styles.emptyText}>No medications found.</Text>
-                </View>
+              <View style={styles.emptyState}>
+                <MaterialCommunityIcons name="pill-off" size={48} color={COLORS.secondary} />
+                <Text style={styles.emptyText}>No medications found.</Text>
+              </View>
             ) : (
-                filteredMeds.map((item) => (
-                    <Surface key={item.id} style={styles.medListItem} elevation={0}>
-                      <View style={styles.iconBox}>
-                        <MaterialCommunityIcons name="pill" size={24} color={COLORS.primary} />
-                      </View>
-                      <View style={styles.medInfo}>
-                        <Text style={styles.medName}>{item.name}</Text>
-                        <Text style={styles.medDosages}>Available: {item.default_dosage}</Text>
-                      </View>
-                      <MaterialCommunityIcons name="chevron-right" size={20} color={COLORS.secondary} />
-                    </Surface>
-                ))
+              filteredMeds.map((item) => (
+                <Surface key={item.id} style={styles.medListItem} elevation={0}>
+                  <View style={styles.iconBox}>
+                    <MaterialCommunityIcons name="pill" size={24} color={COLORS.primary} />
+                  </View>
+                  <View style={styles.medInfo}>
+                    <Text style={styles.medName}>{item.name}</Text>
+                    <Text style={styles.medDosages}>Available: {item.default_dosage}</Text>
+                  </View>
+                  <MaterialCommunityIcons name="chevron-right" size={20} color={COLORS.secondary} />
+                </Surface>
+              ))
             )}
           </View>
         )}
@@ -168,33 +169,33 @@ export default function MedicationLibraryScreen() {
           <Dialog.Title style={styles.dialogTitle}>Add New Medicine</Dialog.Title>
           <Dialog.Content>
             <View style={styles.dialogForm}>
-                <TextInput
-                  label="Medicine Name *"
-                  value={newName}
-                  onChangeText={(t) => { setNewName(t); setFormError(false); }}
-                  mode="outlined"
-                  outlineColor={COLORS.background}
-                  style={styles.dialogInput}
-                  error={formError && !newName}
-                />
-                <TextInput
-                  label="Available Dosages *"
-                  placeholder="e.g. 200mg, 400mg"
-                  value={newDosage}
-                  onChangeText={(t) => { setNewDosage(t); setFormError(false); }}
-                  mode="outlined"
-                  outlineColor={COLORS.background}
-                  style={styles.dialogInput}
-                  error={formError && !newDosage}
-                />
-                {formError && <HelperText type="error">Please provide both name and dosages.</HelperText>}
+              <TextInput
+                label="Medicine Name *"
+                value={newName}
+                onChangeText={(t) => { setNewName(t); setFormError(false); }}
+                mode="outlined"
+                outlineColor={COLORS.background}
+                style={styles.dialogInput}
+                error={formError && !newName}
+              />
+              <TextInput
+                label="Available Dosages *"
+                placeholder="e.g. 200mg, 400mg"
+                value={newDosage}
+                onChangeText={(t) => { setNewDosage(t); setFormError(false); }}
+                mode="outlined"
+                outlineColor={COLORS.background}
+                style={styles.dialogInput}
+                error={formError && !newDosage}
+              />
+              {formError && <HelperText type="error">Please provide both name and dosages.</HelperText>}
             </View>
           </Dialog.Content>
           <Dialog.Actions style={styles.dialogActions}>
             <Button onPress={() => setVisible(false)} textColor={COLORS.slate}>Cancel</Button>
-            <Button 
-              onPress={handleAddMedication} 
-              loading={isSaving} 
+            <Button
+              onPress={handleAddMedication}
+              loading={isSaving}
               mode="contained"
               buttonColor={COLORS.primary}
               style={{ borderRadius: 10 }}
@@ -210,7 +211,7 @@ export default function MedicationLibraryScreen() {
 
 const styles = StyleSheet.create({
   headerTitle: { fontWeight: '800', fontSize: 18, color: COLORS.ink },
-  
+
   // Search Section
   searchSection: {
     paddingHorizontal: 24,

@@ -22,6 +22,7 @@ import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 
 import { apiRequest } from '@/utils/api';
+import { scheduleMedicationNotifications } from '@/utils/notification-helper';
 
 
 type MealTiming = 'before' | 'after' | 'none';
@@ -108,6 +109,11 @@ export default function MedicationReminderForm() {
 
         try {
             setIsSaving(true);
+
+            const activeAlarmTimes = alarmTimes
+                .filter((_, i) => activeAlarms[i])
+                .map(d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }));
+
             const payload = {
                 id: initialData?.id,
                 user_id: 1, med_id: selectedMed.id,
@@ -117,14 +123,41 @@ export default function MedicationReminderForm() {
                 at_dinner: mealSelections.dinner.enabled, dinner_timing: mealSelections.dinner.timing,
                 at_bedtime: mealSelections.bedtime.enabled,
                 frequency_days: parseInt(frequencyDays) || 1,
-                alarms: alarmTimes.filter((_, i) => activeAlarms[i]).map(d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }))
+                alarms: activeAlarmTimes,
+                reminder_sound: selectedSound, // <-- was missing entirely before
             };
+
             const res = await apiRequest(`/medication-reminders`, {
                 method: isEdit ? 'PUT' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: payload
             });
-            if (res.ok) router.back();
+
+            if (res.ok) {
+                // Try to get the saved record's id (needed for new reminders so we can
+                // key their scheduled notifications). Falls back to the existing id on edit.
+                let savedId = initialData?.id;
+                try {
+                    const saved = await res.json();
+                    if (saved?.id) savedId = saved.id;
+                } catch {
+                    // no JSON body returned — fine for edits, we already have the id
+                }
+
+                if (savedId && Platform.OS !== 'web') {
+                    await scheduleMedicationNotifications({
+                        id: savedId,
+                        status: 'active',
+                        med_name: selectedMed.name,
+                        selected_dosage: finalDosage,
+                        alarms: activeAlarmTimes,
+                        reminder_sound: selectedSound,
+                        frequency_days: parseInt(frequencyDays) || 1, // <-- added
+                    });
+                }
+
+                router.back();
+            }
         } finally { setIsSaving(false); }
     };
 

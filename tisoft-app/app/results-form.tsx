@@ -3,11 +3,11 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import {
-    Appbar,
-    Button,
-    HelperText,
-    Text,
-    TextInput
+  Appbar,
+  Button,
+  HelperText,
+  Text,
+  TextInput
 } from 'react-native-paper';
 
 // Design System Imports
@@ -17,7 +17,6 @@ import { GlobalStyles } from '../styles/globalstyles';
 
 
 export default function ResultsFormScreen() {
-  const theme = useTheme();
   const router = useRouter();
   const params = useLocalSearchParams();
 
@@ -35,7 +34,7 @@ export default function ResultsFormScreen() {
   const [showPicker, setShowPicker] = useState(false);
 
   useEffect(() => {
-    fetch(`${BASE_URL}/test-config`)
+    apiRequest(`/test-config`)
       .then(res => res.json())
       .then(data => {
         setConfigs(data);
@@ -62,7 +61,7 @@ export default function ResultsFormScreen() {
         }
       });
 
-      const res = await fetch(`${BASE_URL}/test-results`, {
+      const res = await apiRequest(`/test-results`, {
         method: isEdit ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -180,7 +179,7 @@ export default function ResultsFormScreen() {
 }
 
 // Imports for Styles
-import { useTheme } from 'react-native-paper';
+import { apiRequest } from '@/utils/api';
 
 const webInputStyle = {
     padding: '14px',

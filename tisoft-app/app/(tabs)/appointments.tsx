@@ -18,6 +18,7 @@ import {
 } from 'react-native-paper';
 
 // Import your new professional styling system
+import ProfileHeader from '@/components/profile-header';
 import { useAuth } from '@/context/AuthContext';
 import { apiRequest } from '@/utils/api';
 import { COLORS, RADIUS, SHADOWS } from '../../constants/theme';
@@ -53,7 +54,7 @@ export default function AppointmentsScreen() {
     }
   };
 
-  useFocusEffect(useCallback(() => { loadData(); }, []));
+  useFocusEffect(useCallback(() => { loadData(); }, [activeDependent?.id]));
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -91,20 +92,20 @@ export default function AppointmentsScreen() {
   return (
     <View style={GlobalStyles.container}>
       {/* 1. PROFESSIONAL HEADER */}
-      <View style={GlobalStyles.header}>
-        <IconButton
-          icon="account-circle-outline"
-          iconColor={COLORS.primary}
-          size={28}
-          onPress={() => router.push('/profile')}
-        />
-        <IconButton
-          icon="plus-circle-outline"
-          iconColor={COLORS.ink}
-          size={28}
-          onPress={() => router.push('/appointment-form')}
-        />
-      </View>
+
+      {/* --- 2. THE REFACTORED HEADER --- */}
+      <ProfileHeader
+        rightActions={
+          <View style={{ flexDirection: 'row' }}>
+            <IconButton
+              icon="plus-circle-outline"
+              iconColor={COLORS.ink}
+              size={26}
+              onPress={() => router.push('/appointment-form')}
+            />
+          </View>
+        }
+      />
 
       <ScrollView
         contentContainerStyle={GlobalStyles.scrollContent}

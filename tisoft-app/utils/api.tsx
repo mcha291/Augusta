@@ -29,7 +29,8 @@ export const apiRequest = async (
   const safeEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   let url = endpoint.startsWith('http') ? endpoint : `${BASE_URL}${safeEndpoint}`;
   
-  if (targetUserId) {
+  // Only append if targetUserId is a valid number
+  if (typeof targetUserId === 'number') {
     url += (url.includes('?') ? '&' : '?') + `user_id=${targetUserId}`;
   }
 

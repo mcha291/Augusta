@@ -8,7 +8,7 @@ import { MD3LightTheme, Provider as PaperProvider } from 'react-native-paper';
 // Correct imports
 import AlarmOverlay from '../components/alarm-overlay';
 import { AuthProvider, useAuth } from '../context/AuthContext';
-import { setupNotificationChannels } from '../utils/notification-helper';
+import { rescheduleNextOccurrence, setupNotificationChannels } from '../utils/notification-helper';
 
 // --- 1. CONFIGURATION ---
 LogBox.ignoreLogs(['Unknown event handler property', 'onResponderTerminate', 'Invalid DOM property', 'transform-origin']);
@@ -35,18 +35,16 @@ export default function RootLayout() {
   useEffect(() => {
     async function initNotifications() {
       if (Platform.OS === 'web') return;
-      
+
       // Defensive Permission Check for Expo 52
       const permission = await Notifications.requestPermissionsAsync() as any;
       const isGranted = permission.status === 'granted' || permission === 'granted';
-      
+
       if (isGranted) {
         await setupNotificationChannels();
       }
     }
     initNotifications();
-
-    // Foreground Listener (App is open)
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
       const data = notification.request.content.data as any;
       if (data?.medName) {
@@ -56,10 +54,10 @@ export default function RootLayout() {
           dose: data.dosage || '',
           soundKey: data.soundKey || 'default'
         });
+        if (Platform.OS !== 'web') rescheduleNextOccurrence(data);
       }
     });
 
-    // Background/Tap Listener (User taps notification)
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
       const data = response.notification.request.content.data as any;
       if (data?.medName) {
@@ -69,6 +67,7 @@ export default function RootLayout() {
           dose: data.dosage || '',
           soundKey: data.soundKey || 'default'
         });
+        if (Platform.OS !== 'web') rescheduleNextOccurrence(data);
       }
     });
 
@@ -94,8 +93,6 @@ export default function RootLayout() {
     </PaperProvider>
   );
 }
-
-// --- 3. THE LOGIC & NAVIGATION LEVEL ---
 function AuthProtection({ alarmData, setAlarmData }: any) {
   const { user, isLoading } = useAuth();
   const segments = useSegments();
@@ -105,10 +102,15 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
     if (isLoading) return;
 
     const inAuthGroup = segments[0] === 'login' || segments[0] === 'signup';
+    const hasIncompleteProfile = user && user.id === 0;
 
     if (!user && !inAuthGroup) {
       router.replace('/login');
-    } 
+    }
+    else if (hasIncompleteProfile && segments[0] !== 'signup') {
+      // Cognito-authenticated but no RDS profile yet — send them to finish signup
+      router.replace('/signup');
+    }
     else if (user && user.id !== 0 && inAuthGroup) {
       router.replace('/(tabs)');
     }
@@ -128,11 +130,6 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
         <Stack.Screen name="login" />
         <Stack.Screen name="signup" />
 
-        {/* 
-            Conditional Mapping: The (tabs) folder ONLY exists in the 
-            navigation tree if a user is logged in. This prevents 
-            index.tsx from running its fetch calls prematurely.
-        */}
         {user && user.id !== 0 ? (
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         ) : null}
@@ -145,10 +142,6 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
         <Stack.Screen name="managed-users" />
       </Stack>
 
-      {/* 
-          Global Alarm Component: Lives here so it can appear 
-          over ANY screen in the app.
-      */}
       <AlarmOverlay
         isVisible={alarmData.visible}
         medName={alarmData.med}

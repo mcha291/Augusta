@@ -24,6 +24,8 @@ interface AuthContextType {
   login: (userData: User) => void;
   logout: () => void;
   checkUser: () => Promise<void>; // Added
+  dependents: User[];
+  loadDependents: () => Promise<void>;
   setActiveDependent: (user: User | null) => void;
 }
 
@@ -34,7 +36,16 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [token, setToken] = useState<string | null>(null);
   const [activeDependent, setActiveDependent] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  // Inside AuthProvider component
+  const [dependents, setDependents] = useState<User[]>([]);
 
+  const loadDependents = async () => {
+    try {
+      const res = await apiRequest('/my-dependents');
+      const data = await res.json();
+      setDependents(Array.isArray(data) ? data : []);
+    } catch (e) { console.error(e); }
+  };
 
   const checkUser = async () => {
     // 1. Keep isLoading = true throughout the whole process
@@ -49,13 +60,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         setToken(null);
         return;
       }
-      const jwtString = idToken.toString();      
+      const jwtString = idToken.toString();
       console.log("Cognito session found. JWT:", jwtString);
       setToken(jwtString);
 
       // 2. Instead of setting the user twice, fetch the RDS data first
       // We use a temporary variable so the UI doesn't see the "basic" user
-      const res = await apiRequest('/me');
+      const res = await apiRequest('/me');      
+      loadDependents();
 
       if (res.ok) {
         const rdsProfile = await res.json();
@@ -81,37 +93,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setToken(null);
     } finally {
       // 3. ONLY NOW tell the app we are done loading
-      setIsLoading(false);
-    }
-  };
-
-  // Function to sync Cognito Session with our App State
-  const checkUser2 = async () => {
-    try {
-      const session = await fetchAuthSession();
-      const { tokens } = session;
-
-      if (tokens?.idToken) {
-        // 1. Get the JWT string to send to API Gateway
-        setToken(tokens.idToken.toString());
-
-        // 2. Map Cognito claims to our internal User object
-        const claims = tokens.idToken.payload;
-        setUser({
-          id: 0, // ID is handled by RDS, sub is the unique key
-          username: (claims['preferred_username'] as string) || (claims['email'] as string),
-          email: claims.email as string,
-          role: (claims['custom:role'] as string) || 'civilian',
-          full_name: claims.name as string,
-        });
-      } else {
-        setUser(null);
-        setToken(null);
-      }
-    } catch (e) {
-      setUser(null);
-      setToken(null);
-    } finally {
       setIsLoading(false);
     }
   };
@@ -146,6 +127,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         login,
         logout,
         checkUser,
+        dependents,
+        loadDependents,
         setActiveDependent
       }}
     >
