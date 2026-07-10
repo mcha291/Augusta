@@ -48,6 +48,10 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
 
 let pool; // lazily created so pure helpers can be imported without env/DB
 
+// Test seam: lets index.test.mjs substitute a scripted pool so the handler
+// can be exercised functionally without a database connection.
+export function _setPoolForTests(fakePool) { pool = fakePool; }
+
 function getPool() {
   if (!pool) {
     pool = new pg.Pool({

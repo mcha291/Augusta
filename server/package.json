@@ -6,5 +6,8 @@
   "description": "Admin API Lambda for the Tish dashboard. Deploy: npm install --omit=dev, zip index.mjs + node_modules + package.json, upload to Lambda (Node.js 22, handler index.handler). See ../AWS-SETUP.md.",
   "dependencies": {
     "pg": "^8.16.0"
+  },
+  "scripts": {
+    "test": "node --test"
   }
 }
