@@ -97,6 +97,15 @@ git push -u origin main
 2. Database page: pick `genders` (small table) → rows appear, read-only.
 3. Translations page: change one English value → Save → follow the commit link → confirm the **Translations** GitHub Action runs and publishes the EAS Update.
 
+## 8. Auto-deploy the Lambda on push (optional but recommended)
+
+Once the Lambda exists (step 2), pushes to `main` touching `server/**` can
+deploy it automatically via `.github/workflows/deploy-admin-api.yml` (already
+in this repo). One-time IAM/OIDC setup and the GitHub variables to set
+(`AWS_DEPLOY_ROLE_ARN`, `AWS_REGION`, `ADMIN_FUNCTION_NAME`) are documented in
+the app repo at `tish-app/backend/DEPLOY.md` — one deploy role covers both
+this Lambda and the app backend's.
+
 ## Security notes / future improvements
 
 - Move `DB_PASSWORD` and `GITHUB_TOKEN` from Lambda env vars to **Secrets Manager** and read them at cold start.
