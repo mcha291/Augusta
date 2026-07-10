@@ -1,0 +1,6 @@
+# The dashboard is its own git repository (deployed separately via Amplify
+# Hosting) — never track it from this repo.
+dashboard/
+
+# Claude Code local config
+.claude/

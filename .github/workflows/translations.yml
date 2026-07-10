@@ -1,0 +1,36 @@
+name: Translations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tish-app/locales/**'
+
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tish-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tish-app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate translations
+        run: npm run validate-translations
+
+      - name: Publish EAS Update
+        # Only reached if validation above passed — this is the deploy gate.
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          npx eas-cli update --branch production --message "Translations: $COMMIT_MESSAGE" --non-interactive
