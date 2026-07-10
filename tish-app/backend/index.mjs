@@ -4,7 +4,7 @@ const { Pool } = pg;
 // Credentials come exclusively from Lambda environment variables — never
 // hardcode fallbacks here: this file is committed to a repo with a remote,
 // so anything written below is effectively published.
-const pool = new Pool({
+let pool = new Pool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
@@ -12,6 +12,10 @@ const pool = new Pool({
     port: 5432,
     ssl: { rejectUnauthorized: false }
 });
+
+// Test seam: lets index.test.mjs substitute a scripted pool so the handler
+// can be exercised functionally without a database connection.
+export function _setPoolForTests(fakePool) { pool = fakePool; }
 
 const SCHEMA_SQL = `
     DROP TABLE IF EXISTS user_relationships CASCADE;

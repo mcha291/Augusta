@@ -6,5 +6,8 @@
   "description": "App-facing API Lambda. Auto-deployed by .github/workflows/deploy-backend.yml on push to main; see DEPLOY.md for the one-time IAM setup.",
   "dependencies": {
     "pg": "^8.16.0"
+  },
+  "scripts": {
+    "test": "node --test"
   }
 }
