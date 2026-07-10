@@ -39,6 +39,7 @@ Recommended region for all new resources: the region your RDS instance lives in
    | `DB_NAME` | `postgres` |
    | `GITHUB_TOKEN` | the PAT from step 4 |
    | `GITHUB_REPO` | e.g. `mcha291/Augusta` (owner/repo of the **app** repo) |
+   | `GITHUB_LOCALES_DIR` | optional; path of the locales dir inside that repo (default `tish-app/locales`) |
    | `ALLOWED_ORIGIN` | your Amplify URL (use `http://localhost:5173` until step 6 is done) |
 5. Configuration → General → timeout **15s** (GitHub round-trips), memory 256 MB.
 

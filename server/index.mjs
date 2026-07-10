@@ -35,9 +35,13 @@ export const ALLOWED_TABLES = [
   'appointment_statuses',
 ];
 
+// Path of the locales directory *within the GitHub repo*. The app repo is a
+// monorepo with the Expo app under tish-app/, so the default reflects that.
+const LOCALES_DIR = (process.env.GITHUB_LOCALES_DIR || 'tish-app/locales').replace(/\/+$/, '');
+
 const LOCALE_FILES = {
-  en: 'locales/en.json',
-  'zh-Hant': 'locales/zh-Hant.json',
+  en: `${LOCALES_DIR}/en.json`,
+  'zh-Hant': `${LOCALES_DIR}/zh-Hant.json`,
 };
 
 const GITHUB_BRANCH = process.env.GITHUB_BRANCH || 'main';
