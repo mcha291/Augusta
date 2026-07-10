@@ -1,0 +1,48 @@
+name: Deploy backend Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tish-app/backend/**'
+
+# OIDC: the workflow exchanges a GitHub-signed token for short-lived AWS
+# credentials by assuming an IAM role — no long-lived AWS keys are stored in
+# GitHub. One-time setup: tish-app/backend/DEPLOY.md
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tish-app/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tish-app/backend/package-lock.json
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Package function
+        run: zip -r function.zip index.mjs package.json node_modules
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Update Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name "${{ vars.BACKEND_FUNCTION_NAME }}" \
+            --zip-file fileb://function.zip \
+            --publish
