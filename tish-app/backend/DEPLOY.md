@@ -87,6 +87,20 @@ Name it e.g. `github-lambda-deploy` and note the **role ARN**.
 | `AWS_REGION` | region of the admin Lambda |
 | `ADMIN_FUNCTION_NAME` | the admin Lambda's function name (e.g. `tish-admin-api`) |
 
+## Tests
+
+Functional tests (`index.test.mjs`) run automatically in three places:
+
+- **Locally on every commit** touching `tish-app/backend/**` — via the
+  committed pre-commit hook. Enable once per clone:
+  ```
+  git config core.hooksPath .githooks
+  ```
+- **On every push/PR** touching the backend — `.github/workflows/test.yml`.
+- **Before every deploy** — the deploy workflow refuses to ship a failing handler.
+
+Run manually with `npm test` in this folder.
+
 ## Notes
 
 - The workflows **update** existing functions; they don't create them. Create

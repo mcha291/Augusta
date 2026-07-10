@@ -1,0 +1,12 @@
+#!/bin/sh
+# Committed pre-commit hook (enable once per clone):
+#   git config core.hooksPath .githooks
+# Runs the backend Lambda's functional tests when backend files are staged.
+
+if git diff --cached --name-only | grep -q '^tish-app/backend/'; then
+  echo "pre-commit: backend files staged - running Lambda tests..."
+  npm --prefix tish-app/backend test || {
+    echo "pre-commit: tests failed - commit aborted."
+    exit 1
+  }
+fi

@@ -1,0 +1,32 @@
+name: Tests
+
+# Runs on every push to any branch (and PRs) that touches the backend Lambda.
+# The deploy workflow has its own gate; this one gives feedback on branches
+# and PRs without deploying anything.
+on:
+  push:
+    paths:
+      - 'tish-app/backend/**'
+      - '.github/workflows/test.yml'
+  pull_request:
+    paths:
+      - 'tish-app/backend/**'
+
+jobs:
+  backend-lambda:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tish-app/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tish-app/backend/package-lock.json
+
+      - run: npm ci --omit=dev
+
+      - run: npm test
