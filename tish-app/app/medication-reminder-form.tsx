@@ -1,9 +1,9 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Audio } from 'expo-av';
+import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import {
@@ -41,14 +41,17 @@ export default function MedicationReminderForm() {
     const { t } = useTranslation();
     const { activeDependent } = useAuth();
     const [selectedSound, setSelectedSound] = useState('default');
-    const [previewSound, setPreviewSound] = useState<Audio.Sound | null>(null);
+    const previewPlayer = useRef<AudioPlayer | null>(null);
+
+    // Free the preview player when leaving the screen
+    useEffect(() => () => { previewPlayer.current?.remove(); }, []);
 
     // Play a preview when the user taps a sound chip
-    const playPreview = async (soundKey: string) => {
-        if (previewSound) await previewSound.unloadAsync();
-        const { sound } = await Audio.Sound.createAsync(SOUND_MAP[soundKey]);
-        setPreviewSound(sound);
-        await sound.playAsync();
+    const playPreview = (soundKey: string) => {
+        previewPlayer.current?.remove();
+        const player = createAudioPlayer(SOUND_MAP[soundKey]);
+        previewPlayer.current = player;
+        player.play();
         setSelectedSound(soundKey);
     };
     const theme = useTheme();

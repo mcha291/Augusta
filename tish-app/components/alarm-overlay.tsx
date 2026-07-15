@@ -1,8 +1,8 @@
 import { SOUND_MAP } from '@/constants/sounds';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
+import { useAudioPlayer } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal, StyleSheet, View } from 'react-native';
 import { Button, Surface, Text } from 'react-native-paper';
@@ -17,38 +17,25 @@ interface AlarmOverlayProps {
 
 export default function AlarmOverlay({ isVisible, medName, dosage, soundKey, onDismiss }: AlarmOverlayProps) {
   const { t } = useTranslation();
-  const [sound, setSound] = useState<Audio.Sound | null>(null);
-
+  // The hook owns the player lifecycle (auto-freed on unmount); it re-creates
+  // when the source changes, so keying it off the chosen sound is enough.
+  const player = useAudioPlayer(SOUND_MAP[soundKey] || SOUND_MAP['default']);
 
   useEffect(() => {
-    if (isVisible) playAlarm();
-    else stopAlarm();
-  }, [isVisible, soundKey]);
-
-  async function playAlarm() {
-    // Determine which sound to play
-    const soundFile = SOUND_MAP[soundKey] || SOUND_MAP['default'];
-
-    const { sound } = await Audio.Sound.createAsync(
-      soundFile,
-      { isLooping: true, shouldPlay: true }
-    );
-    setSound(sound);
-  }
+    if (isVisible) {
+      player.loop = true;
+      player.seekTo(0);
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [isVisible, soundKey, player]);
 
   function startVibration() {
     const interval = setInterval(() => {
       if (!isVisible) clearInterval(interval);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     }, 1000);
-  }
-
-  async function stopAlarm() {
-    if (sound) {
-      await sound.stopAsync();
-      await sound.unloadAsync();
-      setSound(null);
-    }
   }
 
   return (
