@@ -4,3 +4,14 @@ dashboard/
 
 # Claude Code local config
 .claude/
+
+# Credentials / signing secrets — never commit these anywhere in the tree
+*.p8
+*.p12
+*.key
+*.keystore
+*.jks
+*.mobileprovision
+.env
+.env.*
+!.env.example

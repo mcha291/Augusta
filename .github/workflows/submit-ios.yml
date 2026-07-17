@@ -1,0 +1,40 @@
+name: iOS build + TestFlight
+
+# Deliberate trigger only — native iOS builds are slow and consume EAS build
+# minutes, so this is NOT on every push. Run it from the Actions tab
+# (workflow_dispatch) or by pushing a version tag like v1.2.0.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-submit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tish-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tish-app/package-lock.json
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Builds on EAS's cloud (this runner only triggers it), then submits the
+      # resulting .ipa to App Store Connect / TestFlight using the eas.json
+      # submit config + the ASC API key stored in EAS credentials. No Apple
+      # secrets live in this repo or in GitHub.
+      - name: EAS build + auto-submit to TestFlight
+        run: eas build --platform ios --profile production --non-interactive --auto-submit
