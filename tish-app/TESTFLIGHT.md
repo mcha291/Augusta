@@ -1,8 +1,14 @@
 # Shipping to TestFlight
 
 How the Tish app reaches iOS beta testers. Two ways to submit: manually with
-`eas submit` from your machine (Windows-friendly), or automatically via the
-`iOS build + TestFlight` GitHub Action. Both use the same config below.
+`npx eas-cli submit` from your machine (Windows-friendly), or automatically via
+the `iOS build + TestFlight` GitHub Action. Both use the same config below.
+
+> **Running the CLI:** `eas-cli` isn't installed globally here, so use
+> **`npx eas-cli …`** (note: the package is `eas-cli`, not `eas` — `npx eas`
+> fails). To type plain `eas` instead, install it once with
+> `npm install -g eas-cli`. Inside GitHub Actions the bare `eas` command *is*
+> correct, because the Expo action installs the CLI globally on the runner.
 
 ## One-time setup
 
@@ -43,12 +49,16 @@ Membership.) These are identifiers, not secrets — safe to commit.
 
 ```
 cd tish-app
-eas credentials
+npx eas-cli credentials
 ```
 Choose **iOS → production → App Store Connect API Key → Set up a new key**, and
 point it at the `.p8` from step 2 (it'll ask for the Key ID and Issuer ID).
-EAS stores it server-side. After this, both `eas submit` and the CI workflow
-authenticate to Apple automatically — you never reference the `.p8` again.
+EAS stores it server-side. After this, both `npx eas-cli submit` and the CI
+workflow authenticate to Apple automatically — you never reference the `.p8`
+again.
+
+(If you haven't authenticated this machine to Expo yet, run
+`npx eas-cli login` first.)
 
 ## Submitting
 
@@ -57,16 +67,16 @@ authenticate to Apple automatically — you never reference the `.p8` again.
 You already have a build. Submit the latest EAS build:
 ```
 cd tish-app
-eas submit --platform ios --profile production
+npx eas-cli submit --platform ios --profile production
 ```
 …or submit a specific local `.ipa`:
 ```
-eas submit --platform ios --path /path/to/app.ipa
+npx eas-cli submit --platform ios --path /path/to/app.ipa
 ```
 
 To build and submit in one step next time:
 ```
-eas build --platform ios --profile production --auto-submit
+npx eas-cli build --platform ios --profile production --auto-submit
 ```
 
 ### Option B — automatically via GitHub Actions
