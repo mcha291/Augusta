@@ -1,4 +1,3 @@
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useEffect, useState } from 'react';
@@ -14,6 +13,7 @@ import {
   TextInput
 } from 'react-native-paper';
 
+import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 
@@ -128,7 +128,7 @@ export default function AppointmentFormScreen() {
         <ActiveProfileBadge />
       </Appbar.Header>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         
         {/* Each Field is now wrapped in a Container for uniform spacing */}
         <View style={styles.fieldContainer}>
@@ -157,12 +157,16 @@ export default function AppointmentFormScreen() {
                     />
                 </View>
             </Pressable>
-            <HelperText type="info" visible={false} style={styles.helper} children={undefined} />
+            <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
         </View>
 
-        {showPicker && (
-          <DateTimePicker value={date} mode="date" display="default" onChange={(e, d) => { setShowPicker(false); if(d) setDate(d); }} />
-        )}
+        <PlatformDatePicker
+          visible={showPicker}
+          value={date}
+          mode="date"
+          onConfirm={d => { setDate(d); setShowPicker(false); }}
+          onDismiss={() => setShowPicker(false)}
+        />
 
         <View style={styles.fieldContainer}>
             <TextInput
@@ -226,7 +230,7 @@ export default function AppointmentFormScreen() {
                 disabled={isSaving}
                 right={micIcon('details', details, setDetails)}
             />
-            <HelperText type="info" visible={false} style={styles.helper} children={undefined} />
+            <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
         </View>
 
         <View style={styles.statusSection}>

@@ -41,9 +41,14 @@ export default function LoginScreen() {
         // 3. Move to the main app
         router.replace('/(tabs)');
       } else if (nextStep.signInStep === 'CONFIRM_SIGN_UP') {
-        // Handle users who signed up but haven't verified their email code
-        Alert.alert(t('login.verifyAccountTitle'), t('login.verifyAccountMessage'));
-        router.push('/signup');
+        // Signed up but never verified. Hand the username across so signup
+        // opens on the confirm step — sending them to a blank registration
+        // form left them stuck, since re-registering hits "already exists".
+        notifyUser(t('login.verifyAccountTitle'), t('login.verifyAccountMessage'));
+        router.push({
+          pathname: '/signup',
+          params: { username: identifier.trim(), pendingConfirm: '1' },
+        });
       }
     } catch (error: any) {
       console.error("Login Error:", error);
@@ -62,7 +67,7 @@ export default function LoginScreen() {
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <View style={styles.brandSection}>
         <View style={styles.logoCircle}>
           <Image 

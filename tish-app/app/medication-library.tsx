@@ -127,6 +127,7 @@ export default function MedicationLibraryScreen() {
         contentContainerStyle={GlobalStyles.scrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadLibrary(); }} tintColor={COLORS.primary} />}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.sectionInfo}>
           {t('medicationLibrary.info')}

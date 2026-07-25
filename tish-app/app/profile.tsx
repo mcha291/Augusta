@@ -99,7 +99,7 @@ export default function ProfileScreen() {
         <ActiveProfileBadge />
       </Appbar.Header>
 
-      <ScrollView contentContainerStyle={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         
         {/* Profile Header */}
         <View style={styles.header}>

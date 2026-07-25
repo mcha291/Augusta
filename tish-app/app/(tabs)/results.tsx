@@ -153,7 +153,7 @@ export default function ResultsScreen() {
         }
       />
 
-      <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={false}>
+      <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         <Text style={styles.pageTitle}>{viewMode === 'dashboard' ? t('results.titleDashboard') : t('results.titleList')}</Text>
         {/* 2. REFACTORED DATE SELECTOR BAR */}
         <Surface style={styles.dateSelectorBar} elevation={0}>

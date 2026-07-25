@@ -103,6 +103,7 @@ export default function HomeScreen() {
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={GlobalStyles.scrollContent}
+        keyboardShouldPersistTaps="handled"
       >
 
         {/* 2. HERO ACTION CARD (Check-in) */}

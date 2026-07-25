@@ -1,4 +1,3 @@
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useEffect, useState } from 'react';
@@ -15,6 +14,7 @@ import {
 // Design System Imports
 import ActiveProfileBadge from '@/components/active-profile-badge';
 import { useAuth } from '@/context/AuthContext';
+import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 
@@ -93,9 +93,10 @@ export default function ResultsFormScreen() {
         <ActiveProfileBadge />
       </Appbar.Header>
 
-      <ScrollView 
+      <ScrollView
         contentContainerStyle={GlobalStyles.scrollContent}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         
         {/* --- DATE SELECTION SECTION --- */}
@@ -129,20 +130,16 @@ export default function ResultsFormScreen() {
               </Pressable>
             )}
             {/* Standardized Helper height for vertical rhythm */}
-            <HelperText type="info" visible={false} style={styles.helper} children={undefined} />
+            <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
         </View>
 
-        {showPicker && Platform.OS !== 'web' && (
-          <DateTimePicker
-            value={date}
-            mode="date"
-            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-            onChange={(e, d) => {
-              if (Platform.OS === 'android') setShowPicker(false);
-              if (d) setDate(d);
-            }}
-          />
-        )}
+        <PlatformDatePicker
+          visible={showPicker}
+          value={date}
+          mode="date"
+          onConfirm={d => { setDate(d); setShowPicker(false); }}
+          onDismiss={() => setShowPicker(false)}
+        />
 
         {/* --- NUMERIC RESULTS SECTION --- */}
         <View style={[styles.sectionHeader, { marginTop: 8 }]}>
@@ -163,7 +160,7 @@ export default function ResultsFormScreen() {
               disabled={saving}
             />
             {/* Empty space to keep alignment same as screens with validation */}
-            <HelperText type="info" visible={false} style={styles.helper} children={undefined} />
+            <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
           </View>
         ))}
 

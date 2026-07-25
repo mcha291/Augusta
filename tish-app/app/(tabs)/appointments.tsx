@@ -122,6 +122,7 @@ export default function AppointmentsScreen() {
         contentContainerStyle={GlobalStyles.scrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.pageTitle}>{t('appointments.title')}</Text>
 

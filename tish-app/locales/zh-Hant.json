@@ -21,7 +21,8 @@
     "no": "否",
     "loading": "載入中...",
     "notProvided": "未提供",
-    "selectPlaceholder": "請選擇..."
+    "selectPlaceholder": "請選擇...",
+    "done": "完成"
   },
   "home": {
     "goodMorning": "早安，",
@@ -77,6 +78,7 @@
     "deleteConfirmMessage": "是否移除此提醒？",
     "deleteConfirmWeb": "刪除？",
     "updateStatusFailed": "更新提醒狀態失敗，請再試一次。",
+    "frequencyEvery_one": "每 {{count}} 天",
     "frequencyEvery_other": "每 {{count}} 天",
     "alarmDefaultLabel": "鬧鐘 {{number}}"
   },
@@ -204,9 +206,26 @@
   "signup": {
     "confirmIdentity": "確認身分",
     "verificationCodeSentTo": "驗證碼已寄送至：{{email}}",
+    "codeSentEmail": "驗證碼已以電子郵件寄送至 {{destination}}",
+    "codeSentSms": "驗證碼已以簡訊傳送至 {{destination}}",
+    "checkSpamFolder": "郵件可能需要一分鐘才會送達。若沒有收到，請檢查垃圾郵件匣。",
+    "verifyViaLabel": "驗證碼傳送方式",
+    "verifyViaSms": "簡訊",
+    "verifyViaEmail": "電子郵件",
+    "verifyViaSmsHint": "我們將以簡訊傳送驗證碼至上方號碼。",
+    "verifyViaEmailHint": "改以電子郵件寄送驗證碼。您的號碼仍會儲存於個人資料中。",
     "codePlaceholder": "驗證碼",
     "activateAccount": "啟用帳號",
     "resendCode": "重新寄送驗證碼",
+    "backToSignIn": "返回登入",
+    "enterCode": "請輸入您收到的驗證碼。",
+    "codeMismatch": "驗證碼不正確，請確認後再試一次。",
+    "codeExpired": "驗證碼已過期。請點選「重新寄送驗證碼」取得新的驗證碼。",
+    "tooManyAttempts": "嘗試次數過多，請稍候幾分鐘後再試。",
+    "alreadyConfirmed": "此帳號已完成驗證，請直接登入。",
+    "userNotFound": "找不到此帳號，請重新註冊。",
+    "verifiedTitle": "帳號已驗證",
+    "verifiedPleaseSignIn": "您的帳號已通過驗證。請登入以完成個人資料設定。",
     "completeYourProfile": "完成您的個人資料",
     "almostThere": "即將完成",
     "verifiedFinishSetup": "您的帳號（{{identifier}}）已通過驗證。請完成醫療檔案設定以繼續使用。",
@@ -224,7 +243,8 @@
     "emailLabel": "電子郵件地址 *",
     "emailPlaceholder": "name@gmail.com",
     "phoneLabel": "電話號碼 *",
-    "phonePlaceholder": "+886...",
+    "phonePlaceholder": "886912345678",
+    "phoneHint": "請以國碼開頭 — 台灣為 886，澳洲為 61。",
     "passwordLabel": "密碼 *",
     "register": "註冊",
     "requiredTitle": "必填",
@@ -237,7 +257,7 @@
     "fieldAlreadyRegistered": "此{{field}}已被註冊。請直接登入或使用其他資料。",
     "accessDeniedTitle": "拒絕存取",
     "setupErrorTitle": "設定錯誤",
-    "verifiedButProfileFailed": "您的帳號已通過驗證，但個人資料建立失敗。請重新登入以再次嘗試設定個人資料。",
+    "verifiedButProfileFailed": "您的帳號已通過驗證，但個人資料建立失敗。您仍在登入狀態，請確認下方資料後再試一次。",
     "profileCreationFailed": "伺服器端個人資料建立失敗。",
     "completeProfileFailed": "完成個人資料失敗，請再試一次。",
     "resentTitle": "已重新寄送",
@@ -248,7 +268,7 @@
     "emailInvalid": "電子郵件地址格式不正確。",
     "phoneTaken": "此電話號碼已與其他帳號綁定。",
     "phoneAvailable": "電話號碼可以使用。",
-    "phoneInvalid": "號碼無效，請確認包含國碼，例如 +886943210123"
+    "phoneInvalid": "號碼無效，請確認包含國碼，例如 886943210123"
   },
   "notifications": {
     "doseDueTitle": "🚨 緊急提醒：該服藥了",

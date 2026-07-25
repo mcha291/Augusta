@@ -1,5 +1,4 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
@@ -20,6 +19,7 @@ import {
 import { SOUND_MAP, SOUND_OPTIONS } from '../constants/sounds';
 
 // Design System Imports
+import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 
@@ -186,7 +186,7 @@ export default function MedicationReminderForm() {
                 <ActiveProfileBadge />
             </Appbar.Header>
 
-            <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={false}>
+            <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
                 {/* 1. MEDICATION */}
                 <View style={styles.fieldContainer}>
@@ -328,22 +328,27 @@ export default function MedicationReminderForm() {
                     <Text variant="labelSmall" style={styles.audioHint}>{t('medicationReminderForm.tapToPreview')}</Text>
                 </Surface>
 
-                {showTimePicker !== null && Platform.OS !== 'web' && (
-                    <DateTimePicker value={alarmTimes[showTimePicker]}
-                        mode="time"
-                        is24Hour={true}
-                        display="default"
-                        onChange={(e, d) => {
-                            if (Platform.OS === 'android') { setShowTimePicker(null); }
-                            if (d && e.type === 'set') { const n = [...alarmTimes]; n[showTimePicker] = d; setAlarmTimes(n); }
-                        }} />
-                )}
+                <PlatformDatePicker
+                    visible={showTimePicker !== null}
+                    value={showTimePicker !== null ? alarmTimes[showTimePicker] : new Date()}
+                    mode="time"
+                    is24Hour={true}
+                    onConfirm={d => {
+                        if (showTimePicker !== null) {
+                            const n = [...alarmTimes];
+                            n[showTimePicker] = d;
+                            setAlarmTimes(n);
+                        }
+                        setShowTimePicker(null);
+                    }}
+                    onDismiss={() => setShowTimePicker(null)}
+                />
 
                 {/* 5. FREQUENCY */}
                 <View style={[styles.fieldContainer, { marginTop: 20 }]}>
                     <Text style={styles.sectionLabel}>{t('medicationReminderForm.repeatFrequency')}</Text>
                     <TextInput label={t('medicationReminderForm.repeatEveryDays')} value={frequencyDays} onChangeText={setFrequencyDays} keyboardType="numeric" mode="outlined" style={styles.input} left={<TextInput.Icon icon="calendar-refresh" color={COLORS.primary} />} />
-                    <HelperText type="info" visible={false} style={styles.helper} children={undefined} />
+                    <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
                 </View>
 
 

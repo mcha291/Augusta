@@ -105,6 +105,7 @@ export default function MedicationsScreen() {
       <ScrollView
         contentContainerStyle={GlobalStyles.scrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadData(); }} />}
+        keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.pageTitle}>{t('medications.title')}</Text>
 

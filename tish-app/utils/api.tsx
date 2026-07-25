@@ -1,8 +1,6 @@
 // utils/api.ts
 import { fetchAuthSession } from "@aws-amplify/auth";
-
-// 🚨 CHANGE THIS: It must be your API Gateway URL, not the Lambda URL
-const BASE_URL = 'https://u91xzojfja.execute-api.ap-east-2.amazonaws.com/production'; 
+import { API_BASE_URL as BASE_URL } from "../constants/config";
 
 interface RequestOptions extends RequestInit {
   body?: any; 

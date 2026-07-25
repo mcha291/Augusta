@@ -1,7 +1,6 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import DateTimePicker from '@react-native-community/datetimepicker';
 import { confirmSignUp, resendSignUpCode, signIn, signOut, signUp } from 'aws-amplify/auth';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -19,10 +18,13 @@ import {
   Button,
   HelperText,
   Menu,
+  SegmentedButtons,
   Surface,
   Text,
   TextInput
 } from 'react-native-paper';
+import PlatformDatePicker from '../components/platform-date-picker';
+import { DEFAULT_VERIFICATION_MEDIUM, SMS_VERIFICATION_ENABLED } from '../constants/config';
 import { GeneralOption } from '../constants/interfaces';
 
 // Design System
@@ -31,12 +33,16 @@ import { useAuth } from '../context/AuthContext';
 import { GlobalStyles } from '../styles/globalstyles';
 import { apiRequest } from '../utils/api';
 
-const BASE_URL = 'https://zagxjje3mvzinf23amf46czfoy0vwctw.lambda-url.ap-southeast-2.on.aws';
+// Mirrors AuthDeliveryMedium from aws-amplify/auth.
+type DeliveryMedium = 'EMAIL' | 'SMS' | 'PHONE' | 'UNKNOWN';
 
 export default function SignupScreen() {
   const router = useRouter();
   const { t } = useTranslation();
   const { user, checkUser } = useAuth();
+  // Set by login.tsx when it meets an unverified account, so we can open
+  // straight on the confirm step instead of a blank registration form.
+  const params = useLocalSearchParams<{ username?: string; pendingConfirm?: string }>();
   const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   const [emailStatus, setEmailStatus] = useState<'idle' | 'checking' | 'available' | 'taken' | 'error'>('idle');
@@ -63,8 +69,18 @@ export default function SignupScreen() {
   });
 
   const [authCode, setAuthCode] = useState('');
+  const [confirmError, setConfirmError] = useState('');
+  const [resendNote, setResendNote] = useState('');
+  // Where Cognito actually sent the code. Cognito picks this itself from the
+  // pool's auto-verified attributes, so it has to be read back rather than
+  // assumed — the confirm screen used to just claim "email" unconditionally.
+  const [codeDelivery, setCodeDelivery] = useState<{ medium?: DeliveryMedium; destination?: string }>({});
+  const [verifyVia, setVerifyVia] = useState<'sms' | 'email'>(DEFAULT_VERIFICATION_MEDIUM);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [menus, setMenus] = useState({ gender: false, condition: false });
+
+  // Nobody is born tomorrow.
+  const [today] = useState(() => new Date());
 
   // 1. Helper for alerts
   const notifyUser = (title: string, message: string) => {
@@ -93,6 +109,16 @@ export default function SignupScreen() {
       }));
     }
   }, [user]);
+
+  // 3b. Arriving from the login screen with an unverified Cognito account.
+  // Without this the user lands on an empty registration form they can never
+  // submit (the account already exists), with no route back to the code entry.
+  useEffect(() => {
+    if (params.pendingConfirm === '1' && params.username) {
+      setForm(prev => ({ ...prev, username: String(params.username) }));
+      setStep('confirm');
+    }
+  }, [params.pendingConfirm, params.username]);
 
   useEffect(() => {
     async function loadLookupData() {
@@ -138,8 +164,13 @@ export default function SignupScreen() {
 
     // --- PRE-SIGNUP AVAILABILITY CHECK ---
     try {
-      const checkUrl = `${BASE_URL}/check-availability?email=${encodeURIComponent(cleanEmail)}&phone_number=${encodeURIComponent(cleanPhone)}`;
-      const checkRes = await fetch(checkUrl);
+      // API Gateway already exposes /check-availability with authorizationType
+      // NONE, so this pre-auth call goes through the normal front door like
+      // everything else. apiRequest simply omits the Authorization header when
+      // there's no session yet.
+      const checkRes = await apiRequest(
+        `/check-availability?email=${encodeURIComponent(cleanEmail)}&phone_number=${encodeURIComponent(cleanPhone)}`
+      );
       const availability = await checkRes.json();
 
       if (availability.exists) {
@@ -152,18 +183,42 @@ export default function SignupScreen() {
     }
 
     try {
-      await signUp({
+      // Cognito decides the delivery medium from the pool's auto-verified
+      // attributes, and prefers SMS whenever a phone_number is supplied. There
+      // is no API parameter to override that, so the only lever we have is
+      // whether phone_number is part of the signup payload at all. Omitting it
+      // is what forces the email route.
+      //
+      // Trade-off when the user picks email: the number is still saved to RDS
+      // by /register-profile, but Cognito never learns it, so it won't work as
+      // a sign-in alias for that account until it's added and verified later.
+      const useSms = SMS_VERIFICATION_ENABLED && verifyVia === 'sms' && !!cleanPhone;
+
+      const { nextStep } = await signUp({
         username: cleanUser,
         password: cleanPass,
         options: {
           userAttributes: {
             email: cleanEmail,
             name: form.full_name,
-            ...(cleanPhone ? { phone_number: cleanPhone } : {}),
+            ...(useSms ? { phone_number: cleanPhone } : {}),
           }
         }
       });
-      setStep('confirm');
+
+      if (nextStep.signUpStep === 'CONFIRM_SIGN_UP') {
+        const { deliveryMedium, destination } = nextStep.codeDeliveryDetails;
+        // Logged deliberately: when a tester says "no code arrived", this is
+        // the one line that says whether it was a text or an email, and to what.
+        console.log('[signup] code delivery ->', deliveryMedium, destination);
+        setCodeDelivery({ medium: deliveryMedium as DeliveryMedium, destination });
+        setStep('confirm');
+      } else {
+        // Pool auto-confirmed the account (e.g. a PreSignUp trigger); there is
+        // no code to enter, so go straight to the rest of the flow.
+        console.log('[signup] no confirmation required, step =', nextStep.signUpStep);
+        await finishSignup(cleanUser);
+      }
     } catch (e: any) {
       notifyUser(e.name || t('signup.accessDeniedTitle'), e.message);
     } finally {
@@ -171,17 +226,33 @@ export default function SignupScreen() {
     }
   };
 
-  // --- STEP 2: CONFIRM (brand new account) ---
-  const handleConfirm = async () => {
-    setLoading(true);
-    try {
-      await confirmSignUp({ username: form.username.trim(), confirmationCode: authCode });
-      await signIn({ username: form.username.trim(), password: form.password });
+  // Shared tail of registration: sign in with the credentials still held in
+  // state, then create the RDS profile. Reached both after a confirmation code
+  // is accepted and when the pool auto-confirms and there's no code at all.
+  // Callers own the loading flag.
+  const finishSignup = async (cleanUser: string) => {
+    // Arriving from the login screen we never had the password, so we can't
+    // sign in here. Verification did stick, so send them to log in.
+    if (!form.password) {
+      notifyUser(t('signup.verifiedTitle'), t('signup.verifiedPleaseSignIn'));
+      router.replace('/login');
+      return;
+    }
 
+    try {
+      await signIn({ username: cleanUser, password: form.password });
+    } catch (e: any) {
+      console.error("Post-confirm sign-in failed:", e?.message);
+      notifyUser(t('signup.verifiedTitle'), t('signup.verifiedPleaseSignIn'));
+      router.replace('/login');
+      return;
+    }
+
+    try {
       const regres = await apiRequest('/register-profile', {
         method: 'POST',
         body: {
-          username: form.username.trim(),
+          username: cleanUser,
           full_name: form.full_name,
           birth_date: form.birth_date.toISOString(),
           gender_id: form.gender_id,
@@ -191,21 +262,68 @@ export default function SignupScreen() {
         }
       });
 
-      const data = await regres.json();
+      const data = await regres.json().catch(() => ({}));
 
       if (!regres.ok) {
-        throw new Error(data.message || 'Registration failed');
+        throw new Error(data.message || data.error || t('signup.profileCreationFailed'));
       }
 
+      // Must refresh auth state before navigating: _layout only registers the
+      // (tabs) route once user.id !== 0, so replacing without this bounces
+      // straight back to /login.
+      await checkUser();
       router.replace('/(tabs)');
     } catch (e: any) {
       console.error("Setup Error:", e.message);
-      try { await signOut(); } catch { }
-      notifyUser(t('signup.setupErrorTitle'), e.message + "\n\n" + t('signup.verifiedButProfileFailed'));
-      router.replace('/login');
-    } finally {
-      setLoading(false);
+      // The Cognito account is verified and signed in at this point. Signing
+      // out and dumping them at /login used to strand the account with no way
+      // back to the profile form — drop into the retryable profile step.
+      notifyUser(t('signup.setupErrorTitle'), (e.message || '') + "\n\n" + t('signup.verifiedButProfileFailed'));
+      setStep('profile');
     }
+  };
+
+  // Turn a Cognito confirmation failure into something a person can act on.
+  const confirmErrorMessage = (e: any) => {
+    switch (e?.name) {
+      case 'CodeMismatchException': return t('signup.codeMismatch');
+      case 'ExpiredCodeException': return t('signup.codeExpired');
+      case 'LimitExceededException':
+      case 'TooManyFailedAttemptsException': return t('signup.tooManyAttempts');
+      case 'NotAuthorizedException': return t('signup.alreadyConfirmed');
+      case 'UserNotFoundException': return t('signup.userNotFound');
+      default: return e?.message || t('common.error');
+    }
+  };
+
+  // --- STEP 2: CONFIRM (brand new account) ---
+  // Split into phases on purpose. A wrong code is an everyday mistake and must
+  // leave the user exactly where they are; only a failure *after* the account
+  // is verified warrants moving them somewhere else.
+  const handleConfirm = async () => {
+    const cleanUser = form.username.trim();
+
+    if (!authCode.trim()) {
+      setConfirmError(t('signup.enterCode'));
+      return;
+    }
+
+    setLoading(true);
+    setConfirmError('');
+    setResendNote('');
+
+    // --- Phase 1: the verification code. Fully recoverable — stay put. ---
+    try {
+      await confirmSignUp({ username: cleanUser, confirmationCode: authCode.trim() });
+    } catch (e: any) {
+      console.warn("Confirmation failed:", e?.name, e?.message);
+      setConfirmError(confirmErrorMessage(e));
+      setLoading(false);
+      return;
+    }
+
+    await finishSignup(cleanUser);
+    setLoading(false);
   };
 
   // --- STEP 3: COMPLETE PROFILE (Cognito already authenticated, id === 0) ---
@@ -253,11 +371,17 @@ export default function SignupScreen() {
   };
 
   const handleResend = async () => {
+    setConfirmError('');
+    setResendNote('');
     try {
-      await resendSignUpCode({ username: form.username.trim() });
-      notifyUser(t('signup.resentTitle'), t('signup.resentMessage', { email: form.email }));
+      const { destination, deliveryMedium } = await resendSignUpCode({ username: form.username.trim() });
+      // Cognito masks the destination (e.g. "j***@g***.com"); prefer it over
+      // form.email, which is empty when we arrived here from the login screen.
+      console.log('[signup] resend delivery ->', deliveryMedium, destination);
+      setCodeDelivery({ medium: deliveryMedium as DeliveryMedium, destination });
+      setResendNote(t('signup.resentMessage', { email: destination || form.email }));
     } catch (e: any) {
-      notifyUser(t('common.error'), e.message);
+      setConfirmError(confirmErrorMessage(e));
     }
   };
 
@@ -326,35 +450,71 @@ export default function SignupScreen() {
     setForm({ ...form, email: v });
   };
 
+  // The "+" is rendered as a permanent affix rather than placeholder text, so
+  // state keeps digits only and re-attaches it. Testers were reading the old
+  // "+886..." placeholder as a prefilled value and typing a bare local number
+  // over the top of it, which then failed E.164 validation.
   const handlePhoneChange = (v: string) => {
-    setForm({ ...form, phone_number: v });
+    const digits = v.replace(/\D/g, '');
+    setForm({ ...form, phone_number: digits ? `+${digits}` : '' });
   };
+
+  // What the phone TextInput shows: state minus the affixed "+".
+  const phoneDigits = form.phone_number.replace(/^\+/, '');
 
   if (fetchingOptions) {
     return <View style={GlobalStyles.centered}><ActivityIndicator color={COLORS.primary} /></View>;
   }
 
   if (step === 'confirm') {
+    // Trust Cognito's answer over anything the form thinks it asked for.
+    const sentBySms = codeDelivery.medium === 'SMS' || codeDelivery.medium === 'PHONE';
+    const codeDestination = codeDelivery.destination
+      || (sentBySms ? form.phone_number : form.email)
+      || form.username;
+
     return (
       <View style={[GlobalStyles.container, styles.centeredContent]}>
-        <MaterialCommunityIcons name="email-seal" size={80} color={COLORS.primary} />
+        <MaterialCommunityIcons
+          name={sentBySms ? 'cellphone-message' : 'email-seal'}
+          size={80}
+          color={COLORS.primary}
+        />
         <Text variant="headlineMedium" style={styles.stepTitle}>{t('signup.confirmIdentity')}</Text>
-        <Text style={styles.stepSubtitle}>{t('signup.verificationCodeSentTo', { email: form.email })}</Text>
+        <Text style={styles.stepSubtitle}>
+          {sentBySms
+            ? t('signup.codeSentSms', { destination: codeDestination })
+            : t('signup.codeSentEmail', { destination: codeDestination })}
+        </Text>
+        {/* Spam advice only makes sense for the email route. */}
+        {!sentBySms && <Text style={styles.spamHint}>{t('signup.checkSpamFolder')}</Text>}
 
         <TextInput
           mode="outlined"
           placeholder={t('signup.codePlaceholder')}
           value={authCode}
-          onChangeText={setAuthCode}
+          onChangeText={v => { setAuthCode(v); if (confirmError) setConfirmError(''); }}
           keyboardType="number-pad"
+          error={!!confirmError}
           style={styles.codeInput}
         />
 
-        <Button mode="contained" onPress={handleConfirm} loading={loading} style={styles.primaryBtn}>
+        {!!confirmError && (
+          <Text style={styles.confirmError}>{confirmError}</Text>
+        )}
+        {!!resendNote && (
+          <Text style={styles.confirmNote}>{resendNote}</Text>
+        )}
+
+        <Button mode="contained" onPress={handleConfirm} loading={loading} disabled={loading} style={styles.primaryBtn}>
           {t('signup.activateAccount')}
         </Button>
-        <Button mode="text" onPress={handleResend} textColor={COLORS.slate}>
+        <Button mode="text" onPress={handleResend} disabled={loading} textColor={COLORS.slate}>
           {t('signup.resendCode')}
+        </Button>
+        {/* Always leave a way out of this screen. */}
+        <Button mode="text" onPress={() => router.replace('/login')} disabled={loading} textColor={COLORS.slate}>
+          {t('signup.backToSignIn')}
         </Button>
       </View>
     );
@@ -367,7 +527,7 @@ export default function SignupScreen() {
           <Appbar.Content title={t('signup.completeYourProfile')} titleStyle={{ fontWeight: '800' }} />
         </Appbar.Header>
 
-        <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={true}>
+        <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={true} keyboardShouldPersistTaps="handled">
           <Text style={styles.pageTitle}>{t('signup.almostThere')}</Text>
           <Text style={styles.stepSubtitle}>
             {t('signup.verifiedFinishSetup', { identifier: form.email || form.username })}
@@ -426,9 +586,14 @@ export default function SignupScreen() {
             </Pressable>
           </View>
 
-          {showDatePicker && (
-            <DateTimePicker value={form.birth_date} mode="date" display="default" onChange={(e, d) => { setShowDatePicker(false); if (d) setForm({ ...form, birth_date: d }); }} />
-          )}
+          <PlatformDatePicker
+            visible={showDatePicker}
+            value={form.birth_date}
+            mode="date"
+            maximumDate={today}
+            onConfirm={d => { setForm({ ...form, birth_date: d }); setShowDatePicker(false); }}
+            onDismiss={() => setShowDatePicker(false)}
+          />
 
           <Button mode="contained" onPress={handleCompleteProfile} loading={loading} style={styles.saveButton}>
             {t('signup.completeProfile')}
@@ -454,7 +619,7 @@ export default function SignupScreen() {
         <Appbar.Content title={t('signup.accountRegistration')} titleStyle={{ fontWeight: '800' }} />
       </Appbar.Header>
 
-      <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={true}>
+      <ScrollView contentContainerStyle={GlobalStyles.scrollContent} showsVerticalScrollIndicator={true} keyboardShouldPersistTaps="handled">
         <Text style={styles.pageTitle}>{t('signup.newUser')}</Text>
 
         <View style={styles.fieldContainer}>
@@ -485,6 +650,8 @@ export default function SignupScreen() {
           <TextInput
             value={form.email}
             onChangeText={handleEmailChange}
+            mode="outlined"
+            style={styles.input}
             autoComplete="email"
             keyboardType="email-address"
             autoCapitalize="none"
@@ -509,22 +676,27 @@ export default function SignupScreen() {
         <View style={styles.fieldContainer}>
           <Text style={styles.fieldLabel}>{t('signup.phoneLabel')}</Text>
           <TextInput
-            value={form.phone_number}
+            value={phoneDigits}
             onChangeText={handlePhoneChange}
             mode="outlined"
+            keyboardType="phone-pad"
+            style={styles.input}
             placeholder={t('signup.phonePlaceholder')}
+            left={<TextInput.Affix text="+" />}
             activeOutlineColor={phoneStatus === 'taken' ? COLORS.error : COLORS.primary}
-            error={phoneStatus === 'taken'}
+            error={phoneStatus === 'taken' || phoneStatus === 'error'}
             right={
               phoneStatus === 'checking' ? <TextInput.Icon icon={() => <ActivityIndicator size="small" />} /> :
                 phoneStatus === 'available' ? <TextInput.Icon icon="check-circle" color="green" /> :
                   phoneStatus === 'taken' ? <TextInput.Icon icon="alert-circle" color="red" /> : null
             }
           />
-          <HelperText type={phoneStatus === 'taken' ? "error" : "info"} visible={phoneStatus !== 'idle'}>
+          {/* Always visible — the country-code hint is the whole point, so it
+              must not vanish the moment the user starts typing. */}
+          <HelperText type={(phoneStatus === 'taken' || phoneStatus === 'error') ? "error" : "info"} visible>
             {phoneStatus === 'taken' ? t('signup.phoneTaken') :
               phoneStatus === 'available' ? t('signup.phoneAvailable') :
-                phoneStatus === 'error' ? t('signup.phoneInvalid') : ""}
+                phoneStatus === 'error' ? t('signup.phoneInvalid') : t('signup.phoneHint')}
           </HelperText>
         </View>
 
@@ -537,6 +709,26 @@ export default function SignupScreen() {
             style={styles.input}
             onChangeText={v => setForm({ ...form, password: v })} />
         </View>
+
+        {/* Only worth showing once SMS can actually be delivered — while the
+            SNS sandbox is on, a text reaches nobody, so email is the only
+            honest option and the choice is hidden rather than offered-but-broken. */}
+        {SMS_VERIFICATION_ENABLED && (
+          <View style={styles.fieldContainer}>
+            <Text style={styles.fieldLabel}>{t('signup.verifyViaLabel')}</Text>
+            <SegmentedButtons
+              value={verifyVia}
+              onValueChange={v => setVerifyVia(v as 'sms' | 'email')}
+              buttons={[
+                { value: 'sms', label: t('signup.verifyViaSms'), icon: 'cellphone-message' },
+                { value: 'email', label: t('signup.verifyViaEmail'), icon: 'email-outline' },
+              ]}
+            />
+            <HelperText type="info" visible>
+              {verifyVia === 'sms' ? t('signup.verifyViaSmsHint') : t('signup.verifyViaEmailHint')}
+            </HelperText>
+          </View>
+        )}
 
         <View style={styles.sectionHeader}><Text style={styles.sectionHeaderText}>{t('signup.medicalProfileSection')}</Text></View>
 
@@ -580,11 +772,16 @@ export default function SignupScreen() {
           </Pressable>
         </View>
 
-        {showDatePicker && (
-          <DateTimePicker value={form.birth_date} mode="date" display="default" onChange={(e, d) => { setShowDatePicker(false); if (d) setForm({ ...form, birth_date: d }); }} />
-        )}
+        <PlatformDatePicker
+          visible={showDatePicker}
+          value={form.birth_date}
+          mode="date"
+          maximumDate={today}
+          onConfirm={d => { setForm({ ...form, birth_date: d }); setShowDatePicker(false); }}
+          onDismiss={() => setShowDatePicker(false)}
+        />
 
-        <Button mode="contained" onPress={handleSignUp} loading={loading} style={styles.saveButton} disabled={loading || emailStatus === 'taken' || phoneStatus === 'taken'}>
+        <Button mode="contained" onPress={handleSignUp} loading={loading} style={styles.saveButton} disabled={loading || emailStatus === 'taken' || emailStatus === 'error' || phoneStatus === 'taken' || phoneStatus === 'error'}>
           {t('signup.register')}
         </Button>
       </ScrollView>
@@ -606,6 +803,9 @@ const styles = StyleSheet.create({
   saveButton: { marginTop: 30, borderRadius: 16, height: 56, justifyContent: 'center', ...SHADOWS.medium },
   stepTitle: { fontWeight: '800', color: COLORS.ink, marginTop: 20 },
   stepSubtitle: { textAlign: 'center', color: COLORS.slate, marginVertical: 10, lineHeight: 20 },
+  spamHint: { textAlign: 'center', color: COLORS.slate, fontSize: 13, marginBottom: 20, lineHeight: 18 },
   codeInput: { backgroundColor: 'white', width: '100%', textAlign: 'center', fontSize: 26, fontWeight: 'bold', letterSpacing: 10, marginBottom: 20 },
+  confirmError: { color: COLORS.error, textAlign: 'center', marginBottom: 12, fontWeight: '600' },
+  confirmNote: { color: COLORS.primary, textAlign: 'center', marginBottom: 12, fontWeight: '600' },
   primaryBtn: { width: '100%', borderRadius: 16, height: 56, justifyContent: 'center' }
 });

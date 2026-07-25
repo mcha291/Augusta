@@ -53,7 +53,7 @@ export default function ManagedUsersScreen() {
         <ActiveProfileBadge />
       </Appbar.Header>
 
-      <ScrollView contentContainerStyle={GlobalStyles.scrollContent}>
+      <ScrollView contentContainerStyle={GlobalStyles.scrollContent} keyboardShouldPersistTaps="handled">
         <Text style={GlobalStyles.sectionTitle}>{t('managedUsers.activeProfiles')}</Text>
 
         {/* Switch back to Self */}
