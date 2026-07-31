@@ -22,6 +22,31 @@ export function toLocalTimeString(date: Date): string {
 }
 
 /**
+ * `days` calendar days after `date`, keeping the wall-clock time.
+ *
+ * 5.6 walks a reminder forward one occurrence at a time, and that arithmetic has
+ * to stay on the calendar rather than on the clock. Adding `n × 86_400_000`
+ * milliseconds is the obvious version and it is wrong across a daylight-saving
+ * boundary: an 08:00 dose four days out would ring at 07:00 or 09:00. `setDate`
+ * keeps the hour and lets the platform resolve the offset.
+ *
+ * **This would never show up in testing here**, which is the reason to write it
+ * this way rather than after someone reports it — the app is Taipei-facing and
+ * Taiwan has no DST, so the millisecond version would be correct on every device
+ * the project currently has and wrong the moment one travels.
+ *
+ * Returns a new Date; the input is not modified.
+ */
+export function addDays(date: Date, days: number): Date {
+  const next = new Date(date.getTime());
+  // Same normalisation as `computeNextTriggerDate` below and for the same
+  // reason: a NaN reaching `setDate` yields an Invalid Date, which becomes an
+  // alarm that silently never fires.
+  next.setDate(next.getDate() + (Math.trunc(Number(days)) || 0));
+  return next;
+}
+
+/**
  * The next Date an alarm should fire, given a time-of-day string ("HH:mm") and
  * how many days pass between occurrences.
  *

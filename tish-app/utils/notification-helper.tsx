@@ -3,10 +3,12 @@ import { Platform } from 'react-native';
 import { CRITICAL_ALERTS_ENTITLED } from '../constants/config';
 import { SOUND_OPTIONS, channelIdForSound, notificationSoundFile } from '../constants/sounds';
 import i18next from '../i18n';
-import { computeNextTriggerDate } from './date';
-import { confirmedDoseKeys, doseKey } from './doses';
+import { planAlarmsForReminder, planChainForward } from './alarm-schedule';
+import type { AlarmPlan } from './alarm-schedule';
+import { confirmedDoseKeys } from './doses';
 import type { DoseRow } from './doses';
-import { belongsToReminder, identifierFor, isSnoozeIdentifier, snoozeIdentifierFor } from './notification-identifiers';
+import type { BudgetPlan } from './notification-budget';
+import { belongsToReminder, isSnoozeIdentifier, snoozeIdentifierFor } from './notification-identifiers';
 
 /**
  * 5.3 — how loudly iOS is allowed to interrupt.
@@ -157,12 +159,61 @@ export interface ScheduleOptions {
    * replaced; it is not a silent degradation.
    */
   doses?: DoseRow[];
+  /**
+   * 5.6 — how many occurrences of each alarm time to schedule. Comes from the
+   * budget; omitting it falls back to the last plan this device computed, and
+   * to a single occurrence if there has never been one.
+   */
+  daysAhead?: number;
+  /** 5.6 — upper bound on the burst, from the budget. `null` means no reduction. */
+  burstCap?: number | null;
+  /**
+   * 5.6 — the budget could not fit this reminder at all. Its alarms are still
+   * *cancelled*, so a reminder that drops out of the plan does not leave a stale
+   * set behind; it simply gets nothing new.
+   */
+  dropped?: boolean;
 }
 
 /**
- * Schedules the *next* occurrence for every active alarm time on a reminder.
- * Call this whenever a reminder is created/edited/toggled, and also once at
- * app load to keep local notifications in sync with backend state.
+ * The last budget this device computed (5.6).
+ *
+ * **The horizon is a device-wide policy, and only one caller can see enough to
+ * decide it** — the reconciliation pass, which reconciles the signed-in user
+ * plus every active dependent. Three other callers schedule a *single* reminder
+ * in response to a user action: saving the form, toggling a reminder's status,
+ * and regenerating meal-relative alarms from the profile screen. None of them
+ * knows what else is on the device, and if each fell back to one occurrence they
+ * would silently collapse that reminder's horizon until the next launch — which
+ * is precisely the invisible degradation 5.6 exists to remove, arriving through
+ * 5.6's own machinery.
+ *
+ * So the plan is remembered rather than threaded through every call site. It is
+ * mildly stale by construction — a reminder that has just been activated was not
+ * in the set the plan was costed against — and that is bounded and self-
+ * correcting: the next reconciliation recomputes it. `null` until the first
+ * reconciliation, which runs at launch, before any of those three can.
+ */
+let rememberedPlan: Pick<BudgetPlan, 'daysAhead' | 'burstCap'> | null = null;
+
+/** Called by the reconciliation pass once per run, with the plan it just computed. */
+export function rememberBudgetPlan(plan: Pick<BudgetPlan, 'daysAhead' | 'burstCap'> | null) {
+  rememberedPlan = plan ? { daysAhead: plan.daysAhead, burstCap: plan.burstCap } : null;
+}
+
+/**
+ * Schedules the next `daysAhead` occurrences of every active alarm time on a
+ * reminder. Call this whenever a reminder is created/edited/toggled, and also
+ * once at app load to keep local notifications in sync with backend state.
+ *
+ * **5.6 — several days at once, not one.** Before this the app scheduled exactly
+ * one occurrence per alarm time and re-armed it when it fired, so a broken chain
+ * — a device off overnight, a notification that never delivered, an app killed
+ * before its listener ran — stopped the alarm until someone opened the app.
+ * Writing the whole horizon degrades gracefully instead: the chain can break and
+ * the remaining days still ring. How many days is `notification-budget`'s
+ * answer, not a constant, because the iOS 64-pending cap is binding rather than
+ * theoretical once D-9's burst and D-1's dependents are counted.
  *
  * **4.2 item 4 — the caregiver's copy is an escalation, not a second alarm
  * clock.** Firing it at dose time would ring the caregiver's phone for every
@@ -183,117 +234,93 @@ export interface ScheduleOptions {
  * mechanism meant to prevent it.
  */
 export async function scheduleMedicationNotifications(reminder: any, options: ScheduleOptions = {}) {
-  const ownerUserId = Number.isFinite(Number(reminder.user_id)) ? Number(reminder.user_id) : undefined;
-  const viewerUserId = Number.isFinite(Number(options.viewerUserId)) ? Number(options.viewerUserId) : undefined;
+  // The layout is decided in `alarm-schedule`, which is dependency-free and
+  // therefore testable; everything here is the I/O it cannot do. That split is
+  // not tidiness — the identifier arithmetic it holds has produced three
+  // separate unpredicted bugs in this codebase (§0.6), every one of them silent.
+  const plan = planAlarmsForReminder(reminder, {
+    viewerUserId: options.viewerUserId,
+    platform: Platform.OS,
+    daysAhead: options.daysAhead ?? rememberedPlan?.daysAhead,
+    burstCap: options.burstCap ?? rememberedPlan?.burstCap,
+    // Only a caregiver's copy can point at a dose in the past, so only it needs
+    // the confirmed set; `planAlarmsForReminder` ignores it otherwise.
+    confirmedDoses: confirmedDoseKeys(options.doses ?? []),
+  });
 
-  // Both ids have to be known to claim this is someone else's reminder. If the
-  // owner is unknown the alarm can't be attributed anyway, and if the viewer is
-  // unknown, guessing "caregiver" would delay a patient's own alarm — the one
-  // failure direction that must never happen silently.
-  const isCaregiverCopy = ownerUserId != null && viewerUserId != null && ownerUserId !== viewerUserId;
+  if (Platform.OS === 'ios' && !plan.isCaregiverCopy && plan.ownerUserId == null) {
+    // Without an owner the identifier can carry neither a burst index nor an
+    // occurrence (see `notification-identifiers`), so this degrades to a single
+    // alert and a single day. Loudly, because it means a reminder reached the
+    // scheduler with no `user_id` and that is a bug in the caller, not a
+    // supported shape.
+    console.warn('[notifications] no owner on reminder', reminder?.id, '— scheduling one alert for one day');
+  }
 
   // Preserves 4.4's snooze alarm: this pass rewrites the schedule from the
   // server's reminder row, which says nothing about a snooze, so cancelling one
   // here would delete an alarm the patient just asked for and put nothing back.
-  await cancelMedicationNotifications(reminder.id, ownerUserId, true);
+  //
+  // Deliberately ahead of every early return below. An inactive reminder, one
+  // whose escalation has just been switched off, or one the budget has dropped
+  // must actually lose its alarms rather than keep them until it is next edited.
+  await cancelMedicationNotifications(reminder.id, plan.ownerUserId, true);
 
-  if (reminder.status !== 'active' || !reminder.alarms?.length) return;
-
-  // Escalation off means the caregiver holds nothing for this reminder. The
-  // cancel above has already cleared any copy left from when it was on, so
-  // switching escalation off actually removes the alarms rather than leaving
-  // them scheduled until the reminder is next edited.
-  if (isCaregiverCopy && !reminder.escalation_enabled) return;
-
-  const frequencyDays = Math.max(parseInt(reminder.frequency_days) || 1, 1);
-  // Mirrors the column default (migration 002) rather than trusting the row to
-  // carry one: a reminder object assembled client-side — the form's optimistic
-  // schedule, for instance — may not have the field at all, and 0 would collapse
-  // the escalation back onto the dose time.
-  const escalationOffsetMinutes = isCaregiverCopy
-    ? Math.max(parseInt(reminder.escalation_delay_minutes) || 30, 1)
-    : 0;
-
-  const burstCount = burstCountFor(reminder, { isCaregiverCopy, ownerUserId });
-  const interruptionLevel = await resolveInterruptionLevel();
-
-  // Only a caregiver's copy can point at a dose in the *past*: it fires at dose
-  // time + delay, so a device syncing at 08:10 for an 08:00 dose is scheduling
-  // an 08:30 escalation for a dose that may already be confirmed. The patient's
-  // own alarm is always the next occurrence, which by definition has not
-  // happened yet, so there is nothing to check for it.
-  const confirmed = isCaregiverCopy ? confirmedDoseKeys(options.doses ?? []) : null;
-
-  for (const timeStr of reminder.alarms) {
-    const triggerDate = computeNextTriggerDate(timeStr, frequencyDays, new Date(), true, escalationOffsetMinutes);
-
-    if (confirmed) {
-      // Keyed on the *dose* time, not the trigger. The offset was applied above
-      // and the dose row knows nothing about the caregiver's delay.
-      const doseTime = new Date(triggerDate.getTime() - escalationOffsetMinutes * 60 * 1000);
-      if (confirmed.has(doseKey(reminder.id, doseTime))) continue;
-    }
-
-    for (let burstIndex = 1; burstIndex <= burstCount; burstIndex++) {
-      const identifier = identifierFor(reminder.id, timeStr, ownerUserId, ownerUserId != null ? burstIndex : undefined);
-      const burstDate = new Date(triggerDate.getTime() + (burstIndex - 1) * BURST_SPACING_MS);
-
-      await scheduleOneAlert({
-        identifier,
-        date: burstDate,
-        soundKey: reminder.reminder_sound,
-        interruptionLevel,
-        isCaregiverCopy,
-        data: {
-          reminderId: reminder.id,
-          ownerUserId,
-          soundKey: reminder.reminder_sound,
-          timeStr,
-          frequencyDays,
-          escalationOffsetMinutes,
-          burstIndex,
-          burstCount,
-        },
-      });
-    }
+  if (options.dropped) {
+    // 5.6 — single alerts over two days still overran the cap, and this reminder
+    // is what the budget gave up (dependents' escalation copies first, furthest
+    // dose first). Loud, because a caregiver silently losing a dependent's
+    // escalation is the failure this phase exists to remove.
+    console.warn('[notifications] budget dropped reminder', reminder?.id, '— holding no alarms for it');
+    return;
   }
+
+  await writeAlerts(plan, {
+    soundKey: reminder.reminder_sound,
+    data: {
+      reminderId: reminder.id,
+      ownerUserId: plan.ownerUserId,
+      soundKey: reminder.reminder_sound,
+      frequencyDays: plan.frequencyDays,
+      escalationOffsetMinutes: plan.escalationOffsetMinutes,
+    },
+  });
 }
 
 /**
- * D-9's burst: how many consecutive alerts one dose schedules.
+ * Writes a planned set of alerts to the OS queue.
  *
- * Two platform-shaped exceptions, both settled rather than open:
- *
- * - **Android is always one** (D-10). `setExactAndAllowWhileIdle` — the only API
- *   `expo-notifications` uses — cannot fire more than once per nine minutes per
- *   app while the device is idle, so a 30-second-spaced burst degrades to a
- *   single alert overnight, which is the exact case it was designed for.
- *   Shortening the spacing does not help; the cap is on frequency.
- * - **A caregiver's escalation copy is always one**, and 5.6's notification
- *   budget already assumes this — it multiplies only the owner's own alarms by
- *   `alarm_repeat_count` and counts dependents' escalations singly. Bursting
- *   them too would multiply the pressure on the iOS 64-pending cap by up to six
- *   for every dependent, to make an alert louder for someone who is already the
- *   backstop rather than the person taking the dose.
+ * Shared by first-time scheduling and the chain-forward so that both go through
+ * one construction: two copies drifting apart would leave alarms one cannot
+ * cancel and cancels that hit the wrong day, which is the exact failure §0.6
+ * records against identifier reuse.
  */
-function burstCountFor(
-  reminder: any,
-  { isCaregiverCopy, ownerUserId }: { isCaregiverCopy: boolean; ownerUserId?: number }
-): number {
-  if (Platform.OS !== 'ios' || isCaregiverCopy) return 1;
-  if (ownerUserId == null) {
-    // Without an owner the identifier cannot carry a burst index unambiguously
-    // (see `notification-identifiers`), so this degrades to a single alert.
-    // Loudly, because it means a reminder reached the scheduler with no
-    // `user_id` and that is a bug in the caller, not a supported shape.
-    console.warn('[notifications] no owner on reminder', reminder?.id, '— scheduling a single alert, not a burst');
-    return 1;
-  }
-  return Math.min(Math.max(parseInt(reminder.alarm_repeat_count) || 3, 1), 6);
-}
+async function writeAlerts(
+  plan: AlarmPlan,
+  { soundKey, data }: { soundKey?: string | null; data: Record<string, any> }
+) {
+  if (plan.alerts.length === 0) return;
 
-/** 4.7b — spacing between consecutive alerts of one dose's burst. */
-const BURST_SPACING_MS = 30 * 1000;
+  const interruptionLevel = await resolveInterruptionLevel();
+
+  for (const alert of plan.alerts) {
+    await scheduleOneAlert({
+      identifier: alert.identifier,
+      date: alert.date,
+      soundKey,
+      interruptionLevel,
+      isCaregiverCopy: plan.isCaregiverCopy,
+      data: {
+        ...data,
+        timeStr: alert.timeStr,
+        burstIndex: alert.burstIndex,
+        burstCount: alert.burstCount,
+        occurrenceKey: alert.occurrenceKey,
+        horizonDays: plan.horizonDays,
+      },
+    });
+  }
+}
 
 interface AlertSpec {
   identifier: string;
@@ -345,56 +372,51 @@ async function scheduleOneAlert({ identifier, date, soundKey, interruptionLevel,
 }
 
 /**
- * Called when a scheduled notification actually fires. Re-schedules the same
- * alarm slot for `frequencyDays` days later, so the cadence keeps chaining
- * forward instead of repeating daily.
+ * Called when a scheduled notification actually fires. Rewrites this slot's
+ * forward horizon, so the look-ahead stays as deep as the budget asked for
+ * instead of eroding by a day every time an alarm goes off.
+ *
+ * **5.6 changed what this is for, and it is worth being precise about.** Before
+ * the horizon existed, exactly one occurrence was ever scheduled, so this was
+ * the *only* thing keeping a reminder alive — the chain-forward. Now the sync
+ * writes `horizonDays` occurrences at once and this becomes a top-up: it
+ * re-establishes the same depth measured from the next occurrence, which is the
+ * same convention the sync uses. §0.3 asked for a decision between "no-op" and
+ * "top-up"; a no-op would let the horizon shrink by a day per dose until the app
+ * was next opened, which is the failure 5.6 exists to remove.
+ *
+ * **Rewriting the whole horizon rather than appending one day is deliberate.**
+ * Appending is cheaper and wrong in the case that matters: if the app has not
+ * run for several days, the occurrences that fired in the meantime are gone and
+ * appending a single far-end day leaves the gap in the middle. Rewriting is
+ * idempotent — the identifiers are date-keyed, so an occurrence that is already
+ * scheduled is replaced by an identical alert — so it repairs the gap instead.
  *
  * **Reschedules the whole burst, not the one alert that fired** (4.7b). The
  * alternative — each member chaining only itself — would quietly shrink the
  * burst to one the first time a response cancelled the remainder, which is every
  * time the patient is awake. So the burst is rebuilt from `burstCount`.
  *
- * **Must run after `cancelAlarmBurst`, never before, and the reason is not
- * obvious.** A burst member's identifier is stable across occurrences — the same
- * reminder, slot and index tomorrow produce the same string — so tomorrow's
- * alert *n* and today's pending alert *n* are the same identifier. Scheduling
- * onto an existing identifier replaces it. Reschedule first and today's
- * un-fired alerts are silently dragged forward to tomorrow, which cancels the
- * burst rather than the burst being cancelled deliberately; cancel first and the
- * queue is empty when the next occurrence is written. `_layout.tsx` sequences
- * the two, and that ordering is load-bearing.
+ * **The cancel-then-reschedule ordering has stopped being load-bearing, and it
+ * is worth saying so rather than leaving a stale invariant in place.** §0.6
+ * records that rescheduling first used to drag today's un-fired alerts into
+ * tomorrow, because a burst member's identifier was the same string on both
+ * days. It cannot now: this rewrite only ever writes occurrences from tomorrow
+ * on, and the cancel is scoped to the day that fired, so the two touch disjoint
+ * identifiers. `_layout.tsx` still sequences them, for one narrow reason — a
+ * payload from **before** 5.6 carries no occurrence key, so its cancel is still
+ * reminder-and-slot-wide and would eat a horizon written first. Reversing the
+ * order gains nothing, so the sequencing stays.
  *
- * Repeated calls are harmless: same identifiers, same computed date.
+ * A payload from before 5.6 also carries no `horizonDays` and reads as 1 —
+ * exactly the single next occurrence that build chained forward. Such an alarm
+ * therefore collapses its slot's horizon to one day until the next
+ * reconciliation, which is imminent by construction: the app is running, because
+ * the listener that called this only fires when it is.
  */
 export async function rescheduleNextOccurrence(data: any) {
-  if (!data?.reminderId || !data?.timeStr || !data?.frequencyDays) return;
-
-  const ownerUserId = Number.isFinite(Number(data.ownerUserId)) ? Number(data.ownerUserId) : undefined;
-  // A payload carrying an offset is a caregiver's escalation copy (4.2 item 4),
-  // and the next occurrence has to keep both the offset and the wording. A
-  // notification written by an earlier build has no such field, which reads as
-  // zero and reschedules exactly as it always did.
-  const escalationOffsetMinutes = Math.max(parseInt(data.escalationOffsetMinutes) || 0, 0);
-  const isCaregiverCopy = escalationOffsetMinutes > 0;
-  const triggerDate = computeNextTriggerDate(data.timeStr, data.frequencyDays, new Date(), false, escalationOffsetMinutes);
-  const interruptionLevel = await resolveInterruptionLevel();
-
-  // Same clamp as the scheduler. A payload from before 4.7b has no `burstCount`
-  // and reads as 1, which is exactly the single alert that build scheduled.
-  const burstCount = ownerUserId != null
-    ? Math.min(Math.max(parseInt(data.burstCount) || 1, 1), 6)
-    : 1;
-
-  for (let burstIndex = 1; burstIndex <= burstCount; burstIndex++) {
-    await scheduleOneAlert({
-      identifier: identifierFor(data.reminderId, data.timeStr, ownerUserId, ownerUserId != null ? burstIndex : undefined),
-      date: new Date(triggerDate.getTime() + (burstIndex - 1) * BURST_SPACING_MS),
-      soundKey: data.soundKey,
-      interruptionLevel,
-      isCaregiverCopy,
-      data: { ...data, burstIndex, burstCount },
-    });
-  }
+  const plan = planChainForward(data);
+  await writeAlerts(plan, { soundKey: data?.soundKey, data });
 }
 
 /**
@@ -449,11 +471,27 @@ export async function cancelMedicationNotifications(
  * response listener runs, and both queues are read fresh from the OS rather than
  * from any state the app was holding.
  *
+ * **`occurrenceKey` is the 5.6 counterpart of `timeStr`, and leaving it out
+ * would be the same bug one dimension over.** Once the horizon is several days
+ * deep, this slot holds a pending burst for each of the next `daysAhead` days. A
+ * cancel scoped only to the reminder and slot would take all of them, and the
+ * top-up afterwards rewrites the horizon from the *next* occurrence — so the
+ * alarm the patient just answered would silently cost them nothing today and
+ * everything for the rest of the week is rebuilt anyway. Passing the key from
+ * the firing alert's own payload keeps the cancel inside the day that fired.
+ * Callers with no key (a payload from before 5.6) get the old reminder+slot
+ * behaviour, which is what those alarms always meant.
+ *
  * **Callers that respond to an alarm already on screen want
  * `dismissPresentedAlarms` instead** — see the note there. This one is for the
  * arrival path, which runs before the chain-forward.
  */
-export async function cancelAlarmBurst(reminderId: number, ownerUserId?: number, timeStr?: string | null) {
+export async function cancelAlarmBurst(
+  reminderId: number,
+  ownerUserId?: number,
+  timeStr?: string | null,
+  occurrenceKey?: string | null
+) {
   if (Platform.OS === 'web' || !Number.isFinite(Number(reminderId))) return;
 
   const id = Number(reminderId);
@@ -462,7 +500,7 @@ export async function cancelAlarmBurst(reminderId: number, ownerUserId?: number,
   try {
     const scheduled = await Notifications.getAllScheduledNotificationsAsync();
     for (const notification of scheduled) {
-      if (!belongsToReminder(notification.identifier, id, owner, timeStr)) continue;
+      if (!belongsToReminder(notification.identifier, id, owner, timeStr, occurrenceKey)) continue;
       try {
         await Notifications.cancelScheduledNotificationAsync(notification.identifier);
       } catch (e) {
@@ -491,6 +529,11 @@ export async function cancelAlarmBurst(reminderId: number, ownerUserId?: number,
  *
  * What is genuinely still there is the tray — every burst member that fired
  * before the patient reached the phone — and that is what this clears.
+ *
+ * **Deliberately not occurrence-scoped, unlike the scheduled-queue cancel.** The
+ * tray only ever holds alerts that have already fired, so there is no future to
+ * protect; and a slot whose alarm is being answered may well have yesterday's
+ * unanswered copy sitting there too, which should go with it.
  */
 export async function dismissPresentedAlarms(reminderId: number, ownerUserId?: number, timeStr?: string | null) {
   if (Platform.OS === 'web' || !Number.isFinite(Number(reminderId))) return;

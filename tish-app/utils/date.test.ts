@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { computeNextTriggerDate } from './date.ts';
+import { addDays, computeNextTriggerDate } from './date.ts';
 
 /** Local-time constructor, so these read as wall-clock like the scheduler does. */
 function at(y: number, m: number, d: number, hh: number, mm: number) {
@@ -116,4 +116,46 @@ test('an escalation is never scheduled in the past, whatever the delay', () => {
     const next = computeNextTriggerDate('08:00', 1, now, true, delay);
     assert.ok(next.getTime() > now.getTime(), `delay ${delay} scheduled at or before now: ${fmt(next)}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// addDays — 5.6 walks the horizon forward with this.
+// ---------------------------------------------------------------------------
+
+test('addDays keeps the wall-clock time, which is the whole reason it exists', () => {
+  const start = at(2026, 7, 31, 8, 0);
+  assert.equal(fmt(addDays(start, 1)), '2026-08-01 08:00');
+  assert.equal(fmt(addDays(start, 7)), '2026-08-07 08:00');
+  assert.equal(fmt(addDays(start, 0)), '2026-07-31 08:00');
+});
+
+test('addDays crosses month and year boundaries', () => {
+  assert.equal(fmt(addDays(at(2026, 12, 30, 20, 0), 3)), '2027-01-02 20:00');
+  assert.equal(fmt(addDays(at(2026, 2, 27, 8, 0), 2)), '2026-03-01 08:00');
+});
+
+test('addDays does not modify its input', () => {
+  const start = at(2026, 7, 31, 8, 0);
+  const before = start.getTime();
+  addDays(start, 5);
+  assert.equal(start.getTime(), before);
+});
+
+test('addDays never yields an Invalid Date from a malformed step', () => {
+  // Same trap as Math.max(NaN, 1): an Invalid Date handed to
+  // scheduleNotificationAsync is an alarm that silently never fires.
+  for (const step of [NaN, undefined, null, 'x'] as any[]) {
+    const out = addDays(at(2026, 7, 31, 8, 0), step);
+    assert.ok(Number.isFinite(out.getTime()), `step ${String(step)} produced an Invalid Date`);
+    assert.equal(fmt(out), '2026-07-31 08:00');
+  }
+});
+
+test('addDays composes with computeNextTriggerDate the way the horizon walks it', () => {
+  // Occurrence n of a 3-day reminder is the first trigger plus n x frequency.
+  const now = at(2026, 7, 31, 6, 0);
+  const first = computeNextTriggerDate('08:00', 3, now, true);
+  assert.equal(fmt(first), '2026-07-31 08:00');
+  assert.equal(fmt(addDays(first, 1 * 3)), '2026-08-03 08:00');
+  assert.equal(fmt(addDays(first, 2 * 3)), '2026-08-06 08:00');
 });

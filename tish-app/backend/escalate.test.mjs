@@ -361,7 +361,11 @@ test('a ticket array of the wrong length reaps nothing and says so', async () =>
     let reapCalled = false;
     _setInvokerForTests(async (p) => {
         if (p.op === 'claim') return { claims: [claim({ caregiver_tokens: ['a', 'b'] })] };
-        reapCalled = true;
+        // Gated on the op rather than on "anything that is not a claim", which
+        // is what it said when the protocol had exactly two ops. 5.9's drain and
+        // 5.8's receipts poll now run on the same pass, and a test that reads
+        // either of them as a reap asserts the opposite of what it means.
+        if (p.op === 'reap') reapCalled = true;
         return { removed: 0 };
     });
     _setFetchForTests(async () => ({
@@ -402,7 +406,7 @@ test('a credentials error does not empty push_tokens', async () => {
     let reapCalled = false;
     _setInvokerForTests(async (p) => {
         if (p.op === 'claim') return { claims: [claim({ caregiver_tokens: ['a', 'b'] })] };
-        reapCalled = true;
+        if (p.op === 'reap') reapCalled = true;
         return { removed: 2 };
     });
     _setFetchForTests(async () => ({
@@ -461,4 +465,398 @@ test('a second-rung caregiver_first dose substitutes push because SMS has no tra
     const out = await dispatchHandler();
     assert.equal(out.substituted, 1);
     assert.equal(out.pushed, 1);
+});
+
+// ---------------------------------------------------------------------------
+// 5.9 — the outbox: dbHandler ops
+// ---------------------------------------------------------------------------
+
+/**
+ * An invoker built from a partial op map, defaulting every op the dispatcher may
+ * call. Without this each test has to stub five ops it does not care about, and
+ * the ones it forgets surface as an unrelated `outbox-failed` in the summary.
+ */
+function invoker(handlers = {}) {
+    const defaults = {
+        claim: { claims: [] },
+        'drain-outbox': { batches: [] },
+        'outbox-done': { done: 0 },
+        'outbox-failed': { failed: 0 },
+        'record-tickets': { recorded: 0 },
+        'due-receipts': { due: [], expired: 0 },
+        'receipts-checked': { checked: 0 },
+        reap: { removed: 0 },
+    };
+    return async (p) => {
+        const hit = handlers[p.op];
+        if (typeof hit === 'function') return hit(p);
+        return hit ?? defaults[p.op] ?? {};
+    };
+}
+
+test('drain-outbox groups several rows for one user into one batch', async () => {
+    // The coalescing is the point: editing four reminders in a minute must be
+    // one push per device, because iOS rate-limits silent pushes.
+    _setPoolForTests(makePool([
+        { match: /FROM push_outbox/, result: { rows: [
+            { id: 1, user_id: 7 }, { id: 2, user_id: 7 }, { id: 3, user_id: 9 },
+        ] } },
+        { match: /owner_user_id/, result: { rows: [
+            { owner_user_id: 7, tokens: ['tok-a', 'tok-b'] },
+            { owner_user_id: 9, tokens: ['tok-c'] },
+        ] } },
+    ]));
+
+    const out = await dbHandler({ op: 'drain-outbox' });
+    assert.equal(out.batches.length, 2);
+    const seven = out.batches.find((b) => b.ownerUserId === 7);
+    assert.deepEqual(seven.outboxIds, [1, 2]);
+    assert.deepEqual(seven.tokens, ['tok-a', 'tok-b']);
+});
+
+test('drain-outbox skips rows that have already failed too often', async () => {
+    // Otherwise an Expo outage builds a backlog every later run re-reads.
+    const pool = makePool([{ match: /FROM push_outbox/, result: { rows: [] } }]);
+    _setPoolForTests(pool);
+    await dbHandler({ op: 'drain-outbox' });
+    const q = pool.calls.find((c) => /FROM push_outbox/.test(c.text));
+    assert.match(q.text, /attempts\s*<\s*\$2/);
+    assert.ok(q.params[1] > 0, 'the attempt ceiling must be passed, not hardcoded to zero');
+});
+
+test('drain-outbox locks with SKIP LOCKED so two runs cannot double-send', async () => {
+    const pool = makePool([{ match: /FROM push_outbox/, result: { rows: [] } }]);
+    _setPoolForTests(pool);
+    await dbHandler({ op: 'drain-outbox' });
+    assert.match(pool.calls[0].text, /FOR UPDATE SKIP LOCKED/);
+});
+
+test('the recipients include the owner active caregivers, not just the owner', async () => {
+    // 4.2 item 4 puts escalation copies of this reminder on a caregiver's phone,
+    // and they go stale on exactly the edit that enqueued the row. §8 says "the
+    // owner's devices"; that would reach half the devices holding the schedule.
+    const pool = makePool([
+        { match: /FROM push_outbox/, result: { rows: [{ id: 1, user_id: 7 }] } },
+        { match: /owner_user_id/, result: { rows: [{ owner_user_id: 7, tokens: [] }] } },
+    ]);
+    _setPoolForTests(pool);
+    await dbHandler({ op: 'drain-outbox' });
+
+    const q = pool.calls.find((c) => /owner_user_id/.test(c.text));
+    assert.match(q.text, /user_relationships/);
+    assert.match(q.text, /caregiver_id/);
+    // Revoked relationships must not receive: a former caregiver hearing about a
+    // schedule change is a disclosure, not a stale cache.
+    assert.match(q.text, /status = 'active'/);
+});
+
+test('outbox-done closes rows and outbox-failed only counts the attempt', async () => {
+    const pool = makePool([{ match: /UPDATE push_outbox/, result: { rowCount: 2 } }]);
+    _setPoolForTests(pool);
+
+    await dbHandler({ op: 'outbox-done', ids: [1, 2] });
+    assert.match(pool.calls[0].text, /sent_at = now\(\)/);
+
+    await dbHandler({ op: 'outbox-failed', ids: [1, 2] });
+    assert.doesNotMatch(pool.calls[1].text, /sent_at = now\(\)/);
+    assert.match(pool.calls[1].text, /attempts = attempts \+ 1/);
+});
+
+test('the outbox ops ignore ids that are not integers', async () => {
+    // These arrive over a Lambda invoke payload, so they are untrusted input.
+    const pool = makePool();
+    _setPoolForTests(pool);
+    assert.deepEqual(await dbHandler({ op: 'outbox-done', ids: ['x', null, undefined] }), { done: 0 });
+    assert.deepEqual(await dbHandler({ op: 'outbox-done', ids: 'nope' }), { done: 0 });
+    assert.equal(pool.calls.length, 0, 'nothing should reach the database');
+});
+
+// ---------------------------------------------------------------------------
+// 5.9 — the outbox: the dispatcher
+// ---------------------------------------------------------------------------
+
+test('THE REGRESSION: a run with nothing to escalate still drains the outbox', async () => {
+    // The old dispatcher returned as soon as `claims` was empty, which is most
+    // runs. Leaving that early return would have made the silent push work only
+    // on the runs that happened to be escalating something.
+    let drained = false;
+    _setInvokerForTests(invoker({
+        claim: { claims: [] },
+        'drain-outbox': () => {
+            drained = true;
+            return { batches: [{ ownerUserId: 7, outboxIds: [1], tokens: ['tok'] }] };
+        },
+    }));
+    _setFetchForTests(async () => expoOk(1));
+
+    const out = await dispatchHandler();
+    assert.equal(out.claimed, 0);
+    assert.equal(drained, true);
+    assert.equal(out.silent, 1);
+});
+
+test('a silent push is data-only - no title, no body, content-available', async () => {
+    // A title or a body would make it a notification the patient sees, which is
+    // the opposite of the feature: this is meant to wake the app, not the user.
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [1], tokens: ['tok'] }] },
+    }));
+    let body;
+    _setFetchForTests(async (_url, opts) => { body = JSON.parse(opts.body); return expoOk(1); });
+
+    await dispatchHandler();
+    assert.equal(body[0].title, undefined);
+    assert.equal(body[0].body, undefined);
+    assert.equal(body[0]._contentAvailable, true);
+    assert.equal(body[0].data.kind, 'schedule-changed');
+    assert.equal(body[0].data.ownerUserId, 7);
+    // Not an alert, so not time-sensitive. The alarms it rewrites are.
+    assert.equal(body[0].interruptionLevel, undefined);
+});
+
+test('an owner with no registered device closes the row rather than retrying forever', async () => {
+    let doneIds = null;
+    let failedCalled = false;
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [1, 2], tokens: [] }] },
+        'outbox-done': (p) => { doneIds = p.ids; return { done: p.ids.length }; },
+        'outbox-failed': () => { failedCalled = true; return { failed: 0 }; },
+    }));
+
+    const out = await dispatchHandler();
+    assert.deepEqual(doneIds, [1, 2]);
+    assert.equal(failedCalled, false, 'no device is finished, not failed');
+    assert.equal(out.silentBatches, 0);
+});
+
+test('an unreachable Expo leaves the row pending so the next run retries it', async () => {
+    let failedIds = null;
+    let doneCalled = false;
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [3], tokens: ['tok'] }] },
+        'outbox-failed': (p) => { failedIds = p.ids; return { failed: p.ids.length }; },
+        'outbox-done': () => { doneCalled = true; return { done: 0 }; },
+    }));
+    _setFetchForTests(async () => { throw new Error('ETIMEDOUT'); });
+
+    const out = await dispatchHandler();
+    assert.deepEqual(failedIds, [3]);
+    assert.equal(doneCalled, false);
+    assert.ok(out.errors.some((e) => /expo-unreachable/.test(e)));
+});
+
+test('a dead device still closes the row - there is nothing left to retry to', async () => {
+    let doneIds = null;
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [4], tokens: ['dead'] }] },
+        'outbox-done': (p) => { doneIds = p.ids; return { done: 1 }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: [{ status: 'error', details: { error: 'DeviceNotRegistered' } }] }),
+    }));
+
+    const out = await dispatchHandler();
+    assert.deepEqual(doneIds, [4]);
+    assert.equal(out.reaped, 0, 'the fake invoker reports no rows removed');
+});
+
+// ---------------------------------------------------------------------------
+// Isolation - a safety mechanism and an optimisation sharing one run
+// ---------------------------------------------------------------------------
+
+test('a failing outbox drain cannot stop the escalation', async () => {
+    // 5.4 is a safety mechanism and 5.9 is an optimisation. The optimisation
+    // must never be able to take the safety mechanism down with it.
+    _setInvokerForTests(invoker({
+        claim: { claims: [claim()] },
+        'drain-outbox': () => { throw new Error('outbox exploded'); },
+    }));
+    _setFetchForTests(async () => expoOk(1));
+
+    const out = await dispatchHandler();
+    assert.equal(out.pushed, 1, 'the escalation still went out');
+    assert.ok(out.errors.some((e) => /outbox-failed/.test(e)));
+});
+
+test('a failing escalation cannot stop the silent pushes', async () => {
+    _setInvokerForTests(invoker({
+        claim: () => { throw new Error('claim exploded'); },
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [1], tokens: ['tok'] }] },
+    }));
+    _setFetchForTests(async () => expoOk(1));
+
+    const out = await dispatchHandler();
+    assert.equal(out.silent, 1);
+    assert.ok(out.errors.some((e) => /escalation-failed/.test(e)));
+});
+
+test('every run reports the same summary keys, however little it did', async () => {
+    // A caller reading `.errors.length` off a shorter object crashes exactly
+    // when there is nothing wrong.
+    _setInvokerForTests(invoker());
+    const quiet = await dispatchHandler();
+    for (const key of [
+        'claimed', 'pushed', 'substituted', 'skipped', 'reaped',
+        'silent', 'silentBatches', 'tickets', 'receipts', 'errors', 'timezone',
+    ]) {
+        assert.ok(key in quiet, `a quiet run must still report ${key}`);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// 5.8 — tickets and receipts
+// ---------------------------------------------------------------------------
+
+test('ok tickets are recorded against the token that produced them, with their kind', async () => {
+    let recorded = null;
+    _setInvokerForTests(invoker({
+        claim: { claims: [claim({ caregiver_tokens: ['tok-a', 'tok-b'] })] },
+        'record-tickets': (p) => { recorded = p.tickets; return { recorded: p.tickets.length }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: [{ status: 'ok', id: 'r1' }, { status: 'ok', id: 'r2' }] }),
+    }));
+
+    await dispatchHandler();
+    assert.deepEqual(recorded, [
+        { ticketId: 'r1', token: 'tok-a', kind: 'dose-escalation' },
+        { ticketId: 'r2', token: 'tok-b', kind: 'dose-escalation' },
+    ]);
+});
+
+test('a misaligned ticket array records nothing, for the same reason it reaps nothing', async () => {
+    // A ticket filed against the wrong token would later reap a *working*
+    // device because a different one was uninstalled - silent, and visible only
+    // as a caregiver who stops getting escalations.
+    let recordCalled = false;
+    _setInvokerForTests(invoker({
+        claim: { claims: [claim({ caregiver_tokens: ['a', 'b'] })] },
+        'record-tickets': () => { recordCalled = true; return { recorded: 0 }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: [{ status: 'ok', id: 'only-one' }] }),
+    }));
+
+    await dispatchHandler();
+    assert.equal(recordCalled, false);
+});
+
+test('a silent push records its tickets under its own kind', async () => {
+    // The two kinds fail with very different consequences - a missed escalation
+    // is a safety matter, a missed silent push is a stale schedule - so the logs
+    // have to separate them.
+    let recorded = null;
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [1], tokens: ['tok'] }] },
+        'record-tickets': (p) => { recorded = p.tickets; return { recorded: 1 }; },
+    }));
+    _setFetchForTests(async () => expoOk(1));
+
+    await dispatchHandler();
+    assert.equal(recorded[0].kind, 'schedule-changed');
+});
+
+test('due-receipts asks only for tickets old enough to have one and young enough to keep one', async () => {
+    const pool = makePool([{ match: /FROM push_tickets/, result: { rows: [] } }]);
+    _setPoolForTests(pool);
+    await dbHandler({ op: 'due-receipts' });
+
+    const select = pool.calls.find((c) => /SELECT ticket_id/.test(c.text));
+    assert.match(select.text, /checked_at IS NULL/);
+    assert.match(select.text, /minutes/);
+    assert.match(select.text, /hours/);
+    // And anything past the window is closed out rather than polled forever.
+    const expire = pool.calls.find((c) => /UPDATE push_tickets/.test(c.text));
+    assert.match(expire.text, /'expired'/);
+});
+
+test('a receipt reporting DeviceNotRegistered reaps the token', async () => {
+    // The delayed failure this whole poll exists for: Expo accepted the send and
+    // only the receipt reveals the device is gone.
+    let reaped = null;
+    _setInvokerForTests(invoker({
+        'due-receipts': { due: [{ ticket_id: 'r1', token: 'ghost', kind: 'dose-escalation' }], expired: 0 },
+        reap: (p) => { reaped = p.tokens; return { removed: p.tokens.length }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: { r1: { status: 'error', message: 'gone', details: { error: 'DeviceNotRegistered' } } } }),
+    }));
+
+    const out = await dispatchHandler();
+    assert.deepEqual(reaped, ['ghost']);
+    assert.equal(out.reaped, 1);
+});
+
+test('a receipt that is fine reaps nothing but is still marked checked', async () => {
+    let reapCalled = false;
+    let checked = null;
+    _setInvokerForTests(invoker({
+        'due-receipts': { due: [{ ticket_id: 'r1', token: 'alive', kind: 'schedule-changed' }], expired: 0 },
+        reap: () => { reapCalled = true; return { removed: 0 }; },
+        'receipts-checked': (p) => { checked = p.results; return { checked: p.results.length }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: { r1: { status: 'ok' } } }),
+    }));
+
+    const out = await dispatchHandler();
+    assert.equal(reapCalled, false);
+    assert.deepEqual(checked, [{ ticketId: 'r1', status: 'ok', detail: null }]);
+    assert.equal(out.receipts, 1);
+});
+
+test('a receipt Expo has no answer for yet is left unchecked for the next run', async () => {
+    // Receipts appear minutes after the send. An id missing from the response is
+    // "not yet", not "fine" - marking it checked would lose the outcome.
+    let checked = null;
+    _setInvokerForTests(invoker({
+        'due-receipts': { due: [
+            { ticket_id: 'r1', token: 'a', kind: 'schedule-changed' },
+            { ticket_id: 'r2', token: 'b', kind: 'schedule-changed' },
+        ], expired: 0 },
+        'receipts-checked': (p) => { checked = p.results; return { checked: p.results.length }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: { r1: { status: 'ok' } } }),
+    }));
+
+    await dispatchHandler();
+    assert.equal(checked.length, 1);
+    assert.equal(checked[0].ticketId, 'r1');
+});
+
+test('an unreachable receipts endpoint leaves every ticket unchecked', async () => {
+    let checkCalled = false;
+    _setInvokerForTests(invoker({
+        'due-receipts': { due: [{ ticket_id: 'r1', token: 'a', kind: 'schedule-changed' }], expired: 0 },
+        'receipts-checked': () => { checkCalled = true; return { checked: 0 }; },
+    }));
+    _setFetchForTests(async () => { throw new Error('ETIMEDOUT'); });
+
+    const out = await dispatchHandler();
+    assert.equal(checkCalled, false);
+    assert.ok(out.errors.some((e) => /receipts-unreachable/.test(e)));
+});
+
+test('a credentials error in a receipt does not empty push_tokens either', async () => {
+    // Same reasoning as the ticket-level guard: these make every device look
+    // dead at once, and acting on them forces every user to reopen the app.
+    let reapCalled = false;
+    _setInvokerForTests(invoker({
+        'due-receipts': { due: [{ ticket_id: 'r1', token: 'a', kind: 'schedule-changed' }], expired: 0 },
+        reap: () => { reapCalled = true; return { removed: 1 }; },
+    }));
+    _setFetchForTests(async () => ({
+        ok: true, status: 200, text: async () => '',
+        json: async () => ({ data: { r1: { status: 'error', details: { error: 'InvalidCredentials' } } } }),
+    }));
+
+    await dispatchHandler();
+    assert.equal(reapCalled, false);
 });

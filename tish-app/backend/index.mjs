@@ -196,6 +196,56 @@ const TABLE_DEFINITIONS = [
     );
 
     CREATE INDEX push_tokens_user_idx ON push_tokens (user_id);` },
+    // 5.9 — silent schedule-change pushes, queued rather than sent. A
+    // VPC-attached Lambda here reaches nothing outbound (no NAT, no endpoints,
+    // verified), so this route cannot call Expo and cannot invoke the function
+    // that can. It leaves the work in Postgres for the dispatcher to drain.
+    { name: 'push_outbox', create: `CREATE TABLE push_outbox (
+        id SERIAL PRIMARY KEY,
+        -- Whose schedule changed. Recipients are resolved at drain time as this
+        -- user's devices plus their active caregivers', whose escalation copies
+        -- (4.2 item 4) go stale on the same edit.
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        reason TEXT NOT NULL DEFAULT 'schedule-changed',
+        -- No foreign key on purpose: deleting a reminder is one of the events
+        -- that enqueues a row, so this is dangling by design.
+        reminder_id INTEGER,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- Set when handed to Expo, or when there was nobody to send to. Both
+        -- are done; a user with no device is not a failure to retry forever.
+        sent_at TIMESTAMPTZ,
+        attempts INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX push_outbox_pending_idx ON push_outbox (created_at) WHERE sent_at IS NULL;` },
+    // 5.8's receipts poll needs ticket ids to outlive the run that created
+    // them: Expo returns tickets synchronously and receipts only minutes later,
+    // so no single invocation can poll its own.
+    { name: 'push_tickets', create: `CREATE TABLE push_tickets (
+        id SERIAL PRIMARY KEY,
+        ticket_id TEXT NOT NULL UNIQUE,
+        -- Kept rather than referenced: the point of the receipt is to delete
+        -- the push_tokens row, and a cascade would remove the ticket exactly
+        -- when it is needed.
+        token TEXT NOT NULL,
+        -- 'dose-escalation' for 5.4 or 'schedule-changed' for 5.9. The two fail
+        -- with very different consequences and the logs must separate them.
+        -- NB: never write a close-paren followed by a semicolon inside these
+        -- comments. The SCHEMA_SQL parity tests match a table block
+        -- non-greedily up to the first one of those, so it truncates the block
+        -- and reports every column below it as missing. Cost two attempts here,
+        -- the second of them being this very comment.
+        kind TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        checked_at TIMESTAMPTZ,
+        -- Free text rather than a CHECK: this mirrors a third party's
+        -- vocabulary, and a constraint would turn Expo adding a status into a
+        -- write failure on the one path whose job is observability.
+        status TEXT,
+        detail TEXT
+    );
+
+    CREATE INDEX push_tickets_unchecked_idx ON push_tickets (created_at) WHERE checked_at IS NULL;` },
 ];
 
 // --- 5.1 policy constants ---------------------------------------------------
@@ -457,6 +507,45 @@ async function safeMaterialiseDoses(scope) {
     }
 }
 
+/**
+ * 5.9 — queue a silent schedule-change push for a reminder's owner.
+ *
+ * **Queued rather than sent, and that is forced by the network rather than
+ * chosen.** §8 describes the write itself sending a data-only push. It cannot:
+ * this Lambda is VPC-attached because RDS is private, and a VPC-attached
+ * function in this account has no NAT and no interface endpoints, so it can
+ * reach neither `exp.host` nor the Lambda API to ask the non-VPC dispatcher to
+ * do it. Verified 2026-07-31 — both `describe-vpc-endpoints` and
+ * `describe-nat-gateways` return empty. §0.6 recorded this for 5.4 and predicted
+ * it would constrain 5.9; it does.
+ *
+ * What it costs is latency: the push goes out on the next dispatcher run rather
+ * than on the write. What it buys is that a failed send is *retried* instead of
+ * lost, and that several edits in quick succession coalesce into one push —
+ * which matters because iOS rate-limits silent pushes.
+ *
+ * **Failure is swallowed on purpose, and unlike `safeMaterialiseDoses` this one
+ * really is safe to swallow.** A missed silent push costs a device that finds
+ * out about the change at its next launch instead of within the minute — which
+ * is exactly the behaviour that shipped before 5.9, and which 4.1's launch
+ * re-sync remains the backstop for. §8 is explicit that this is an optimisation
+ * and never a guarantee, so failing the user's save over it would be trading a
+ * real write for a best-effort one.
+ */
+async function enqueueSchedulePush({ userId, reminderId, reason = 'schedule-changed' }) {
+    if (!Number.isInteger(Number(userId))) return null;
+    try {
+        const res = await pool.query(
+            `INSERT INTO push_outbox (user_id, reason, reminder_id) VALUES ($1, $2, $3) RETURNING id`,
+            [userId, reason, Number.isInteger(Number(reminderId)) ? Number(reminderId) : null]
+        );
+        return res.rows[0]?.id ?? null;
+    } catch (e) {
+        console.error('could not queue a schedule-change push for user', userId, 'reminder', reminderId, e);
+        return null;
+    }
+}
+
 async function clearFutureDoses(reminderId) {
     const res = await pool.query(
         `DELETE FROM medication_doses
@@ -631,12 +720,32 @@ export const handler = async (event) => {
                 // failure" this table is supposed to provide is only half loud.
                 'medication_doses',
                 'medication_library',
-                'test_results', 
+                'test_results',
                 'test_config',
                 'user_relationships',
                 'genders',
                 'conditions',
-                'appointment_statuses'
+                'appointment_statuses',
+                // 5.8 / 5.9 — the push tables. Added session 7 on the owner's
+                // instruction, after a session declined to add them and was told
+                // that was overthinking. Same reasoning as `medication_doses`
+                // above: both `enqueueSchedulePush` and the receipts poll fail
+                // *non-fatally* by design, so without a way to look at these
+                // tables the "loud failure" they are supposed to provide is only
+                // half loud — CloudWatch and nothing else.
+                //
+                // These do expose Expo push tokens, which need no credential to
+                // send to. That is a real consideration and it belongs to the
+                // security refactor along with the rest of `/debug/*`, which is
+                // unauthenticated in its entirety; it is not a reason to keep
+                // one table out of a list while the other twelve are in.
+                'push_tokens',
+                'push_outbox',
+                'push_tickets',
+                // The migration ledger. `tish-migrate {"command":"status"}`
+                // answers the same question and is authoritative, but this is
+                // one HTTP call rather than a Lambda invoke.
+                'schema_migrations'
             ];
 
             if (!allowedTables.includes(tableName)) {
@@ -1021,6 +1130,13 @@ export const handler = async (event) => {
                             console.error('could not clear future doses for reminder', updated.id, e);
                         }
                         await safeMaterialiseDoses({ reminderId: updated.id });
+                        // 5.9 — an edit *and* a status toggle both land here, and
+                        // both change what the device should be holding. The
+                        // toggle is the one worth naming: deactivating a reminder
+                        // leaves alarms scheduled on every device until something
+                        // reconciles, and before this the only thing that did was
+                        // the next app launch.
+                        await enqueueSchedulePush({ userId: targetId, reminderId: updated.id });
                         body = updated;
                     }
                 } else {
@@ -1045,9 +1161,19 @@ export const handler = async (event) => {
                     // escalation job and the missed list are both blind to a
                     // dose that was never materialised.
                     if (body?.id) await safeMaterialiseDoses({ reminderId: body.id });
+                    if (body?.id) await enqueueSchedulePush({ userId: targetId, reminderId: body.id });
                 }
             } else if (method === 'DELETE') {
-                await pool.query('DELETE FROM medication_reminders WHERE id = $1 AND user_id = $2', [payload.id, targetId]);
+                const removed = await pool.query('DELETE FROM medication_reminders WHERE id = $1 AND user_id = $2', [payload.id, targetId]);
+                // 5.9 — **only when a row actually went**, unlike the two paths
+                // above. A DELETE that matched nothing is not a schedule change,
+                // and this route answers 200 either way (it does not 404 on a
+                // miss the way PUT does), so `rowCount` is the only thing that
+                // separates them. Enqueuing regardless would wake every device
+                // the owner has for a request that changed nothing.
+                if (removed.rowCount > 0) {
+                    await enqueueSchedulePush({ userId: targetId, reminderId: payload.id, reason: 'reminder-deleted' });
+                }
                 body = { message: "Deleted" };
             }
         }

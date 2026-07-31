@@ -14,6 +14,9 @@ import {
     MIN_HORIZON_DAYS,
     capacityFor,
     planNotificationBudget,
+    plannedBurstCount,
+    reminderCostFor,
+    reminderHold,
 } from './notification-budget.ts';
 
 const own = (id: number, alarmCount: number, burstCount = 3, msUntilNext = 0) =>
@@ -245,4 +248,139 @@ test('the horizon matches the server-side materialisation window', () => {
     // holds alarms for doses the server has no row for, or vice versa, and 5.7's
     // missed list disagrees with what actually rang.
     assert.equal(DEFAULT_HORIZON_DAYS, 7);
+});
+
+// ---------------------------------------------------------------------------
+// The cost model — what the scheduler and the budget must agree about
+// ---------------------------------------------------------------------------
+
+const row = (over: Record<string, any> = {}) => ({
+    id: 12,
+    user_id: 7,
+    status: 'active',
+    alarms: ['08:00', '20:00'],
+    frequency_days: 1,
+    alarm_repeat_count: 3,
+    escalation_enabled: false,
+    escalation_delay_minutes: 30,
+    ...over,
+});
+
+const NOW = new Date(2026, 6, 31, 6, 0, 0, 0);
+
+// --- reminderHold ---
+
+test('a patient holds their own active reminder', () => {
+    const hold = reminderHold(row(), 7);
+    assert.equal(hold.ownerUserId, 7);
+    assert.equal(hold.isCaregiverCopy, false);
+    assert.equal(hold.holds, true);
+});
+
+test('an inactive reminder is held by nobody', () => {
+    assert.equal(reminderHold(row({ status: 'inactive' }), 7).holds, false);
+    assert.equal(reminderHold(row({ alarms: [] }), 7).holds, false);
+    assert.equal(reminderHold(row({ alarms: undefined }), 7).holds, false);
+});
+
+test("a caregiver holds only the escalation-enabled subset of a dependent's set", () => {
+    assert.equal(reminderHold(row({ escalation_enabled: false }), 9).holds, false);
+    assert.equal(reminderHold(row({ escalation_enabled: true }), 9).holds, true);
+    assert.equal(reminderHold(row({ escalation_enabled: true }), 9).isCaregiverCopy, true);
+});
+
+test('an unknown viewer is never assumed to be a caregiver', () => {
+    // Guessing "caregiver" would delay a patient's own alarm, which is the one
+    // failure direction that must not happen silently.
+    assert.equal(reminderHold(row(), undefined).isCaregiverCopy, false);
+    assert.equal(reminderHold(row(), undefined).holds, true);
+});
+
+test('an unknown owner is never assumed to be a caregiver either', () => {
+    const hold = reminderHold(row({ user_id: undefined }), 9);
+    assert.equal(hold.ownerUserId, undefined);
+    assert.equal(hold.isCaregiverCopy, false);
+    assert.equal(hold.holds, true);
+});
+
+// --- plannedBurstCount ---
+
+test('the burst is iOS-only (D-10)', () => {
+    const opts = { isCaregiverCopy: false, hasOwner: true };
+    assert.equal(plannedBurstCount(3, { platform: 'ios', ...opts }), 3);
+    assert.equal(plannedBurstCount(3, { platform: 'android', ...opts }), 1);
+    assert.equal(plannedBurstCount(3, { platform: 'web', ...opts }), 1);
+});
+
+test("a caregiver's escalation copy is always a single alert", () => {
+    assert.equal(plannedBurstCount(6, { platform: 'ios', isCaregiverCopy: true, hasOwner: true }), 1);
+});
+
+test('an unowned reminder degrades to a single alert, because its identifier cannot carry an index', () => {
+    assert.equal(plannedBurstCount(6, { platform: 'ios', isCaregiverCopy: false, hasOwner: false }), 1);
+});
+
+test("the burst honours migration 002's bounds and its default", () => {
+    const opts = { platform: 'ios', isCaregiverCopy: false, hasOwner: true };
+    assert.equal(plannedBurstCount(99, opts), 6, 'clamped to the CHECK upper bound');
+    assert.equal(plannedBurstCount(0, opts), 3, 'zero is not a burst; fall back to the column default');
+    assert.equal(plannedBurstCount(undefined, opts), 3);
+    assert.equal(plannedBurstCount('4', opts), 4, 'Postgres numerics can arrive as strings');
+    assert.equal(plannedBurstCount(-2, opts), 1);
+});
+
+// --- reminderCostFor ---
+
+test('a reminder this device does not hold costs nothing', () => {
+    assert.equal(reminderCostFor(row({ status: 'inactive' }), { viewerUserId: 7, platform: 'ios', now: NOW }), null);
+    assert.equal(reminderCostFor(row({ escalation_enabled: false }), { viewerUserId: 9, platform: 'ios', now: NOW }), null);
+});
+
+test("a patient's own reminder costs alarms x burst", () => {
+    const cost = reminderCostFor(row(), { viewerUserId: 7, platform: 'ios', now: NOW })!;
+    assert.equal(cost.id, 12);
+    assert.equal(cost.alarmCount, 2);
+    assert.equal(cost.burstCount, 3);
+    assert.equal(cost.isCaregiverCopy, false);
+});
+
+test("a dependent's copy counts singly, which is what the budget assumes", () => {
+    const cost = reminderCostFor(
+        row({ escalation_enabled: true, alarm_repeat_count: 6 }),
+        { viewerUserId: 9, platform: 'ios', now: NOW }
+    )!;
+    assert.equal(cost.burstCount, 1);
+    assert.equal(cost.isCaregiverCopy, true);
+});
+
+test('msUntilNext measures to the soonest alarm', () => {
+    // 06:00 now, slots at 08:00 and 20:00 — two hours.
+    const cost = reminderCostFor(row(), { viewerUserId: 7, platform: 'ios', now: NOW })!;
+    assert.equal(cost.msUntilNext, 2 * 60 * 60 * 1000);
+});
+
+test("msUntilNext includes the escalation delay, because that is when the caregiver's phone rings", () => {
+    const cost = reminderCostFor(
+        row({ escalation_enabled: true, escalation_delay_minutes: 45 }),
+        { viewerUserId: 9, platform: 'ios', now: NOW }
+    )!;
+    assert.equal(cost.msUntilNext, (2 * 60 + 45) * 60 * 1000);
+});
+
+test('an unparseable alarm time cannot poison the ordering with NaN', () => {
+    // NaN in msUntilNext would sort arbitrarily and drop the wrong dependent.
+    const cost = reminderCostFor(row({ alarms: ['nonsense'] }), { viewerUserId: 7, platform: 'ios', now: NOW })!;
+    assert.ok(Number.isFinite(cost.msUntilNext));
+});
+
+test('a cost feeds straight back into the plan it was built for', () => {
+    // The round trip is the property that matters: the model and the arithmetic
+    // are only useful if they compose.
+    const costs = [
+        reminderCostFor(row({ id: 1 }), { viewerUserId: 7, platform: 'ios', now: NOW })!,
+        reminderCostFor(row({ id: 2, user_id: 9, escalation_enabled: true }), { viewerUserId: 7, platform: 'ios', now: NOW })!,
+    ];
+    const p = planNotificationBudget(costs, { platform: 'ios' });
+    assert.equal(p.projectedSlots / p.daysAhead, 2 * 3 + 2 * 1);
+    assert.ok(p.projectedSlots <= capacityFor('ios'));
 });

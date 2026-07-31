@@ -1,5 +1,6 @@
 /**
- * Notification identifier scheme: `med-{ownerUserId}-{reminderId}-{HHmm}` (4.2).
+ * Notification identifier scheme:
+ * `med-{ownerUserId}-{reminderId}-{HHmm}-{burstIndex}-{YYYYMMDD}` (4.2, 4.7b, 5.6).
  *
  * Deliberately dependency-free. It lives apart from `notification-helper` — which
  * imports `expo-notifications` and so cannot be loaded outside a native runtime —
@@ -23,7 +24,8 @@ export function identifierFor(
   reminderId: number | string,
   timeStr: string,
   ownerUserId?: number,
-  burstIndex?: number
+  burstIndex?: number,
+  occurrenceKey?: string
 ): string {
   const slot = String(timeStr).replace(':', '');
 
@@ -31,12 +33,49 @@ export function identifierFor(
     // No owner means no burst suffix, and that is a correctness constraint
     // rather than a simplification — see `belongsToReminder` for why a
     // four-segment un-namespaced identifier is ambiguous. 4.7b's caller degrades
-    // to a single alert (loudly) rather than emitting one.
+    // to a single alert (loudly) rather than emitting one, and 5.6's caller
+    // degrades to a single occurrence for the same reason.
     return `med-${reminderId}-${slot}`;
   }
 
   const base = `med-${ownerUserId}-${reminderId}-${slot}`;
-  return burstIndex != null ? `${base}-${burstIndex}` : base;
+  if (burstIndex == null) return base;
+
+  // The occurrence segment rides on the burst index rather than standing alone,
+  // so the shape stays unambiguous by position: segment 4 is always the burst
+  // index and segment 5 is always the occurrence. A caller that has an
+  // occurrence but no burst index would otherwise produce a five-segment string
+  // indistinguishable from `...-{burstIndex}`.
+  const withBurst = `${base}-${burstIndex}`;
+  return occurrenceKey ? `${withBurst}-${occurrenceKey}` : withBurst;
+}
+
+/**
+ * 5.6 — the occurrence segment: the local calendar date an alert fires on,
+ * `YYYYMMDD`.
+ *
+ * **This exists because a burst member's identifier used to be the same string
+ * tomorrow as today**, which is the fact §0.6 records two separate bugs against
+ * and which scheduling several days at once turns from a quirk into data loss:
+ * without it, day 0's alert *n* and day 1's alert *n* are one identifier, so
+ * writing the horizon would overwrite each day with the next and leave a single
+ * alarm behind — silently, because scheduling onto an existing identifier
+ * replaces it rather than erroring.
+ *
+ * Compact and hyphen-free deliberately: `-` is the segment separator, so
+ * `toLocalDateString`'s `YYYY-MM-DD` would split into three.
+ *
+ * The date is the **local calendar date of the trigger**, taken from the
+ * occurrence's own time rather than from each burst member's — a burst that
+ * starts at 23:59:45 crosses midnight partway through, and members of one
+ * occurrence must share a key or a cancel scoped to that occurrence would miss
+ * half of them.
+ */
+export function occurrenceKeyFor(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
 }
 
 /**
@@ -116,7 +155,24 @@ function slotOf(timeStr: string | null | undefined): string | null {
  *
  * Three segments is the un-namespaced form and matches on the reminder alone,
  * which is what clears alarms written before the owner segment existed. Four or
- * more allows for the burst index 4.7b appends and the snooze marker 4.4 does.
+ * more allows for the burst index 4.7b appends, the snooze marker 4.4 does, and
+ * the occurrence date 5.6 does.
+ *
+ * **`occurrenceKey` narrows the match to one day of the horizon, and it is the
+ * 5.6 counterpart of the `timeStr` bug above.** Once several days are scheduled
+ * at once, a reminder+slot-wide cancel when the 08:00 alarm fires takes the next
+ * six days of 08:00 alarms with it — the same shape of failure as the morning
+ * alarm deleting the evening one, one dimension over. Callers responding to a
+ * *specific* alert pass the key from its payload; callers that genuinely mean
+ * every occurrence — deleting a reminder, or reconciling it from scratch — omit
+ * it.
+ *
+ * An identifier carrying **no** occurrence segment matches any key rather than
+ * none. That is the pre-5.6 shape, which by construction *was* the next
+ * occurrence — the one that fires — so treating it as belonging to whichever day
+ * is being cancelled is what it always meant. It also matters for exactly one
+ * window: alarms left in the OS queue by the previous build, until the first
+ * re-sync after upgrade replaces them.
  *
  * **`timeStr` narrows the match to one alarm slot, and omitting it where a slot
  * is known is a live bug rather than a loose filter.** A reminder taken at 08:00
@@ -141,7 +197,8 @@ export function belongsToReminder(
   identifier: string,
   reminderId: number,
   ownerUserId?: number,
-  timeStr?: string | null
+  timeStr?: string | null,
+  occurrenceKey?: string | null
 ): boolean {
   const parts = String(identifier).split('-');
   if (parts[0] !== 'med') return false;
@@ -149,9 +206,15 @@ export function belongsToReminder(
   const slot = slotOf(timeStr);
 
   if (parts.length >= 4) {
+    // parts[5] is the occurrence date when one is present. A snooze alarm
+    // (`...-s`, five segments) has none and so is not shielded by the filter —
+    // deliberately: a slot whose alarm is being answered has no business keeping
+    // an unanswered snooze for the same slot.
+    const occurrence = parts[5];
     return Number(parts[2]) === Number(reminderId)
       && (ownerUserId == null || Number(parts[1]) === Number(ownerUserId))
-      && (slot == null || slotOf(parts[3]) === slot);
+      && (slot == null || slotOf(parts[3]) === slot)
+      && (occurrenceKey == null || occurrence == null || occurrence === occurrenceKey);
   }
   if (parts.length === 3) {
     return Number(parts[1]) === Number(reminderId)

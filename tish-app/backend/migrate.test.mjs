@@ -184,6 +184,46 @@ test('THE UNIQUE IS ON THE TOKEN ALONE, not on (user_id, token)', () => {
   assert.doesNotMatch(tokens, /UNIQUE\s*\(\s*user_id\s*,\s*token\s*\)/i);
 });
 
+test('push_outbox carries what 5.9 queues and what the drain reads back', () => {
+  const outbox = /CREATE TABLE push_outbox[\s\S]*?\);/.exec(schemaSql());
+  assert.ok(outbox, 'push_outbox must exist in SCHEMA_SQL');
+  for (const column of ['user_id', 'reason', 'reminder_id', 'created_at', 'sent_at', 'attempts']) {
+    assert.match(outbox[0], new RegExp(`\\b${column}\\b`), `push_outbox is missing ${column}`);
+  }
+});
+
+test('push_outbox.reminder_id has no foreign key, because deleting a reminder enqueues a row', () => {
+  // The obvious `REFERENCES medication_reminders(id) ON DELETE CASCADE` would
+  // delete the outbox row at exactly the moment it is needed — the delete *is*
+  // the schedule change the patient's device has to hear about. `user_id` keeps
+  // its reference, because there is no event that enqueues on user deletion.
+  const outbox = /CREATE TABLE push_outbox[\s\S]*?\);/.exec(schemaSql())[0];
+  assert.doesNotMatch(outbox, /reminder_id[^,]*REFERENCES/i);
+  assert.match(outbox, /user_id\s+INTEGER\s+NOT\s+NULL\s+REFERENCES\s+users/i);
+});
+
+test('push_tickets keys on the Expo ticket id and keeps the token by value', () => {
+  const tickets = /CREATE TABLE push_tickets[\s\S]*?\);/.exec(schemaSql());
+  assert.ok(tickets, 'push_tickets must exist in SCHEMA_SQL');
+  for (const column of ['ticket_id', 'token', 'kind', 'created_at', 'checked_at', 'status', 'detail']) {
+    assert.match(tickets[0], new RegExp(`\\b${column}\\b`), `push_tickets is missing ${column}`);
+  }
+  // UNIQUE so recording the same ticket twice is idempotent rather than polling
+  // one receipt twice.
+  assert.match(tickets[0], /ticket_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i);
+  // **By value, not by reference.** The whole purpose of reading a receipt is to
+  // delete the push_tokens row it names; a foreign key would cascade the ticket
+  // away first and the reap would have nothing to act on.
+  assert.doesNotMatch(tickets[0], /token[^,]*REFERENCES/i);
+});
+
+test('a reset rebuilds the two new push tables as well', () => {
+  for (const table of ['push_outbox', 'push_tickets']) {
+    assert.equal(RESET_PRESERVED_TABLES.includes(table), false);
+    assert.ok(droppedTables(RESET_SQL).includes(table), `${table} must be dropped by a reset`);
+  }
+});
+
 test('a reset rebuilds push_tokens rather than preserving it', () => {
   // Unlike `user_relationships` — preserved because re-pairing costs a
   // two-device verification exchange — a token costs nothing to recreate: the

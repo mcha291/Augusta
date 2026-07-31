@@ -12,7 +12,10 @@
       "infoPlist": {
         "NSSpeechRecognitionUsageDescription": "Allow $(PRODUCT_NAME) to use speech recognition to convert your voice to text.",
         "NSMicrophoneUsageDescription": "Allow $(PRODUCT_NAME) to use the microphone for voice dictation.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "remote-notification"
+        ]
       },
       "entitlements": {
         "com.apple.developer.usernotifications.time-sensitive": true

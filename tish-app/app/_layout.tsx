@@ -100,18 +100,25 @@ export default function RootLayout() {
       // screen playing its own looping audio. Either way the rest of the burst
       // is redundant and must stop, or they are chimed at after acting.
       //
-      // The order is load-bearing and the reason is unobvious: a burst member's
-      // identifier is the same string tomorrow as it is today, so rescheduling
-      // first would overwrite today's un-fired alerts with tomorrow's dates —
-      // cancelling the burst by accident instead of on purpose, and leaving
-      // nothing for the cancel to find. Cancel, then chain forward.
+      // The order used to be load-bearing and no longer is, for a 5.6 payload:
+      // the cancel is scoped to the day that fired and the rewrite only writes
+      // days after it, so they touch disjoint identifiers. Before the occurrence
+      // segment existed, a burst member's identifier was the same string
+      // tomorrow as today and rescheduling first silently dragged today's
+      // un-fired alerts forward (§0.6). It is kept in this order for the one
+      // case where it still matters — an alarm scheduled by a build from before
+      // 5.6, whose payload has no occurrence key and whose cancel is therefore
+      // still reminder-and-slot-wide.
       //
-      // **Scoped to the slot that fired.** Without `timeStr` this cancelled
-      // every pending alert on the reminder while the chain-forward rewrote only
-      // one of them, so on a twice-daily reminder the morning alarm quietly
-      // deleted the evening one, every day, until the next launch re-sync
-      // repaired it.
-      cancelAlarmBurst(Number(data.reminderId), data.ownerUserId, data.timeStr)
+      // **Scoped to the slot that fired, and to the day it fired on.** Without
+      // `timeStr` this cancelled every pending alert on the reminder, so on a
+      // twice-daily reminder the morning alarm quietly deleted the evening one.
+      // Without `occurrenceKey` it would now do the same to the rest of the
+      // week: 5.6 leaves a pending burst for each day of the horizon, and all of
+      // them share this reminder, owner and slot. A payload from before 5.6
+      // carries no key and falls back to the old reminder+slot scope, which is
+      // what those alarms always meant.
+      cancelAlarmBurst(Number(data.reminderId), data.ownerUserId, data.timeStr, data.occurrenceKey)
         .catch((e) => console.warn('[alarm] could not clear the burst', e))
         .finally(() => { rescheduleNextOccurrence(data); });
     };
@@ -162,7 +169,7 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
   const { user, isLoading, dependents } = useAuth();
   const segments = useSegments();
   const router = useRouter();
-  const { syncOwners } = useNotificationSync();
+  const { syncFor, syncOwners } = useNotificationSync();
   const hasSyncedFor = React.useRef<number | null>(null);
   const syncedOwners = React.useRef<Set<number>>(new Set());
   const registeredFor = React.useRef<number | null>(null);
@@ -212,6 +219,51 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
     // reminder no longer leaves its details cached indefinitely.
     syncOwners(owners, user.id);
   }, [user, isLoading, dependents, syncOwners]);
+
+  // 5.9 — the server has news: re-reconcile the schedule it names.
+  //
+  // **This is the only server-to-device channel in the system**, and what it
+  // buys is that a caregiver's edit reaches the patient's phone without waiting
+  // for them to open the app. Before it, a reminder edited on one device stayed
+  // wrong on every other device until the next launch — which for a patient who
+  // does not open the app daily could be days of alarms the server no longer
+  // agrees with.
+  //
+  // **An optimisation, never a guarantee**, and §8 is explicit about that: iOS
+  // rate-limits silent pushes and Android defers them under Doze, so one may
+  // simply not arrive. The launch re-sync (4.1) stays the backstop and must not
+  // be removed on the assumption that this replaces it.
+  //
+  // A listener of its own rather than a branch inside `showAlarm`, because that
+  // lives in the outer component and this needs `syncFor` and the signed-in
+  // user. Several subscribers to the same event are fine.
+  //
+  // The push carries the *owner* whose schedule changed, which is what makes one
+  // handler cover both directions: a patient's own edit from another device, and
+  // a caregiver's edit to a dependent's reminder — the latter arriving on both
+  // the patient's phone and the caregiver's, each re-syncing that same owner in
+  // its own role.
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+
+    const subscription = Notifications.addNotificationReceivedListener((notification) => {
+      const data = notification.request.content.data as any;
+      if (data?.kind !== 'schedule-changed') return;
+
+      const ownerUserId = Number(data.ownerUserId);
+      if (!Number.isFinite(ownerUserId)) return;
+      // No signed-in user means no session to fetch with. Dropping it costs
+      // nothing: signing in re-syncs everything anyway.
+      if (!user || user.id === 0) return;
+
+      console.info('[push] schedule changed for owner', ownerUserId, '— re-syncing');
+      syncFor(ownerUserId, user.id).catch((e) =>
+        console.warn('[push] could not re-sync after a schedule change', e)
+      );
+    });
+
+    return () => subscription.remove();
+  }, [user, syncFor]);
 
   // 5.8 — register this device for push (D-5).
   //

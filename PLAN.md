@@ -52,7 +52,7 @@ Last updated **2026-07-31**, session 5.
 | 2.8 — `users.timezone` + `users.locale` | `done` | Session 5, migration `005`, mirrored into `SCHEMA_SQL`. **The two columns that could only ever arrive by migration**, because `users` is preserved across a reset and so never picks up a column from a rebuild. Defaults reproduce the constants they replaced exactly (`Asia/Taipei`, `zh-Hant`), so applying it changed no behaviour. Both live rows carry them. Server now reads them: materialisation resolves alarms in `u.timezone`, 5.4 renders copy in `u.locale`. 10 tests. |
 | 2.2 — `medication_doses` | `done` | Migration `003`, mirrored into `SCHEMA_SQL`, including 2.4's deferred `escalation_level` / `last_escalated_at`. Three indexes (5.4's partial pending index, 5.7's per-user, materialisation's per-reminder). Live — created by the reset, since the table is not preserved. |
 | 2.3 — relationship revocation columns | `—` | Blocks 3.2. |
-| 2.4 — escalation settings | `WIP` | **`medication_reminders` half done** — migration `002`, mirrored into `SCHEMA_SQL`, with CHECK constraints and a partial index for 5.4. **`medication_doses` half (`escalation_level`, `last_escalated_at`) deferred to 2.2**, so the table is created complete rather than in two migrations. 4.6 is unblocked. |
+| 2.4 — escalation settings | `done` | **Row corrected in session 6: it said `WIP` and both halves had in fact landed**, so the ledger overstated what was left. `medication_reminders` half — migration `002`, mirrored into `SCHEMA_SQL`, with CHECK constraints and a partial index for 5.4. `medication_doses` half (`escalation_level`, `last_escalated_at`) — migration `003`, deferred into 2.2 so the table is created complete rather than in two migrations, and 2.2's own row has said so since session 3. Verified by grep against `migrations/002` and `003`. 4.6 is unblocked. |
 | 2.5 — `push_tokens` | `done`, **live** | Session 4. Migration `004`, mirrored into `SCHEMA_SQL`, indexed on `user_id`. **UNIQUE on `token` alone, not `(user_id, token)`** — see §0.6; the natural-looking constraint is the wrong one. Not in D-11's preserved set: a token costs nothing to recreate. 3 tests. **Reached the live database in session 5** via `/reset-db` + `/seed-data` (owner's decision, §0.7 item 2 — now resolved). |
 | 2.6 — alarm burst setting | `done` | `alarm_repeat_count`, migration `002` alongside 2.4 — same table, same form. CHECK 1–6. 4.7b's form control is unblocked. |
 | 2.7 — meal time preferences | `done` | Migration `001`, mirrored into `SCHEMA_SQL`. Done as part of 4.8. |
@@ -78,80 +78,73 @@ Last updated **2026-07-31**, session 5.
 | 5.3 — iOS alert urgency | `done` for what is reachable | `interruptionLevel: 'timeSensitive'` on every alert, the self-service `time-sensitive` entitlement in `app.json` (confirmed in `expo config --type introspect`), and an explicit iOS authorization request. Breaks through Focus modes and the notification summary. **Ring-silent and Do Not Disturb still need Critical Alerts**, which is P0.2 and no longer blocks. |
 | 5.1 — dose records | `done` | **Materialisation**: `materialiseDoses` in SQL, rolling 8-day window (today + `DOSE_HORIZON_DAYS`), on create, on edit (clear-then-rebuild), and as a top-up on `GET /medication-reminders`. **Confirmation**: `POST /medication-doses` (`confirm` \| `snooze`), wired to the overlay's confirm button. Verified against the live database. Unblocks 4.4, 5.4, 5.7. |
 | 5.7 — missed dose list | `done` | Server half in session 3 (`GET /medication-doses?from=&to=`, scoped through `checkAccess`, bounded at 500). **Client half in session 4**: `utils/doses.ts` `missedDoses` (13 tests), a section on `medications.tsx` above the reminder list, 3 locale keys in both files. Shown only when non-empty; a dose still inside its snooze is not yet missed. The §0.6 phase caveat still applies — trustworthy for daily reminders only. |
-| 5.8 — push token infrastructure | **registration `done` + live; send half `done` except receipts** | Session 4 built registration: 2.5's table, `POST`/`DELETE /push-tokens` (upsert on token, owner reassignment, 12 tests), `utils/push-token.ts`, registration on sign-in from `_layout.tsx`, unregistration on sign-out from `AuthContext`. **Session 5 built the send half inside 5.4**, as §0.3 directed: the Expo call, chunking at 100, ticket classification and `DeviceNotRegistered` reaping all live in `escalate.mjs` as 5.4's dispatch step. **The receipts poll is the one piece still missing** — it needs somewhere to persist ticket ids between runs, i.e. a `push_tickets` table, i.e. another reset or the migration runner. Ticket-level reaping covers the synchronous case, which is the common one; see §0.6. |
-| 5.4 — server-side caregiver escalation | `done` | Session 5. `escalation-policy.mjs` (pure, 33 tests) + `escalate.mjs` (two handlers, 28 tests). **Two Lambdas, not one** — `tish-escalate-dispatch` (no VPC, has internet, EventBridge target) drives `tish-escalate-db` (VPC-attached, has RDS); §8's single-Lambda shape is impossible in this VPC and §0.6 records why. EventBridge `tish-escalation-schedule` at `rate(5 minutes)`. Claim increments `escalation_level` in the same statement it selects, under `FOR UPDATE ... SKIP LOCKED`. Adds a **lateness floor** the plan does not have (§0.6). |
-| 5.6 — schedule N occurrences ahead | **policy half `done`, wiring `—`** | Session 5. `utils/notification-budget.ts` (new, 22 tests) decides the horizon and what to give up: audibility before horizon, floor of 2 days, then burst, then drop dependents' copies furthest-dose-first, every degradation reported. **Nothing calls it yet** — `scheduleMedicationNotifications` still schedules one occurrence per alarm time. See §0.3 for the exact wiring step; the split follows the same pure/IO pattern as `dose-queue-policy` and `escalation-policy`. |
-| 5.5, 5.9 — rest of delivery layer | `—` | 5.9 reuses 5.4's sender. **5.5 (SMS) is what makes D-8's second rung real** — until it lands every SMS rung substitutes to push, which is D-8's intended fallback but means the ladder is effectively one rung twice. |
+| 5.8 — push token infrastructure | `done`, **complete including receipts** | **Session 7 added the receipts poll**, the last missing piece: migration `006`'s `push_tickets`, `record-tickets` / `due-receipts` / `receipts-checked` ops on the db half, and a `runReceipts` step on the dispatcher that reaps `DeviceNotRegistered` from a *delayed* failure rather than only a synchronous one. Gives up after 24h because Expo keeps receipts about that long. **Not exercised against a real receipt** — that needs an `ok` ticket, which needs a real device (§0.4). History: session 4 built registration: 2.5's table, `POST`/`DELETE /push-tokens` (upsert on token, owner reassignment, 12 tests), `utils/push-token.ts`, registration on sign-in from `_layout.tsx`, unregistration on sign-out from `AuthContext`. **Session 5 built the send half inside 5.4**, as §0.3 directed: the Expo call, chunking at 100, ticket classification and `DeviceNotRegistered` reaping all live in `escalate.mjs` as 5.4's dispatch step. The receipts poll was the one piece left, and session 7 closed it. |
+| 5.4 — server-side caregiver escalation | `done` | Session 5. `escalation-policy.mjs` (pure, 33 tests) + `escalate.mjs` (two handlers, 28 tests). **Two Lambdas, not one** — `tish-escalate-dispatch` (no VPC, has internet, EventBridge target) drives `tish-escalate-db` (VPC-attached, has RDS); §8's single-Lambda shape is impossible in this VPC and §0.6 records why. EventBridge `tish-escalation-schedule`, **`rate(1 minute)` since session 7** — it was 5, and 5.9's drain rides on the same schedule. Claim increments `escalation_level` in the same statement it selects, under `FOR UPDATE ... SKIP LOCKED`. Adds a **lateness floor** the plan does not have (§0.6). |
+| 5.6 — schedule N occurrences ahead | `done` | Policy half session 5 (`utils/notification-budget.ts`, 22 tests): audibility before horizon, floor of 2 days, then burst, then drop dependents' copies furthest-dose-first, every degradation reported. **Wiring session 6.** `utils/alarm-schedule.ts` (new, 25 tests) lays the horizon out; `notification-budget.ts` gained the cost model both halves read (`reminderHold`, `plannedBurstCount`, `reminderCostFor`, 16 tests) so the budget cannot cost a set the scheduler would not write. `notification-identifiers.ts` gained an **occurrence segment** — the trap §0.3 named, see §0.6. `use-notification-sync.ts` is now fetch-all → one budget → schedule-all. `rescheduleNextOccurrence` became a horizon top-up. Client tests 122 → 183. |
+| 5.9 — silent push on schedule change | `done` | Session 7. **Not sent on the write, and that is forced rather than chosen**: `index.mjs` is VPC-attached and this account has no NAT and no interface endpoints, so it can reach neither Expo nor the Lambda API. Verified 2026-07-31 — `describe-vpc-endpoints` and `describe-nat-gateways` are both empty. So a reminder write enqueues into `push_outbox` (migration `006`) and the non-VPC dispatcher drains it. **EventBridge tightened to `rate(1 minute)`** so the queue costs ≤1 min rather than ≤5. Recipients are the owner's devices *and* their active caregivers' — one step wider than §8, see §0.6. Client handler in `_layout.tsx`; `UIBackgroundModes` added to `app.json`, so background delivery on iOS needs the owed native rebuild. 23 tests. |
+| 5.5 — SMS escalation | `—`, **externally blocked** | **The last item in Phase 5.** Gated on Track B: SNS is still sandboxed in `ap-east-2` (B0 filed, B1 spend limit still $1, zero numbers registered). Until it lands every SMS rung substitutes to push, which is D-8's intended fallback but means the ladder is effectively one rung twice. |
 | 6.1, 6.2 — error contract | `—` | Lowest urgency. |
 
 ### 0.3 — In progress right now
 
-**Nothing is half-edited, and there is no decision outstanding and no deploy
-owed.** §0.7 item 2 is resolved; all four Lambdas are deployed and verified.
-**Sessions 1–5 are now committed** — on branch `reminder-delivery-phases-1-5`,
-commit `e7c3cf1`, not merged to `main`.
+**Nothing is half-edited, there is no decision outstanding and no deploy owed.**
+All four Lambdas are deployed and verified on
+`duN/2QDdFDiNw9yjKKEXUhIhPBzJGKwjdhfczNbYAgA=`, all six migrations are applied,
+and every suite is green.
 
-The one thing deliberately incomplete is **5.6's wiring**, described below. Its
-policy module is finished and tested; nothing calls it. That is a boundary, not
-a half-edit — no file is mid-change and every suite is green.
+**Phase 5 is finished except 5.5, which is blocked on AWS rather than on us.**
+That is the headline: the delivery layer now has a device-side horizon (5.6), a
+server-side escalation ladder (5.4), a server-to-device channel (5.9) and
+delivery observability (5.8's receipts). The only thing missing is a second
+*channel*, and SNS is still sandboxed.
 
-**Landed in session 5, 2026-07-31:** the deploy and reset §0.7 item 2 was
-blocking, then **5.4** with **5.8's send half** built into it as §0.3 directed,
-then the **migration runner** and **`users.timezone` / `users.locale`**, then
-**5.6's policy half**. Backend tests 129 → 200, client 100 → 122.
+**Sessions 6 and 7 are uncommitted**, in the working tree on `main`. Sessions 1–5
+are committed — see §0.4, and note the branch name the session-5 handoff gave was
+wrong (§0.6).
 
-**Phase 4 is complete** apart from 4.7d, which is declined. **Phase 5 now has a
-working delivery path** for the first time: a dose that goes unconfirmed is
-escalated to the caregiver's device by the server, without the dependent's phone
-participating at all.
+**Landed in session 7, 2026-07-31: 5.9 and 5.8's receipts poll**, migration `006`,
+a deploy of all four Lambdas, and the EventBridge rate change below. Backend tests
+200 → 227.
 
-> **⚠ Something in this project now runs on its own.** EventBridge
-> `tish-escalation-schedule` invokes `tish-escalate-dispatch` every 5 minutes,
-> and it is the only thing here that acts without a person triggering it *and*
-> sends notifications to people. It is bounded — two rungs per dose, a 24-hour
-> lateness floor, and it skips anyone with no registered device — but know it is
-> there before changing `medication_doses`, `push_tokens` or the reminder
-> escalation columns. Kill switch:
+**Landed in session 6, 2026-07-31: 5.6's wiring half.** The horizon is real: a
+device now holds up to seven days of alarms instead of one. Client tests 122 → 183.
+
+> **⚠ Something in this project runs on its own, and it now runs every minute.**
+> EventBridge `tish-escalation-schedule` invokes `tish-escalate-dispatch` at
+> **`rate(1 minute)`** — session 7 tightened it from 5, because 5.9's silent-push
+> drain rides on the same schedule and a five-minute queue undercuts the whole
+> point of the feature. It is the only thing here that acts without a person
+> triggering it *and* sends notifications to people.
+>
+> Still bounded: two rungs per dose, a 24-hour lateness floor, and it skips
+> anyone with no registered device. **The rate change does not make escalation
+> more aggressive** — the claim is gated on `scheduled_for + delay + grace`, so
+> running more often only fires it closer to the intended moment. Know it is
+> there before changing `medication_doses`, `push_tokens`, `push_outbox`,
+> `push_tickets` or the reminder escalation columns. Kill switch:
 > `aws events disable-rule --name tish-escalation-schedule --region ap-east-2`.
 
-**The next item is 5.6's wiring half, and it is the only thing in the tree that
-is deliberately incomplete.** The policy half — `utils/notification-budget.ts`,
-22 tests — is done and green. **Nothing calls it yet.**
+**The next item is 3.2's group — the Phase 3 consent batch.** See the session 8
+directive at the end of this section; it is the last coherent block of feature
+work that is not blocked on something external.
 
-Split this way for the reason `dose-queue-policy.ts` and `escalation-policy.mjs`
-were: the decisions are pure and testable, the scheduling is neither. But it does
-mean the horizon is still one occurrence deep until the wiring lands, so **5.6
-delivers nothing to a user yet.**
+**What 5.6 did not and could not verify.** Every rule in it is unit-tested and
+the mutation check in §0.5 confirms the tests are not vacuous, but **no alarm
+written under the new identifier scheme has ever been handed to an OS.** The
+whole horizon lives or dies on `scheduleNotificationAsync` accepting a
+six-segment identifier and on iOS keeping what the budget projected, and neither
+can be seen on web or in a simulator. It joins the native-rebuild list below, and
+like the push it will be obvious the moment one exists: schedule a reminder,
+background the app for two days without opening it, and the alarm either rings on
+day two or it does not.
 
-The concrete step, which is the part worth getting right rather than
-re-deriving:
-
-1. **The budget is global, but `scheduleMedicationNotifications` is per
-   reminder.** That is the whole reason this needs wiring rather than a one-line
-   change. The caller that knows the full set is `hooks/use-notification-sync.ts`
-   — it already reconciles self plus every active dependent. Compute the plan
-   there, once, and pass the resulting `daysAhead` / `burstCap` down through
-   `ScheduleOptions`.
-2. `scheduleMedicationNotifications` then loops occurrences `0..daysAhead-1`
-   instead of scheduling only the next one. `computeNextTriggerDate`
-   (`utils/date.ts`) already takes the offset arithmetic; an occurrence `n` is
-   that date plus `n × frequencyDays` days.
-3. **Identifiers must gain an occurrence segment.** This is the trap, and §0.6
-   has bitten twice on it already: a burst member's identifier is currently the
-   *same string* tomorrow as today, which is what makes the chain-forward work.
-   Scheduling several days at once means today's and tomorrow's alerts would
-   collide and silently overwrite each other. `notification-identifiers.ts` needs
-   an occurrence index, and `belongsToReminder` needs to keep matching without
-   it.
-4. Once the horizon is several days deep, **`rescheduleNextOccurrence` largely
-   stops being the mechanism** — the chain-forward exists because only one
-   occurrence was ever scheduled. Decide whether it becomes a no-op or a
-   top-up; do not leave both mechanisms writing the same identifiers.
-5. Log `plan.truncations` wherever the reconciliation logs. A silently shortened
-   horizon is the invisible degradation this item exists to remove.
-
-**Then 5.9** (silent push to repair the horizon — it reuses 5.4's sender
-directly, so it is much cheaper now than it was), then **5.5**.
+**What 5.9 did not and could not verify**, beyond the whole-server path which
+*is* exercised live (§0.4). **No real device has ever received a silent push**,
+for the same reason no real device has received any push: there is no real Expo
+token, because `getExpoPushTokenAsync` cannot run on web or a simulator. And
+because a synthetic token never produces an `ok` ticket, **the receipts poll has
+never had a receipt to read** — its "nothing due" path is exercised on every run
+and its "here is a receipt" path is only unit-tested.
 
 **5.5 is worth more than its number suggests, for a reason session 5 made
 concrete.** D-8's ladder is two rungs, and one of them cannot send: SMS has no
@@ -160,14 +153,8 @@ fallback is working exactly as D-8 specifies, but the practical effect is that
 the ladder is one rung delivered twice. It gets a genuine second channel only
 when 5.5 lands, and that is gated on Track B.
 
-Two smaller things that are cheap and worth doing when something else touches
-their file:
-
-- **5.8's receipts poll is the one piece of the send half still missing.** It
-  needs ticket ids to survive between runs, which needs a `push_tickets` table.
-  **That is now cheap** — the migration runner exists, so it is one `.sql` file
-  and one invoke rather than a reset. Ticket-level reaping ships and covers the
-  synchronous case; see §0.6 for what the delayed case misses.
+Smaller things that are cheap and worth doing when something else touches their
+file:
 
 > **A schema change is no longer a reason to defer anything.** Every item in this
 > plan that was shaped around "we cannot alter a live table" — the timezone
@@ -183,21 +170,75 @@ their file:
 - **`missedDoses` is capped at 20 with no "show more"** (`utils/doses.ts`).
   Carried from session 4. Fine for a week's window; revisit if it ever widens.
 
-**5.6 is more urgent than its position suggests**, and session 4 made it more so
-rather than less: 4.7b already multiplied every patient's pending count by
-`alarm_repeat_count`, and 4.4 now adds a transient snooze alert on top. Both are
-bounded, but the iOS 64-slot cap is binding rather than theoretical and nothing
-yet counts against a budget.
+---
 
-Two smaller things that are cheap and worth doing when something else touches
-their file, listed here so they are not lost:
+## ▶ DIRECTIVE FOR SESSION 8 — the Phase 3 consent batch
 
-- **`missedDoses` is capped at 20 with no "show more"** (`utils/doses.ts`). Fine
-  for a week's window; revisit if the window ever widens.
-- **The escalation copy does not follow a snooze.** D-6 says a snooze re-anchors
-  the escalation clock, and the device-local copy ignores that — see §0.6. It is
-  5.4's job to honour it and the device errs toward alarming, which is the right
-  direction, but the two will disagree until 5.4 lands.
+**Do these four, in this order, because 3.2 needs 2.3's columns and everything
+else is independent.** They are one coherent block: one migration, one deploy,
+one screen, one relationships area. Estimated ~6h in total, which is the one
+thing here that may not fit — if it does not, **drop 3.4 first**; it is the least
+load-bearing and the only one that is cosmetic rather than correctness.
+
+1. **2.3 — revocation columns** *(~30m)*. `revoked_at`, `revoked_by` on
+   `user_relationships`. Migration `007`, mirrored into `SCHEMA_SQL`, then
+   `tish-migrate {"command":"up"}`. Keep the row rather than deleting it, so
+   access history survives revocation. **Note `user_relationships` is one of the
+   four preserved tables (D-11)** — a reset will not rebuild it, so the migration
+   is the only way these columns can arrive. That is the same situation
+   `users.timezone` was in, and §0.6 records what it cost to not notice.
+2. **3.2 — revocation** *(~4h)*. `POST /relationships/revoke`, either participant
+   may revoke, sets `status = 'revoked'` plus 2.3's columns. Enforcement then
+   follows for free: `checkAccess` already filters on `status = 'active'`.
+   Client half is a "who can see my records" list with a revoke action on
+   `profile.tsx`, next to the existing pending-requests section. Locale keys in
+   **both** files. Tests: a revoked relationship denies access on every scoped
+   route.
+
+   **Two things 5.9 just made true that §6's text predates.** Revocation now has
+   a second consequence: a former caregiver's device is still holding escalation
+   copies of that dependent's reminders (4.2 item 4), and nothing cancels them.
+   Consider enqueuing a `push_outbox` row for the dependent on revoke — the drain
+   resolves recipients through `user_relationships ... status = 'active'`, so the
+   revoked caregiver correctly will *not* receive it, which means their stale
+   alarms need a different answer. Worth deciding deliberately and recording;
+   do not let it silently ship as "the alarms just stay there".
+3. **3.3 — revalidate persisted scope** *(~30m)*. `activeDependent` is restored
+   from AsyncStorage in `AuthContext` without checking the relationship still
+   exists, so after a revocation a caregiver sits in a stale scope until some
+   request 403s. Cross-check against `/my-dependents` inside `checkUser()` and
+   clear if absent.
+4. **3.4 — relationship type** *(~1h)*. `relationship_type` is hardcoded
+   `'Family'` in `managed-users.tsx:38`. Offer a selection at request time. This
+   does **not** change access scope — the model stays all-or-nothing, which is a
+   known limitation rather than a defect.
+
+**Before you start:** `aws sts get-caller-identity`, and ask Robin to re-login if
+it has lapsed rather than working around it. **Before you believe anything in
+this document about the database:** `tish-migrate {"command":"status"}`.
+
+**End session 8 by writing the session 9 directive**, in this same place and this
+same shape, replacing this block. Session 9 is **Phase 6 — the error contract**:
+6.1 typed errors mirroring `dashboard/server/index.mjs`'s `{ error, code,
+problems? }` shape (~3h), then 6.2 mapping those codes to i18n keys client-side
+with keys in both locale files (~2h). Do them together — 6.2 is meaningless
+without 6.1's codes — and give that session nothing else, because 6.1 touches
+every route. Fold in the three carried fixes listed above if there is room.
+**And instruct session 9 to end by writing the session 10 directive**, which is
+**device verification**: it cannot start until Robin triggers a native rebuild,
+and it is the session that finally exercises the ten things now waiting on one —
+the three sounds, the burst, the Android channel, exact alarms, the iOS
+interruption level, snooze firing, tray dismissal, token registration, 5.4's and
+5.9's last hop to a real phone, and 5.6's entire horizon. Budget it as *at least*
+one session: every time this project has verified something live rather than
+stopping at green tests, it has found a bug the suite could not see.
+
+---
+
+*(A duplicate of the two bullets above, plus a paragraph arguing 5.6's urgency,
+stood here until session 6 removed them. The urgency argument was answered by
+5.6 landing, and the duplicated bullets had drifted — one of them still said the
+snooze disagreement would last "until 5.4 lands", which it did in session 5.)*
 
 > When picking up an item, replace this with: the item id, which files have been
 > touched, what is half-done, and what the next concrete step is. A session that
@@ -314,8 +355,14 @@ Did not commit and did not deploy.
 
 ### 0.4 — State of the tree
 
-- **Nothing is committed.** All of sessions 1–5 sits in the working tree on
-  `main`.
+- **Sessions 1–5 are committed on `main`, as *two* commits, and nothing has been
+  pushed.** `e7c3cf1` (phases 1–5, the migration mechanism, server escalation)
+  and `a1454c8` (5.6's policy half plus the session-5 handoff). `main` is 4 ahead
+  of `origin/main`. **The session-5 handoff named a branch
+  `reminder-delivery-phases-1-5` that does not exist** — see §0.6; verify with
+  `git log --oneline -3` rather than believing a handoff. **Session 6's work
+  (5.6's wiring) and session 7's (5.9, 5.8's receipts) are uncommitted**, in the
+  working tree.
 - **⚠ There is now a scheduled job running unattended.** EventBridge rule
   `tish-escalation-schedule`, `rate(5 minutes)`, ENABLED, targeting
   `tish-escalate-dispatch`. This is the first thing in the project that acts
@@ -391,6 +438,52 @@ through the gateway (§0.6):
 | `/debug/medication_doses` | **15** doses, in two buckets: `00:00Z` ×7 and `12:00Z` ×8 — i.e. 08:00 and 20:00 Taipei, so the timezone resolution is right |
 | `tish-escalate-db` `{op:"claim"}` | **200**, `{"claims":[]}` — the claim SQL parses and resolves against the live schema; empty is correct, every dose was still in the future |
 | `tish-escalate-dispatch` `{}` | **200**, clean summary — proves the cross-VPC invoke works *and* that the runtime provides `@aws-sdk/client-lambda` |
+
+**Session 7 probes, 2026-07-31**, all by direct `aws lambda invoke`:
+
+| Probe | Result |
+|---|---|
+| `tish-migrate {"command":"status"}` before | `pending: [006_push_outbox_and_tickets.sql]` |
+| `{"command":"up","dryRun":true}` then `{"command":"up"}` | **applied**; a second `status` reports none pending, none orphaned — **six applied** |
+| `CodeSha256` on all four Lambdas | all `duN/2QDdFDiNw9yjKKEXUhIhPBzJGKwjdhfczNbYAgA=`, matching the uploaded zip |
+| dispatcher, baseline | **200**, summary carries the five new keys, `errors: []` — the new tables resolve |
+| `POST /push-tokens` (synthetic, user 1) → `POST /medication-reminders` | **200** each; the write enqueues an outbox row |
+| dispatcher, run 1 | `silentBatches: 1, silent: 0, reaped: 1, errors: []` — **the whole 5.9 chain**: the write queued, the drain resolved user 1's device, Expo answered `DeviceNotRegistered` for the synthetic token, and the VPC half deleted it |
+| dispatcher, run 2 | all zero — the row was **closed, not retried**, so `outbox-done` works |
+| `DELETE /medication-reminders` → dispatcher | `silentBatches: 0` — the delete enqueued, the drain found no device (the token had just been reaped) and closed the row rather than retrying forever |
+| **no-op `DELETE`, with a token re-registered** | `silentBatches: 0` — **the `rowCount > 0` guard genuinely works.** Run separately and deliberately: with no token present it is indistinguishable from a row that was enqueued and closed |
+| unattended, 8 consecutive minutes of CloudWatch | **8 runs, one per minute, `errors: []`** — the rate change took effect and the schedule is firing |
+
+The probe reminder and the synthetic token were both removed afterwards.
+`/debug/medication_reminders` is back to one row: session 3's fixture, reminder 1,
+200mg at 08:00 and 20:00, escalation enabled. **Leave it.**
+
+**`/debug/*` was widened after all**, in the same session. It was initially left
+alone — the guardrail at the time said not to widen it without asking, and
+`push_tickets` holds push tokens that Expo's unauthenticated API would let anyone
+send to — and the owner's answer was that this is overthinking security that
+belongs to the refactor as a whole. `push_tokens`, `push_outbox`, `push_tickets`
+and `schema_migrations` are now in `allowedTables`, and §1's guardrail is
+reversed. The probe table above was gathered before that, from the dispatcher's
+own summary, which is why it reads the way it does.
+
+**And the widened dump immediately paid for itself, which is the argument for the
+owner's call.** `/debug/push_outbox` shows the whole of 5.9's behaviour directly,
+where the table above could only infer it:
+
+| id | reason | reminder | created | sent | attempts |
+|---|---|---|---|---|---|
+| 1 | `schedule-changed` | 4 | 13:29:23 | **13:29:32** | 1 |
+| 2 | `reminder-deleted` | 4 | 13:29:54 | **13:29:56** | 1 |
+
+Three things are visible here that the summary could only imply: the create and
+the delete each enqueued exactly one row; both were **closed within seconds** of
+the next drain, including row 2, which had no device to send to; and **there is
+no third row** — the no-op `DELETE` issued at 13:30 enqueued nothing, so the
+`rowCount > 0` guard is confirmed by observation rather than by a
+carefully-constructed probe. `push_tickets` is empty, which is correct: a
+synthetic token never yields an `ok` ticket. `push_tokens` is empty, confirming
+the cleanup. `schema_migrations` reports six.
 
 **5.4 was then exercised end to end against a dose built to come due during the
 session** — a reminder for user 2 (the dependent) timed three minutes ahead with
@@ -491,23 +584,65 @@ rebuilding from unchanged source produces a different one, so do not diff a
 fresh build against it.
 
 `tish-migrate` `{"command":"status"}` reports **five applied, none pending, none
-orphaned** — the first time `schema_migrations` and the database have agreed. Per §0.6, that hash is only meaningful against *that* upload —
-rebuilding from unchanged source produces a different one, so do not diff a
-fresh build against it.
+orphaned** — the first time `schema_migrations` and the database have agreed.
+
+**End of session 7**: **227/227 backend tests** (200 → 227: 5 for migration 006's
+schema and the two new tables' shape, 22 for the outbox drain, the receipts poll
+and the step isolation; two existing tests were *tightened* rather than
+weakened — they gated on "any op that is not a claim", which meant the new ops
+read as a reap, so they now name the op they mean), **183/183 client** — session
+7 touched one client file and added no pure logic — `npx tsc --noEmit` clean,
+`npx eslint .` 0 errors / 41 warnings (the same 41), and
+`npm run validate-translations` at **325 keys**, unchanged: 5.9's push carries no
+user-facing copy by design, because it is silent.
+
+`app.json` gained `UIBackgroundModes: ['remote-notification']`, confirmed present
+through `npx expo config --type introspect` alongside the `audio` mode that was
+already there. **It has no effect until the native rebuild.**
+
+**End of session 6**: **183/183 client tests** (122 → 183, all from 5.6's
+wiring: 5 for `addDays`, 17 for the identifier occurrence segment, 16 for
+`notification-budget`'s new cost model, and 25 for the new
+`utils/alarm-schedule.ts`; no existing assertion renumbered or weakened),
+**200/200 backend** — session 6 touched no backend code and made no AWS call —
+`npx tsc --noEmit` clean, `npx eslint .` 0 errors / 41 warnings (the same 41,
+none new), and `npm run validate-translations` at **325 keys**, unchanged: 5.6
+adds no user-facing string. The app bundles and the login screen renders with an
+empty error console.
+
+**The new tests were mutation-checked rather than trusted**, because session 5
+had found three of its own budget tests passing vacuously. Deleting the
+occurrence segment from `identifierFor` — the single change that reintroduces the
+bug 5.6's wiring exists to avoid — fails **8** tests across three files,
+including both of the ones named `THE PROPERTY`. See §0.5.
 
 **Client tests now live in the repo and run in CI** — `cd tish-app && npm test`,
 **100/100**. This closed the "tests with no home" problem that had cost sessions
 1 and 2 their suites; see §0.8 for what it covers and, more importantly, what it
 does not.
 
-- **15** for `computeNextTriggerDate` (`utils/date.ts`) — offset ordering, the
-  midnight crossing, the chain-forward, and the guarantee that no offset ever
-  schedules into the past.
-- **31** for `utils/notification-identifiers.ts` — session 2's 11, session 3's
-  seven for the burst index, and **13 more in session 4** for the slot filter and
-  the snooze marker: both directions of the id/slot collision, the sibling-slot
-  case that was a live bug, seconds surviving the comparison, an empty-string
-  slot not silently widening the match, and a build-then-match round trip.
+- **20** for `utils/date.ts` — 15 for `computeNextTriggerDate` (offset ordering,
+  the midnight crossing, the chain-forward, and the guarantee that no offset ever
+  schedules into the past) and **5 in session 6** for `addDays`, including that a
+  malformed step cannot produce an Invalid Date.
+- **48** for `utils/notification-identifiers.ts` — session 2's 11, session 3's
+  seven for the burst index, session 4's 13 for the slot filter and the snooze
+  marker (both directions of the id/slot collision, the sibling-slot case that
+  was a live bug, seconds surviving the comparison, an empty-string slot not
+  silently widening the match, a build-then-match round trip), and **17 in
+  session 6** for the occurrence segment: that it is local rather than UTC, that
+  a burst index can never be read as one at any repeat count, that an identifier
+  carrying none still matches any occurrence filter, and the collision the whole
+  segment exists to prevent.
+- **38** for `utils/notification-budget.ts` — session 5's 22 for the capacity
+  arithmetic, and **16 in session 6** for the cost model the scheduler and the
+  budget now share.
+- **25** for `utils/alarm-schedule.ts` (session 6) — the layout of the horizon:
+  that every identifier in a plan is distinct, that answering one alarm cancels
+  exactly its own burst and leaves the rest of the week, that a burst crossing
+  midnight keeps one occurrence key, that the chain-forward repairs a gap rather
+  than only appending, and the end-to-end property that a device never lays out
+  more alerts than the budget projected.
 - **19** for `utils/meal-alarms.ts` — the day-boundary wrap, manual-wins-collision,
   positional alignment of the three arrays, and pre-migration rows carrying no
   `alarm_sources`.
@@ -556,6 +691,24 @@ Still not verified in a running app: 4.2's attribution line and the delayed
 escalation alarm — those need a signed-in session on a device, not just the
 relationship. Also unverified on a device: the burst, the interruption level, and
 every sound. All native-only, so no web build could have exercised them.
+
+**Session 7 adds two more.** 5.9's silent push has never reached a device — and
+on iOS it cannot until the rebuild, because `UIBackgroundModes` only takes effect
+in a built app; without it the push arrives while the app is foregrounded, which
+is the case the launch re-sync would have covered anyway. And **5.8's receipts
+poll has never read a receipt**: a receipt only exists for an `ok` ticket, a
+synthetic token never produces one, so the path that reaps a delayed
+`DeviceNotRegistered` is unit-tested only. Its "nothing due" path runs every
+minute and is clean.
+
+**Session 6 adds one to that list, and it is the largest single thing on it.**
+No alarm written under 5.6's six-segment identifier has ever been handed to an
+OS. The reconciliation pass returns before scheduling on web, by design, so a web
+build cannot reach the code at all — every assertion about the horizon is a unit
+test over pure functions. What a device would settle: that
+`scheduleNotificationAsync` accepts the longer identifier, that iOS really does
+keep 60 pending alerts rather than fewer, and that a burst member's cancel finds
+the day it fired and not the week.
 
 **What session 5 could not verify about 5.4, and it is one specific thing.** The
 whole server path is exercised — claim, ladder, substitution, Expo call, ticket
@@ -675,12 +828,16 @@ session expired between applying the migration and deploying that wiring, which
 is worth noting only because the gap was *invisible*: the constants and the
 column values were identical, so nothing misbehaved in between.
 
-Finally **5.6's policy half** and the session's first commit — sessions 1–5 as
-one checkpoint on `reminder-delivery-phases-1-5`, 66 files, deliberately
-excluding the unrelated `opus 5 vs 4.8.txt` scratch file in the working tree.
-Stopped before 5.6's wiring rather than starting a multi-hour change with no
-room to finish it; §0.3 has the five concrete steps, including the identifier
-collision that would otherwise be discovered the hard way for the third time.
+Finally **5.6's policy half** and the session's first commits — 66 files,
+deliberately excluding the unrelated `opus 5 vs 4.8.txt` scratch file in the
+working tree. Stopped before 5.6's wiring rather than starting a multi-hour
+change with no room to finish it; §0.3 had the five concrete steps, including the
+identifier collision that would otherwise be discovered the hard way for the
+third time.
+
+*(Corrected in session 6: this paragraph said "one checkpoint on
+`reminder-delivery-phases-1-5`". There were **two** commits, `e7c3cf1` and
+`a1454c8`, and they are on `main` — no such branch exists. See §0.6.)*
 
 Worth recording about the budget module itself: **the first failing test was the
 test, not the code.** The scenario written to prove "dependents get dropped
@@ -699,6 +856,112 @@ safety mechanism that is silent by design and unobservable by accident is not
 one anybody should trust. Both in §0.6. **The first bug hid the second**, which
 is the argument for going and reading the logs rather than assuming a green
 return value means the thing is observable.
+
+**Session 6 — 2026-07-31.** One item: **5.6's wiring**, the only thing session 5
+left deliberately incomplete. No backend change, no AWS call, no deploy — like
+session 4, everything this needed was already in the tree.
+
+§0.3's five steps held, and step 3 was the one that cost the time it was
+predicted to. The plan asked for an occurrence *index*; what shipped is an
+occurrence **date** (`YYYYMMDD`), and the reason is worth carrying: an index is
+relative to when the schedule was written, so `-o0` means today in one pass and
+tomorrow in the next — the same identifier meaning two different alarms, which is
+precisely the fact §0.6 already records two bugs against. A date is stable, which
+makes both writers idempotent and let step 4 be answered without hedging.
+
+That answer is the other thing worth reading. §0.3 asked whether
+`rescheduleNextOccurrence` becomes a no-op or a top-up; it is a top-up, and it
+rewrites the **whole** forward horizon rather than appending one day at the far
+end. Appending is cheaper and wrong in the case that matters — an app that has
+not run for three days has lost those occurrences, and appending leaves the hole
+in the middle. Date-keyed identifiers make the rewrite idempotent, so it repairs
+the gap instead. There is a test for exactly that.
+
+Two structural problems the plan did not name, both in §0.6. The budget is
+device-wide while `syncFor` is called for **one** owner from the medications
+screen, so budgeting from that owner's reminders alone would overrun the cap on a
+caregiver's phone — hence a device-wide cost map. And three callers outside the
+reconciliation pass schedule a single reminder in response to a user action;
+falling back to one occurrence in those would have collapsed a reminder's horizon
+every time someone toggled it — hence the remembered plan.
+
+Split the layout into `utils/alarm-schedule.ts` partway through rather than
+leaving it inside `notification-helper`, for the reason sessions 3, 4 and 5 each
+made the same call: the identifier arithmetic is the part that fails silently,
+`notification-helper` imports `expo-notifications` and cannot be loaded outside a
+native runtime, and "I reasoned about it" is not good enough for a rule that has
+already produced three unpredicted bugs. `notification-helper` is now the I/O
+half and nothing else.
+
+**Session 7 — 2026-07-31.** **5.9** and **5.8's receipts poll**, together, because
+both needed the same migration and the same deploy. Phase 5 is now finished apart
+from 5.5, which is blocked on AWS.
+
+The architecture was decided by the network rather than by preference, and it is
+the thing worth carrying. §8 says the reminder write sends the push. It cannot:
+`index.mjs` is VPC-attached because RDS is private, and **a VPC-attached function
+here can reach neither `exp.host` nor the Lambda API** — so it can neither send
+nor ask the non-VPC dispatcher to. §0.6 predicted this would constrain 5.9 and it
+did. Verified rather than assumed this time, in one command:
+`describe-vpc-endpoints` and `describe-nat-gateways` both return `[]`.
+
+So the write enqueues into `push_outbox` and the dispatcher drains it. That costs
+latency and buys two things the direct send would not have had: a failed send is
+**retried** rather than lost, and several edits in a minute **coalesce** into one
+push per device, which matters because iOS rate-limits silent pushes. The latency
+was then bought back by tightening EventBridge from `rate(5 minutes)` to
+`rate(1 minute)` — safe because the escalation claim is gated on
+`scheduled_for + delay + grace`, so a more frequent run fires it *closer* to the
+intended moment rather than more aggressively.
+
+**The restructure this forced is the part a future session should not undo.** The
+dispatcher used to return as soon as there were no doses to escalate — which is
+most runs — and 5.9's drain and 5.8's poll both live after that point. Leaving
+the early return would have made the silent push work only on the runs that
+happened to be escalating something. It is now three isolated steps, each in its
+own try/catch, so that an optimisation cannot take a safety mechanism down with
+it. There is a test named for the regression.
+
+Two bugs found by the tests rather than by reading, both the same shape as things
+§0.6 already records. **`Number(null)` is 0 and passes `Number.isInteger`**, so
+the obvious id sanitiser turned a null in an untrusted payload into a request to
+update row 0. And the `SCHEMA_SQL` parity test matches a table block non-greedily
+up to the first close-paren-semicolon, so a `);` **inside a SQL comment** silently
+truncates the block and reports every column below it as missing — which cost two
+attempts, the second being the comment written to warn about the first.
+
+Exercised against the live stack rather than stopping at green tests, which is
+where the two probes that actually prove something came from: a reminder write
+that produced `silentBatches: 1, reaped: 1`, and a second run that produced all
+zeros because the row had been *closed* rather than retried. The no-op-delete
+guard needed its own probe with a token deliberately re-registered — without one,
+"enqueued nothing" and "enqueued and closed with no device" are the same summary.
+
+Initially did **not** widen `/debug/*` to inspect the new tables, though it was
+the obvious way, because §1 forbade widening it without asking. **The owner
+overruled that at the end of the session**: `/debug/*` is unauthenticated in its
+entirety and belongs to the security refactor as a unit, so holding individual
+tables out of the whitelist is overthinking. `push_tokens`, `push_outbox`,
+`push_tickets` and `schema_migrations` were added and §1's guardrail reversed —
+it now says to widen freely. Worth recording as a pattern rather than an
+incident: this is the **fourth** time a session has been told it was being too
+cautious with something the owner had already priced, which is why §1's first
+guardrail exists.
+
+**The tests were then mutation-checked rather than trusted**, because session 5
+found three of its own budget tests passing vacuously and the same trap was live
+here — every new test passed on the first run, which is exactly what a vacuous
+suite looks like. Deleting the occurrence segment from `identifierFor` fails 8
+tests across three files, including both `THE PROPERTY` assertions. Separately
+confirmed that the end-to-end test's extreme fixture genuinely reaches the
+*drop* path (`dropped: [2]`) rather than being absorbed by the burst trim, which
+is the specific way session 5's tests had been vacuous.
+
+Also corrected two stale things in this document: §0.3 carried a duplicated pair
+of bullets, one of which still said the snooze disagreement would last "until 5.4
+lands" — it landed in session 5 — and §0.4 said "nothing is committed" while §0.3
+three sections above said the opposite. The commit facts in the session-5 handoff
+were wrong in two ways; see §0.6.
 
 ### 0.6 — Findings that amend the plan
 
@@ -1308,6 +1571,159 @@ return value means the thing is observable.
   `MismatchSenderId`) are deliberately not reapable for the same family of
   reason: they make every token look dead at once, and acting on them would empty
   `push_tokens` and force every user to reopen the app to recover.
+- **⚠ 5.6's occurrence segment must be a *date*, not an index, and §0.3 asked for
+  the index.** Both fix the collision §0.3 names — today's alert *n* and
+  tomorrow's alert *n* being one identifier — but an index only fixes it *within
+  one scheduling pass*. It is relative to when the pass ran, so `-o0` means today
+  in this pass and tomorrow in the next, which is the same "one identifier, two
+  alarms" fact one level up. It would have reappeared the first time two writers
+  disagreed about which day was day zero, and the two writers exist: the
+  reconciliation pass and the chain-forward.
+
+  Shipped as `YYYYMMDD` in the device's local zone, hyphen-free because `-` is
+  the segment separator. Three consequences worth knowing:
+
+  - **Both writers became idempotent**, which is what let the chain-forward be a
+    full rewrite rather than an append (below). Writing an occurrence that is
+    already scheduled replaces it with an identical alert.
+  - **The key comes from the occurrence's trigger, not from each burst member's
+    own time.** A burst starting at 23:59:45 crosses midnight partway through,
+    and members of one occurrence must share a key or an occurrence-scoped cancel
+    clears half of it. There is a test that asserts the scenario actually crosses
+    midnight, because the version that does not proves nothing.
+  - **It is read in local time, not UTC.** In UTC+8 a 23:50 alarm and an 08:00
+    one fall on different UTC dates, so a UTC key would file two slots of one
+    reminder under different days.
+- **⚠ The cancel-then-reschedule ordering has stopped being load-bearing, and
+  leaving the old claim in place would have been worse than removing it.** §0.6's
+  earlier finding — reschedule first and today's un-fired alerts are dragged into
+  tomorrow — was true because the identifiers were shared. With an occurrence
+  segment the cancel is scoped to the day that fired and the rewrite only writes
+  days after it, so the two touch disjoint identifiers and either order works.
+
+  `_layout.tsx` still sequences them, for one narrow reason that is now the whole
+  justification: an alarm scheduled by a build from **before** 5.6 carries no
+  occurrence key, so its cancel is still reminder-and-slot-wide and would eat a
+  horizon written first. Such an alarm also chains only one occurrence forward,
+  collapsing its slot's horizon to a day — self-repairing, because the listener
+  that runs it only fires when the app is running, and the app re-syncs at launch.
+- **⚠ The budget is device-wide and `syncFor` is called with one owner, which
+  §0.3 step 1 half-anticipated.** Step 1 correctly said the plan must be computed
+  in `use-notification-sync`, where the full set is known — but that is only true
+  of `syncOwners`, the launch path. `medications.tsx` calls `syncFor` for a single
+  owner on every screen focus, and on a caregiver's device budgeting a dependent's
+  reminders as though they were alone on the phone is how you overrun the 64-slot
+  cap without noticing.
+
+  Resolved with a module-level map of per-owner costs, so a single-owner pass
+  still budgets against the whole device. Two properties make it safe: entries for
+  owners not in this pass are stale only in the *cost* dimension, which changes
+  when a reminder is edited rather than minute to minute; and the direction of
+  error is conservative, because a reminder that has since been deleted still
+  counts and therefore shortens the horizon. **Nothing clears it on sign-out,
+  deliberately** — signing out does not cancel the alarms already on the device,
+  so those slots really are still consumed.
+- **Three callers schedule a single reminder and none of them can compute a
+  budget**, which §0.3's "pass `daysAhead` down through `ScheduleOptions`" does
+  not cover. The form's optimistic save, the medications screen's status toggle,
+  and the profile screen's meal-time regeneration each call
+  `scheduleMedicationNotifications` for one reminder after a user action, and
+  each begins by cancelling that reminder's alarms. Falling back to one occurrence
+  would therefore have *collapsed* a reminder's horizon every time someone toggled
+  it — 5.6's own invisible degradation, arriving through 5.6's own machinery, and
+  lasting until the next launch because the toggle does not re-sync.
+
+  Resolved by remembering the last plan (`rememberBudgetPlan`) rather than
+  threading it through every call site, which no call site could supply anyway.
+  It is mildly stale by construction — a reminder that has just been activated was
+  not in the set the plan was costed against — and that is bounded and
+  self-correcting.
+- **The chain-forward rewrites the whole forward horizon rather than appending
+  one day, and §0.3 step 4 asked for that decision.** Appending is the obvious
+  top-up and it is wrong in the case that matters: if the app has not run for
+  three days, those occurrences fired and are gone, so appending a single far-end
+  day leaves the gap in the middle. The rewrite covers the whole forward window
+  and is idempotent, so it repairs the gap. It costs up to `horizon × burst`
+  scheduling calls per dose, once, because the first burst member's arrival
+  cancels the rest.
+- **⚠ The session-5 handoff got the commit facts wrong in two ways, and both
+  would send a session looking for something that is not there.** It said the work
+  was "committed on `reminder-delivery-phases-1-5` (`e7c3cf1`), *not* merged to
+  `main`". There is no such branch — `git branch -a` lists only `main` and
+  `origin/main` — and the work is on `main` as **two** commits, `e7c3cf1` and
+  `a1454c8` (5.6's policy half plus the handoff itself), not one. "Nothing has
+  been pushed" was right: `main` is 4 ahead of `origin/main`.
+
+  Not a code problem, but the same class as the stale-plan entries this section
+  exists for: §0.4 simultaneously said "nothing is committed", three sections
+  below §0.3 saying it was. **`git log --oneline -3` costs nothing; a handoff's
+  claim about the repo is worth exactly as much as `tish-migrate status` is worth
+  against a claim about the database.**
+- **⚠ 5.9 cannot send on the write, and §8 assumes it can.** "Any write to a
+  reminder sends a data-only push" describes `index.mjs` calling Expo. That
+  function is VPC-attached because RDS is private, and a VPC-attached function in
+  this account has **no outbound anything** — not `exp.host`, and not the Lambda
+  API either, so it cannot even ask the non-VPC dispatcher to send on its behalf.
+  §0.6 recorded the same constraint for 5.4 and predicted it would reach 5.9;
+  this is that prediction landing.
+
+  **Verified in one command rather than reasoned about**, which is worth noting
+  because the earlier finding needed a throwaway Lambda to prove:
+  `aws ec2 describe-vpc-endpoints` and `describe-nat-gateways` both return `[]`
+  in `ap-east-2`. If either ever stops being empty, this constraint has changed.
+
+  Resolved with an outbox table drained by the dispatcher. **Two things that
+  makes better than the direct send, rather than merely possible:** a send that
+  fails because Expo is unreachable is retried instead of lost, and several edits
+  in a minute coalesce into one push per device — which matters, because iOS
+  rate-limits silent pushes and the naive version would send four.
+
+  The cost is latency, and it was bought back by tightening the EventBridge rate
+  to one minute. **The upgrade path, if sub-second ever matters:** a Lambda
+  interface endpoint (~US$8/month, much cheaper than the NAT gateway the owner
+  declined for 5.4) would let the write path nudge the dispatcher directly. The
+  outbox stays either way — it is the durability, not the transport.
+- **⚠ The dispatcher's empty-claims early return would have silently disabled
+  5.9.** `dispatchHandler` returned as soon as there were no doses to escalate,
+  which is the overwhelming majority of runs, and both the outbox drain and the
+  receipts poll are steps after it. The feature would have worked *only on runs
+  that happened to be escalating something* — that is, almost never, and
+  non-deterministically, which is the worst possible way to fail.
+
+  Restructured into three isolated steps, each in its own try/catch. **The
+  isolation is the point, not the tidiness**: 5.4 is a safety mechanism and 5.9
+  is an optimisation, and neither must be able to take the other down. There is a
+  test named `THE REGRESSION` for the early return specifically.
+- **5.9's recipients are the owner's devices *and* their active caregivers', one
+  step wider than §8.** §8 says "the owner's devices". Under 4.2 item 2 a
+  caregiver's phone holds escalation copies of every escalation-enabled reminder
+  their dependent has, and those copies go stale on exactly the edit that
+  enqueued the row — so the owner-only reading would leave the one
+  server-to-device channel in the system reaching half the devices that hold the
+  schedule.
+
+  Resolved at **drain** time rather than enqueue time, which is what makes a
+  relationship created between the write and the drain honoured, and a **revoked**
+  one correctly not: the recipient query filters `status = 'active'`. Worth
+  knowing before 3.2 lands, because it means revocation already stops the silent
+  push without any extra work — and equally that it does *nothing* about the
+  alarms already sitting on the revoked caregiver's device.
+- **⚠ `Number(null)` is 0, and it passes `Number.isInteger`.** The obvious
+  sanitiser for a list of ids arriving over an untrusted Lambda payload —
+  `.map(Number).filter(Number.isInteger)` — turns `null` into a request to update
+  row 0, and `''` likewise. Harmless against a SERIAL column that starts at 1,
+  and exactly the class of quiet coercion this plan keeps finding the hard way
+  (`Math.max(NaN, 1)` is the same shape). Check the type before coercing, not
+  after. Found by a test asserting nothing reached the database.
+- **⚠ A `);` inside a SQL comment truncates the `SCHEMA_SQL` parity check, and the
+  failure names the wrong problem.** `migrate.test.mjs` extracts a table block
+  with a non-greedy match up to the first close-paren-semicolon, so a comment
+  containing one — `-- 'dose-escalation' (5.4) or 'schedule-changed' (5.9);` —
+  ends the block early and every column below it is reported as **missing from
+  `SCHEMA_SQL`**, which is not what is wrong. Cost two attempts in session 7, the
+  second being the comment written to warn about the first. Either avoid the
+  sequence in comments or strip comments before extracting; the current code does
+  the former and says so at the site.
 
 ### 0.7 — Blocked on you
 
@@ -1422,6 +1838,32 @@ return value means the thing is observable.
    leave it was written when it was the only way to test 4.4 and 5.7 — both of
    which are now built. Recreating it is one API call.
 
+2b. **⚠ THE NATIVE REBUILD IS NOW THE SINGLE LARGEST THING OWED, AND IT IS
+   YOURS TO TRIGGER.** It has not been made since the `app.json` plugin changes,
+   and eleven separate pieces of work are waiting on it — every one of them
+   built, tested and unverifiable without it:
+
+   | Waiting on the rebuild | Item |
+   |---|---|
+   | The three alarm sounds | 4.7a |
+   | The alarm burst firing as a burst | 4.7b |
+   | Android channel audibility (alarm stream) | 4.7e |
+   | Android exact alarms | 5.2 |
+   | The iOS time-sensitive interruption level | 5.3 |
+   | The snooze alarm actually firing | 4.4 |
+   | Tray dismissal on response | 4.7c |
+   | Push token registration on a real device | 5.8 |
+   | 5.4's last hop — Expo to a physical phone | 5.4 |
+   | **5.6's entire seven-day horizon** | 5.6 |
+   | **5.9's silent push, which needs `UIBackgroundModes`** | 5.9 |
+
+   The last two are new since session 5 and are the biggest: 5.6 has never had a
+   single alarm accepted by an OS under its new identifier scheme, and 5.9's iOS
+   half literally cannot work until the background mode is in a built app.
+
+   **Session 10 is scheduled for this** (see the directive in §0.3). It cannot
+   start until the build exists.
+
 3. **4.7a needs a native rebuild**, not an EAS update — a config plugin changes
    the native project. Sounds can only be confirmed on a physical device.
 4. **P0.2** (Apple Critical Alerts entitlement) is unfiled and **no longer blocks
@@ -1459,10 +1901,22 @@ return value means the thing is observable.
   Node requires. Safe here — nothing in this project emits through tsc; Metro
   builds, and the only tsc invocation is `--noEmit`.
 
-  What is covered: `utils/date.ts` (15), `utils/notification-identifiers.ts`
-  (31), `utils/meal-alarms.ts` (19 — session 1's 14 were lost with their
-  scratchpad and were rewritten, not recovered), and, from session 4,
-  `utils/dose-queue-policy.ts` (22) and `utils/doses.ts` (13).
+  What is covered, at **183** as of session 6: `utils/date.ts` (20),
+  `utils/notification-identifiers.ts` (48), `utils/meal-alarms.ts` (19 — session
+  1's 14 were lost with their scratchpad and were rewritten, not recovered),
+  `utils/dose-queue-policy.ts` (22) and `utils/doses.ts` (13) from session 4,
+  `utils/notification-budget.ts` (38) from sessions 5 and 6, and
+  `utils/alarm-schedule.ts` (25) from session 6.
+
+  **`utils/alarm-schedule.ts` exists because of this constraint**, in the same
+  way session 4's two modules did. The layout of a reminder's horizon — which
+  identifier each alert is written under — was going to live inside
+  `notification-helper`, which imports `expo-notifications` and therefore cannot
+  be tested at all. Splitting it out is what makes eight separate assertions
+  possible about a rule that has already produced three unpredicted bugs (§0.6)
+  and whose every failure is silent: scheduling onto an existing identifier
+  replaces it without an error, and iOS discards an over-budget queue without one
+  either.
 
   **Session 4's two new modules exist in this shape because of this
   constraint, not in spite of it.** The retry queue and the dose reader both
@@ -1610,6 +2064,17 @@ be experimented on.
   `{"command":"up"}`. Check `{"command":"status"}` before believing any claim in
   this document about what is applied — `schema_migrations` survives a reset by
   omission, so its history is older than you expect.
+- **`/debug/*` may be widened freely — add the table and move on.** Owner's
+  instruction, 2026-07-31, given after session 7 declined to add the push tables
+  to `allowedTables` and was told that was overthinking it. The whole surface is
+  unauthenticated by deliberate choice and belongs to the security refactor **as
+  a unit**; keeping individual tables out of the list buys nothing while the
+  other thirteen are in, and it costs exactly the observability the dump exists
+  to provide. This is the same failure mode as §1's first guardrail: a session
+  being cautious with something the owner has already priced.
+
+  It is *not* how you reach `/reset-db` — the gateway refuses that; use a direct
+  `aws lambda invoke`.
 - Do not add credentials or fallback secrets to source. Both Lambdas read
   everything from env vars by design, and the files carry comments saying so.
 - `tish-app/key.p8` is an Apple auth key. It is correctly gitignored and
@@ -2945,6 +3410,22 @@ nothing to make the *alarm arrive*.
   sandbox the same channel can carry an escalation, with failure modes
   independent of both push and local notifications. Gated on B0/B1. *(~4h)*
 - **5.6 — Schedule N occurrences ahead** *(now recommended, not optional)*.
+  *(DONE — policy half session 5, wiring session 6. `utils/notification-budget.ts`
+  decides the horizon and the cost model; `utils/alarm-schedule.ts` lays the
+  alerts out; `use-notification-sync.ts` computes one plan per pass and
+  `notification-helper.tsx` writes it. 63 tests across the two modules.*
+
+  *Four decisions the text below does not make. **The occurrence segment is a
+  date, not an index** — an index is relative to the pass that wrote it, which
+  reintroduces the collision one level up (§0.6). **The chain-forward became a
+  full rewrite of the forward horizon**, not a no-op and not an append, because
+  only a rewrite repairs the gap left by days that fired while the app was not
+  running. **The budget is remembered on the device**, because three callers
+  schedule a single reminder after a user action and none of them can compute
+  one. And **the horizon is clamped to `DOSE_HORIZON_DAYS`**, so the device never
+  holds an alarm for a day 5.1 has materialised no dose row for — otherwise 5.7's
+  missed list disagrees with what actually rang.)*
+
   Currently one occurrence is scheduled and re-armed when it fires, so a broken
   chain stops the alarm until the app is next opened. Scheduling ~7 days ahead
   degrades gracefully instead.

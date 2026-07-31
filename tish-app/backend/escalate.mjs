@@ -101,6 +101,34 @@ export function _setInvokerForTests(fake) { invokeDb = fake ?? defaultInvokeDb; 
 const CLAIM_LIMIT = 500;
 
 const EXPO_SEND_URL = 'https://exp.host/--/api/v2/push/send';
+const EXPO_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
+
+/** 5.9 — outbox rows drained per run. Same reasoning as `CLAIM_LIMIT`. */
+const OUTBOX_LIMIT = 200;
+
+/**
+ * 5.9 — how many failed drains before a queued push is abandoned.
+ *
+ * Without a ceiling, an Expo outage builds a backlog that every subsequent run
+ * re-reads forever. Abandoning is cheap here in a way it is not for an
+ * escalation: the launch re-sync (4.1) is the backstop for a silent push that
+ * never arrives, and §8 is explicit that this channel is an optimisation and
+ * never a guarantee.
+ */
+const OUTBOX_MAX_ATTEMPTS = 5;
+
+/**
+ * 5.8 — how long to wait before asking Expo for a receipt, and how long to keep
+ * asking.
+ *
+ * Expo returns tickets synchronously and receipts only some minutes later, so a
+ * poll that runs immediately gets nothing and burns a request. It keeps receipts
+ * for roughly 24 hours, after which a ticket will never be answered and is
+ * closed out rather than polled for the rest of time.
+ */
+const RECEIPT_MIN_AGE_MINUTES = 5;
+const RECEIPT_GIVE_UP_HOURS = 24;
+const RECEIPT_LIMIT = 300;
 
 /**
  * iOS urgency for a server-sent push — and **it is spelled differently here than
@@ -243,7 +271,72 @@ const ENRICH_SQL = `
     WHERE d.id = ANY($1::int[])`;
 
 /**
- * The VPC-attached half. Two operations, selected by `op`.
+ * 5.9 — the pending outbox rows, oldest first.
+ *
+ * `FOR UPDATE ... SKIP LOCKED` for the same reason the dose claim uses it: two
+ * overlapping runs must not both send the same push. Unlike the claim this does
+ * not mark anything — the row is closed out by `outbox-done` after Expo has
+ * actually been called, because the alternative loses the push entirely if the
+ * send then fails.
+ */
+const OUTBOX_SQL = `
+    SELECT id, user_id
+    FROM push_outbox
+    WHERE sent_at IS NULL
+      AND attempts < $2
+    ORDER BY created_at
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED`;
+
+/**
+ * Every device that should hear about a change to this user's schedule.
+ *
+ * **The owner's devices *and* their active caregivers'**, which is one step
+ * wider than §8's "the owner's devices" and is deliberate. Under 4.2 item 2 a
+ * caregiver's phone holds escalation copies of every escalation-enabled reminder
+ * their dependent has, and those copies go stale on exactly the edit that
+ * enqueued this row. Leaving them out would mean the one server-to-device
+ * channel in the system reaches only half the devices holding the schedule.
+ *
+ * Resolved here rather than at enqueue time so a relationship created between
+ * the write and the drain is still honoured — and so a revoked one is not.
+ */
+const OUTBOX_RECIPIENTS_SQL = `
+    SELECT u.id AS owner_user_id,
+           ARRAY_REMOVE(ARRAY_AGG(DISTINCT p.token), NULL) AS tokens
+    FROM UNNEST($1::int[]) AS u(id)
+    LEFT JOIN push_tokens p
+      ON p.user_id = u.id
+      OR p.user_id IN (
+           SELECT r.caregiver_id FROM user_relationships r
+           WHERE r.dependent_id = u.id AND r.status = 'active'
+         )
+    GROUP BY u.id`;
+
+/**
+ * Ids from an untrusted payload, as integers, with everything else dropped.
+ *
+ * **`Number(null)` is 0 and `Number('')` is 0, and both pass
+ * `Number.isInteger`** — so the obvious `.map(Number).filter(Number.isInteger)`
+ * silently turns a null in the payload into a request to update row 0. Harmless
+ * against a SERIAL column that starts at 1, and exactly the shape of quiet
+ * coercion this plan keeps finding the hard way, so the type is checked before
+ * the coercion rather than after it.
+ */
+function intIds(value) {
+    if (!Array.isArray(value)) return [];
+    const out = [];
+    for (const v of value) {
+        if (typeof v !== 'number' && typeof v !== 'string') continue;
+        if (String(v).trim() === '') continue;
+        const n = Number(v);
+        if (Number.isInteger(n)) out.push(n);
+    }
+    return out;
+}
+
+/**
+ * The VPC-attached half. Several operations, selected by `op`.
  *
  * Invoked only by `dispatchHandler` through the Lambda API — never by API
  * Gateway, which has no route to this function.
@@ -265,6 +358,117 @@ export async function dbHandler(event) {
         const ids = claimed.rows.map((r) => r.id);
         const enriched = await pool.query(ENRICH_SQL, [ids]);
         return { claims: enriched.rows };
+    }
+
+    // --- 5.9: the silent schedule-change push -------------------------------
+
+    if (op === 'drain-outbox') {
+        const pending = await pool.query(OUTBOX_SQL, [OUTBOX_LIMIT, OUTBOX_MAX_ATTEMPTS]);
+        if (pending.rows.length === 0) return { batches: [], abandoned: 0 };
+
+        // **Grouped by subject, so several edits are one push.** Editing four
+        // reminders in a minute enqueues four rows and sends one notification
+        // per device, which matters because iOS rate-limits silent pushes.
+        const byUser = new Map();
+        for (const row of pending.rows) {
+            if (!byUser.has(row.user_id)) byUser.set(row.user_id, { ownerUserId: row.user_id, outboxIds: [] });
+            byUser.get(row.user_id).outboxIds.push(row.id);
+        }
+
+        const recipients = await pool.query(OUTBOX_RECIPIENTS_SQL, [[...byUser.keys()]]);
+        for (const row of recipients.rows) {
+            const batch = byUser.get(row.owner_user_id);
+            if (batch) batch.tokens = (row.tokens ?? []).filter(Boolean);
+        }
+
+        return { batches: [...byUser.values()].map((b) => ({ ...b, tokens: b.tokens ?? [] })) };
+    }
+
+    if (op === 'outbox-done') {
+        // Marked sent whether or not anything was delivered. A user with no
+        // registered device is *finished*, not failed — retrying them every
+        // minute forever would be the same silent-backlog trap the attempt
+        // ceiling exists to prevent.
+        const ids = intIds(event.ids);
+        if (ids.length === 0) return { done: 0 };
+        const res = await pool.query(
+            'UPDATE push_outbox SET sent_at = now(), attempts = attempts + 1 WHERE id = ANY($1::int[]) AND sent_at IS NULL',
+            [ids]
+        );
+        return { done: res.rowCount };
+    }
+
+    if (op === 'outbox-failed') {
+        // Left pending, attempt counted. `OUTBOX_SQL` stops selecting the row
+        // once it has been counted `OUTBOX_MAX_ATTEMPTS` times.
+        const ids = intIds(event.ids);
+        if (ids.length === 0) return { failed: 0 };
+        const res = await pool.query(
+            'UPDATE push_outbox SET attempts = attempts + 1 WHERE id = ANY($1::int[]) AND sent_at IS NULL',
+            [ids]
+        );
+        return { failed: res.rowCount };
+    }
+
+    // --- 5.8: tickets and receipts ------------------------------------------
+
+    if (op === 'record-tickets') {
+        const tickets = Array.isArray(event.tickets) ? event.tickets : [];
+        const rows = tickets.filter((t) => t && typeof t.ticketId === 'string' && typeof t.token === 'string');
+        if (rows.length === 0) return { recorded: 0 };
+
+        // One statement rather than a loop: this runs inside a scheduled job
+        // whose whole batch shares a connection, and `ON CONFLICT DO NOTHING`
+        // makes a re-record idempotent rather than an error.
+        const res = await pool.query(
+            `INSERT INTO push_tickets (ticket_id, token, kind)
+             SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[])
+             ON CONFLICT (ticket_id) DO NOTHING`,
+            [rows.map((r) => r.ticketId), rows.map((r) => r.token), rows.map((r) => r.kind ?? 'unknown')]
+        );
+        return { recorded: res.rowCount };
+    }
+
+    if (op === 'due-receipts') {
+        // Old enough that Expo may have an answer, young enough that it still
+        // keeps one.
+        const due = await pool.query(
+            `SELECT ticket_id, token, kind FROM push_tickets
+             WHERE checked_at IS NULL
+               AND created_at <= now() - ($1 || ' minutes')::interval
+               AND created_at >  now() - ($2 || ' hours')::interval
+             ORDER BY created_at
+             LIMIT $3`,
+            [String(RECEIPT_MIN_AGE_MINUTES), String(RECEIPT_GIVE_UP_HOURS), RECEIPT_LIMIT]
+        );
+
+        // Anything past the window will never be answered. Closing it out is
+        // what stops the unchecked set growing without bound, and 'expired'
+        // records that the delivery outcome is unknown rather than fine.
+        const expired = await pool.query(
+            `UPDATE push_tickets SET checked_at = now(), status = 'expired'
+             WHERE checked_at IS NULL AND created_at <= now() - ($1 || ' hours')::interval`,
+            [String(RECEIPT_GIVE_UP_HOURS)]
+        );
+
+        return { due: due.rows, expired: expired.rowCount };
+    }
+
+    if (op === 'receipts-checked') {
+        const results = Array.isArray(event.results) ? event.results : [];
+        const rows = results.filter((r) => r && typeof r.ticketId === 'string');
+        if (rows.length === 0) return { checked: 0 };
+        const res = await pool.query(
+            `UPDATE push_tickets t SET checked_at = now(), status = v.status, detail = v.detail
+             FROM UNNEST($1::text[], $2::text[], $3::text[]) AS v(ticket_id, status, detail)
+             WHERE t.ticket_id = v.ticket_id AND t.checked_at IS NULL`,
+            [
+                rows.map((r) => r.ticketId),
+                rows.map((r) => String(r.status ?? 'unknown')),
+                rows.map((r) => (r.detail == null ? null : String(r.detail).slice(0, 500))),
+            ]
+        );
+        return { checked: res.rowCount };
     }
 
     if (op === 'reap') {
@@ -358,7 +562,7 @@ function messagesFor(claim, tokens) {
  * length mismatch rather than deleting a working device's token because a
  * different device was uninstalled.
  */
-async function sendChunk(messages) {
+async function sendChunk(messages, kind) {
     const tokens = messages.map((m) => m.to);
     let res;
     try {
@@ -371,25 +575,39 @@ async function sendChunk(messages) {
         // Network failure. The rung is already claimed and is not retried here —
         // the next rung is the retry. Reap nothing: an unreachable Expo says
         // nothing about whether these devices exist.
-        return { sent: 0, reap: [], error: `expo-unreachable: ${String(e)}` };
+        return { sent: 0, reap: [], tickets: [], error: `expo-unreachable: ${String(e)}` };
     }
 
     if (!res.ok) {
         const detail = await res.text().catch(() => '');
-        return { sent: 0, reap: [], error: `expo-http-${res.status}: ${detail.slice(0, 200)}` };
+        return { sent: 0, reap: [], tickets: [], error: `expo-http-${res.status}: ${detail.slice(0, 200)}` };
     }
 
     const parsed = await res.json().catch(() => null);
     const tickets = parsed?.data;
     if (!Array.isArray(tickets)) {
-        return { sent: 0, reap: [], error: 'expo-malformed-response' };
+        return { sent: 0, reap: [], tickets: [], error: 'expo-malformed-response' };
     }
 
     const { reap, misaligned } = tokensToReap(tokens, tickets);
     const ok = tickets.filter((t) => t?.status === 'ok').length;
+
+    // 5.8 — the ok tickets carry a receipt id, which is the only handle on
+    // whether the push was ever actually delivered. Paired positionally, and
+    // **not paired at all on a length mismatch**, for exactly the reason
+    // `tokensToReap` refuses to: a ticket filed against the wrong token would
+    // later reap a working device because a different one was uninstalled.
+    const recorded = misaligned
+        ? []
+        : tickets
+            .map((t, i) => ({ ticket: t, token: tokens[i] }))
+            .filter(({ ticket }) => ticket?.status === 'ok' && typeof ticket.id === 'string')
+            .map(({ ticket, token }) => ({ ticketId: ticket.id, token, kind }));
+
     return {
         sent: ok,
         reap,
+        tickets: recorded,
         error: misaligned ? 'expo-ticket-count-mismatch' : null,
     };
 }
@@ -403,31 +621,98 @@ async function sendChunk(messages) {
  */
 export async function dispatchHandler() {
     const startedAt = new Date().toISOString();
-    const { claims = [] } = await invokeDb({ op: 'claim' });
 
     // One shape for every run, including the empty one. An early return with
     // fewer keys is the sort of thing a caller reads `.errors.length` off and
     // crashes on exactly when there is nothing wrong.
     const summary = {
-        claimed: claims.length,
+        claimed: 0,
         pushed: 0,
         substituted: 0,
         skipped: 0,
         reaped: 0,
+        // 5.9
+        silent: 0,
+        silentBatches: 0,
+        // 5.8
+        tickets: 0,
+        receipts: 0,
         errors: [],
         timezone: APP_TIMEZONE,
     };
 
-    // **Log the quiet runs too.** They are the overwhelming majority — this runs
-    // every five minutes and usually has nothing to do — and they are exactly
-    // the ones worth being able to see: for a safety job that is silent by
-    // design, "did it run at all?" is the only question the logs can answer, and
-    // an early return that skips the summary makes a dead schedule and a quiet
-    // one look identical.
-    if (claims.length === 0) {
-        console.info('escalation run', JSON.stringify({ startedAt, ...summary }));
-        return { startedAt, ...summary };
+    // Collected across all three steps and acted on once at the end, because
+    // both features send to the same `push_tokens` rows and a token that Expo
+    // has declared dead is dead for both.
+    const reap = [];
+    const tickets = [];
+
+    // **Each step is isolated, and that is the point of doing it this way.** 5.4
+    // is a safety mechanism and 5.9 is an optimisation; a failure in the
+    // optimisation must not be able to stop the safety mechanism, and the
+    // reverse would mean an unrelated escalation bug silently freezing every
+    // device's schedule. The same argument as "one dependent's missing device
+    // must not stop the run", one level up.
+    try {
+        await runEscalation(summary, reap, tickets);
+    } catch (e) {
+        summary.errors.push(`escalation-failed: ${String(e)}`);
     }
+
+    try {
+        await runOutbox(summary, reap, tickets);
+    } catch (e) {
+        summary.errors.push(`outbox-failed: ${String(e)}`);
+    }
+
+    if (tickets.length > 0) {
+        try {
+            const { recorded = 0 } = await invokeDb({ op: 'record-tickets', tickets });
+            summary.tickets = recorded;
+        } catch (e) {
+            // Costs delivery observability for this batch, nothing more: the
+            // pushes have already gone.
+            summary.errors.push(`record-tickets-failed: ${String(e)}`);
+        }
+    }
+
+    try {
+        await runReceipts(summary, reap);
+    } catch (e) {
+        summary.errors.push(`receipts-failed: ${String(e)}`);
+    }
+
+    if (reap.length > 0) {
+        try {
+            const { removed = 0 } = await invokeDb({ op: 'reap', tokens: [...new Set(reap)] });
+            summary.reaped = removed;
+        } catch (e) {
+            // A failed reap costs a wasted send next run, nothing more.
+            summary.errors.push(`reap-failed: ${String(e)}`);
+        }
+    }
+
+    // **Log the quiet runs too.** They are the overwhelming majority — this runs
+    // on a schedule and usually has nothing to do — and they are exactly the
+    // ones worth being able to see: for a safety job that is silent by design,
+    // "did it run at all?" is the only question the logs can answer, and an
+    // early return that skips the summary makes a dead schedule and a quiet one
+    // look identical.
+    //
+    // **The early return that used to sit above the work is gone**, and it had
+    // to: it returned as soon as there were no doses to escalate, which is most
+    // runs, and 5.9's drain and 5.8's receipts poll both live below it. Leaving
+    // it would have meant the silent push worked only on the runs that happened
+    // to be escalating something.
+    console.info('escalation run', JSON.stringify({ startedAt, ...summary }));
+    return { startedAt, ...summary };
+}
+
+/** 5.4 — claim the doses that are due a rung, and send them. */
+async function runEscalation(summary, reap, tickets) {
+    const { claims = [] } = await invokeDb({ op: 'claim' });
+    summary.claimed = claims.length;
+    if (claims.length === 0) return;
 
     const messages = [];
 
@@ -468,24 +753,173 @@ export async function dispatchHandler() {
         }
     }
 
-    const reap = [];
     for (const batch of chunk(messages)) {
-        const result = await sendChunk(batch);
+        const result = await sendChunk(batch, 'dose-escalation');
         summary.pushed += result.sent;
         reap.push(...result.reap);
+        tickets.push(...result.tickets);
         if (result.error) summary.errors.push(result.error);
     }
+}
 
-    if (reap.length > 0) {
+/**
+ * 5.9 — drain the outbox `index.mjs` writes on every reminder change.
+ *
+ * **Per recipient batch rather than per outbox row**, which is what makes the
+ * coalescing real: four edits in a minute produce four rows, one push per
+ * device, and all four rows closed together. A batch is only marked failed if
+ * Expo could not be reached at all — a `DeviceNotRegistered` is a *successful*
+ * send to a device that no longer exists, and retrying it forever would be the
+ * backlog the attempt ceiling exists to prevent.
+ */
+async function runOutbox(summary, reap, tickets) {
+    const { batches = [] } = await invokeDb({ op: 'drain-outbox' });
+    if (batches.length === 0) return;
+
+    const done = [];
+    const failed = [];
+
+    for (const batch of batches) {
+        const tokens = Array.isArray(batch.tokens) ? batch.tokens.filter(Boolean) : [];
+
+        // Nobody to tell. Closed out rather than retried: a user with no
+        // registered device is finished, not failed, and their next launch
+        // reconciles anyway (4.1).
+        if (tokens.length === 0) {
+            done.push(...batch.outboxIds);
+            continue;
+        }
+
+        summary.silentBatches += 1;
+        let delivered = false;
+
+        for (const messages of chunk(silentMessagesFor(batch.ownerUserId, tokens))) {
+            const result = await sendChunk(messages, 'schedule-changed');
+            summary.silent += result.sent;
+            reap.push(...result.reap);
+            tickets.push(...result.tickets);
+            if (result.error) summary.errors.push(result.error);
+            // Expo answered at all. A batch where every token turned out to be
+            // dead still counts: there is nothing left to retry to.
+            else delivered = true;
+        }
+
+        (delivered ? done : failed).push(...batch.outboxIds);
+    }
+
+    if (done.length > 0) {
+        const { done: closed = 0 } = await invokeDb({ op: 'outbox-done', ids: done });
+        void closed;
+    }
+    if (failed.length > 0) {
+        await invokeDb({ op: 'outbox-failed', ids: failed });
+        console.warn('silent push deferred for', failed.length, 'outbox row(s) — Expo was unreachable');
+    }
+}
+
+/**
+ * 5.9's message: **data only, with no title and no body**, which is what makes
+ * it silent rather than a notification the patient sees.
+ *
+ * `_contentAvailable` is Expo's spelling of APNs `content-available: 1`, the
+ * flag that wakes a backgrounded iOS app rather than displaying anything. It
+ * needs `UIBackgroundModes: ['remote-notification']` in the built app to have
+ * any effect, which `app.json` now declares — and therefore needs the native
+ * rebuild that is already owed. Without it the push still arrives while the app
+ * is in the foreground, which is where the launch re-sync would have caught the
+ * change a moment later anyway.
+ *
+ * The payload carries an id and a kind and nothing else, exactly as 4.3 and 5.4
+ * do. There is no medication name here to leak, but the rule is worth keeping
+ * uniform rather than argued case by case.
+ */
+function silentMessagesFor(ownerUserId, tokens) {
+    return tokens.map((token) => ({
+        to: token,
+        data: { kind: 'schedule-changed', ownerUserId },
+        _contentAvailable: true,
+        // Deliberately *not* `EXPO_INTERRUPTION_LEVEL`: this is not an alert and
+        // must never present as one. A schedule change is not time-sensitive to
+        // the patient — the alarms it rewrites are.
+        priority: 'high',
+    }));
+}
+
+/**
+ * 5.8's last piece — ask Expo what actually happened to earlier sends.
+ *
+ * **Receipts are the only delivery observability in this system.** A ticket says
+ * Expo accepted the message; a receipt says APNs or FCM did. The gap between
+ * them is where a token that looks healthy quietly stops working, and until this
+ * existed the only dead tokens ever reaped were the ones Expo rejected
+ * synchronously.
+ *
+ * Note what a receipt still does not tell you: whether the notification was
+ * *displayed*. Nothing in this stack can answer that.
+ */
+async function runReceipts(summary, reap) {
+    const { due = [], expired = 0 } = await invokeDb({ op: 'due-receipts' });
+    if (expired > 0) {
+        console.warn('gave up on', expired, 'push receipt(s) older than', RECEIPT_GIVE_UP_HOURS, 'hours');
+    }
+    if (due.length === 0) return;
+
+    const byTicket = new Map(due.map((row) => [row.ticket_id, row]));
+    const results = [];
+
+    for (const batch of chunk(due.map((row) => row.ticket_id))) {
+        let res;
         try {
-            const { removed = 0 } = await invokeDb({ op: 'reap', tokens: [...new Set(reap)] });
-            summary.reaped = removed;
+            res = await fetchImpl(EXPO_RECEIPTS_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ ids: batch }),
+            });
         } catch (e) {
-            // A failed reap costs a wasted send next run, nothing more.
-            summary.errors.push(`reap-failed: ${String(e)}`);
+            // Leave them unchecked; the next run asks again, and the give-up
+            // window closes them if Expo stays unreachable.
+            summary.errors.push(`receipts-unreachable: ${String(e)}`);
+            continue;
+        }
+
+        if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            summary.errors.push(`receipts-http-${res.status}: ${detail.slice(0, 200)}`);
+            continue;
+        }
+
+        const parsed = await res.json().catch(() => null);
+        const data = parsed?.data;
+        if (!data || typeof data !== 'object') {
+            summary.errors.push('receipts-malformed-response');
+            continue;
+        }
+
+        // **Keyed by ticket id, not positional** — unlike the send response,
+        // which is an array. So the misalignment hazard §0.6 records for
+        // `tokensToReap` does not apply here: Expo names the ticket, and a
+        // ticket names exactly one token in our own table.
+        for (const [ticketId, receipt] of Object.entries(data)) {
+            const row = byTicket.get(ticketId);
+            if (!row) continue;
+
+            const status = receipt?.status === 'ok' ? 'ok' : 'error';
+            const reason = receipt?.details?.error ?? null;
+            results.push({ ticketId, status, detail: reason ?? receipt?.message ?? null });
+
+            if (reason === 'DeviceNotRegistered') {
+                // The delayed case this whole poll exists for: Expo accepted the
+                // send and only the receipt reveals the device is gone.
+                reap.push(row.token);
+                console.info('receipt reports a dead device for a', row.kind, 'push — reaping the token');
+            } else if (status === 'error') {
+                console.warn('push receipt error for a', row.kind, 'push:', reason ?? receipt?.message);
+            }
         }
     }
 
-    console.info('escalation run', JSON.stringify({ startedAt, ...summary }));
-    return { startedAt, ...summary };
+    if (results.length > 0) {
+        const { checked = 0 } = await invokeDb({ op: 'receipts-checked', results });
+        summary.receipts = checked;
+    }
 }

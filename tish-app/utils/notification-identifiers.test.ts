@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { belongsToReminder, identifierFor, isSnoozeIdentifier, snoozeIdentifierFor } from './notification-identifiers.ts';
+import { belongsToReminder, identifierFor, isSnoozeIdentifier, occurrenceKeyFor, snoozeIdentifierFor } from './notification-identifiers.ts';
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -194,6 +194,128 @@ test('everything identifierFor builds, belongsToReminder finds', () => {
       assert.equal(belongsToReminder(id, 12, owner), true, id);
       assert.equal(belongsToReminder(id, 12), true, `${id} (no owner filter)`);
       assert.equal(belongsToReminder(id, 12, owner, '08:00'), true, `${id} (slot filter)`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5.6 — the occurrence segment
+// ---------------------------------------------------------------------------
+
+const KEY_TODAY = '20260731';
+const KEY_TOMORROW = '20260801';
+
+test('the occurrence key is the local calendar date, hyphen-free', () => {
+  // Hyphens are the segment separator, so YYYY-MM-DD would split into three.
+  assert.equal(occurrenceKeyFor(new Date(2026, 6, 31, 8, 0)), '20260731');
+  assert.equal(occurrenceKeyFor(new Date(2026, 0, 5, 23, 59)), '20260105');
+  assert.ok(!occurrenceKeyFor(new Date(2026, 6, 31)).includes('-'));
+});
+
+test('the occurrence key is local, not UTC — an evening dose must not slide a day', () => {
+  // A 23:50 alarm in UTC+8 is 15:50 UTC the same day, but a 08:00 one is
+  // midnight UTC of the *previous* day. Reading the date in UTC would file two
+  // slots of one reminder under different days.
+  const late = new Date(2026, 6, 31, 23, 50);
+  assert.equal(occurrenceKeyFor(late), '20260731');
+});
+
+test('THE BUG 5.6 exists to avoid: without the segment, tomorrow overwrites today', () => {
+  // Scheduling onto an existing identifier replaces it, silently. This is the
+  // fact that made the horizon a rewrite of the identifier scheme rather than a
+  // loop.
+  assert.equal(identifierFor(12, '08:00', 7, 1), identifierFor(12, '08:00', 7, 1));
+  assert.notEqual(
+    identifierFor(12, '08:00', 7, 1, KEY_TODAY),
+    identifierFor(12, '08:00', 7, 1, KEY_TOMORROW)
+  );
+});
+
+test('the occurrence sits after the burst index, so positions stay fixed', () => {
+  assert.equal(identifierFor(12, '08:00', 7, 2, KEY_TODAY), 'med-7-12-0800-2-20260731');
+});
+
+test('an occurrence without a burst index is not emitted', () => {
+  // It would be a five-segment string indistinguishable from `...-{burstIndex}`,
+  // and the parser reads position 4 as the burst index.
+  assert.equal(identifierFor(12, '08:00', 7, undefined, KEY_TODAY), 'med-7-12-0800');
+});
+
+test('an un-namespaced alarm carries no occurrence either', () => {
+  // Same reason as the burst index: without the owner segment the shape is
+  // ambiguous, so 5.6's caller degrades to a single occurrence instead.
+  assert.equal(identifierFor(12, '08:00', undefined, 1, KEY_TODAY), 'med-12-0800');
+});
+
+test('the occurrence filter keeps a cancel inside the day that fired', () => {
+  const today = identifierFor(12, '08:00', 7, 1, KEY_TODAY);
+  const tomorrow = identifierFor(12, '08:00', 7, 1, KEY_TOMORROW);
+
+  assert.equal(belongsToReminder(today, 12, 7, '08:00', KEY_TODAY), true);
+  assert.equal(
+    belongsToReminder(tomorrow, 12, 7, '08:00', KEY_TODAY),
+    false,
+    "answering today's alarm must not delete the rest of the horizon"
+  );
+});
+
+test('omitting the occurrence still matches the whole horizon', () => {
+  // Deleting a reminder, or reconciling it from scratch, means every day of it.
+  for (const key of [KEY_TODAY, KEY_TOMORROW]) {
+    assert.equal(belongsToReminder(identifierFor(12, '08:00', 7, 1, key), 12, 7, '08:00'), true);
+    assert.equal(belongsToReminder(identifierFor(12, '08:00', 7, 1, key), 12, 7), true);
+  }
+});
+
+test('an identifier with no occurrence segment matches any occurrence filter', () => {
+  // The pre-5.6 shape *was* the next occurrence, so it belongs to whichever day
+  // is being cancelled. This is the upgrade window: alarms left in the OS queue
+  // by the previous build, until the first re-sync replaces them.
+  const legacy = identifierFor(12, '08:00', 7, 1);
+  assert.equal(belongsToReminder(legacy, 12, 7, '08:00', KEY_TODAY), true);
+  assert.equal(belongsToReminder(identifierFor(12, '08:00'), 12, undefined, '08:00', KEY_TODAY), true);
+});
+
+test('the occurrence filter does not widen a wrong reminder, owner or slot', () => {
+  const id = identifierFor(12, '08:00', 7, 1, KEY_TODAY);
+  assert.equal(belongsToReminder(id, 13, 7, '08:00', KEY_TODAY), false);
+  assert.equal(belongsToReminder(id, 12, 8, '08:00', KEY_TODAY), false);
+  assert.equal(belongsToReminder(id, 12, 7, '20:00', KEY_TODAY), false);
+});
+
+test('a burst index can never be read as an occurrence, at any repeat count', () => {
+  // Position, not shape, is what separates them — so this holds even though an
+  // occurrence key is also all digits.
+  for (let burst = 1; burst <= 6; burst += 1) {
+    const id = identifierFor(12, '08:00', 7, burst, KEY_TODAY);
+    assert.equal(id.split('-')[4], String(burst));
+    assert.equal(id.split('-')[5], KEY_TODAY);
+    assert.equal(belongsToReminder(id, 12, 7, '08:00', KEY_TOMORROW), false);
+  }
+});
+
+test('a snooze alarm is still recognised alongside occurrence identifiers', () => {
+  // isSnoozeIdentifier keys on five segments ending in 's'; a scheduled
+  // occurrence has six, and a legacy burst member's fifth segment is a number.
+  assert.equal(isSnoozeIdentifier(identifierFor(12, '08:00', 7, 1, KEY_TODAY)), false);
+  assert.equal(isSnoozeIdentifier(snoozeIdentifierFor(12, '08:00', 7)), true);
+});
+
+test('a snooze is not shielded by the occurrence filter', () => {
+  // A slot whose alarm is being answered has no business keeping an unanswered
+  // snooze for the same slot, and the arrival-path cancel already cleared one
+  // before 5.6.
+  assert.equal(belongsToReminder(snoozeIdentifierFor(12, '08:00', 7), 12, 7, '08:00', KEY_TODAY), true);
+});
+
+test('everything identifierFor builds with an occurrence, belongsToReminder finds', () => {
+  for (const owner of [undefined, 0, 7, 12]) {
+    for (const burst of [undefined, 1, 3, 6]) {
+      for (const key of [undefined, KEY_TODAY]) {
+        const id = identifierFor(12, '08:00', owner, burst, key);
+        assert.equal(belongsToReminder(id, 12, owner, '08:00'), true, id);
+        assert.equal(belongsToReminder(id, 12, owner, '08:00', KEY_TODAY), true, `${id} (today)`);
+      }
     }
   }
 });

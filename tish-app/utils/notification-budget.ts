@@ -33,6 +33,8 @@
  * much larger number there rather than skipping the budget entirely — the code
  * path stays identical on both platforms, so a bug in it cannot hide on one.
  */
+import { computeNextTriggerDate } from './date.ts';
+
 export const IOS_PENDING_CAP = 64;
 
 /**
@@ -208,5 +210,126 @@ export function planNotificationBudget(
         dropped,
         truncations,
         projectedSlots: sumDaily(kept, burstCap) * daysAhead,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// The cost model: turning a reminder row into the numbers above.
+//
+// **This lives here rather than in the scheduler, and that is the point.** The
+// budget's arithmetic is only as good as its agreement with what the scheduler
+// actually writes: if the two disagree about whether this device holds a given
+// reminder, or about how many alerts a burst is, the plan is wrong in exactly
+// the way nothing observes — iOS discards the overflow without erroring. So
+// `notification-helper` reads the same three functions rather than keeping its
+// own copy of the rules.
+// ---------------------------------------------------------------------------
+
+export interface ReminderHold {
+    /** The reminder's owner, or `undefined` if the row does not name one. */
+    ownerUserId?: number;
+    /** This device is a caregiver's, holding a copy of someone else's schedule (D-1). */
+    isCaregiverCopy: boolean;
+    /** Whether this device should hold any alarms for this reminder at all. */
+    holds: boolean;
+}
+
+/**
+ * Whether — and in what role — this device carries a reminder's alarms.
+ *
+ * Both ids have to be known to claim a reminder is someone else's. If the owner
+ * is unknown the alarm cannot be attributed anyway, and if the viewer is
+ * unknown, guessing "caregiver" would delay a patient's own alarm — the one
+ * failure direction that must never happen silently.
+ */
+export function reminderHold(reminder: any, viewerUserId?: number): ReminderHold {
+    const ownerUserId = Number.isFinite(Number(reminder?.user_id)) ? Number(reminder.user_id) : undefined;
+    const viewer = Number.isFinite(Number(viewerUserId)) ? Number(viewerUserId) : undefined;
+    const isCaregiverCopy = ownerUserId != null && viewer != null && ownerUserId !== viewer;
+
+    const active = reminder?.status === 'active'
+        && Array.isArray(reminder?.alarms)
+        && reminder.alarms.length > 0;
+
+    // Escalation off means the caregiver holds nothing for this reminder (4.2
+    // item 4, D-3) — a full mirror of a dependent's schedule is what makes a
+    // caregiver stop reading their alerts.
+    const holds = active && !(isCaregiverCopy && !reminder?.escalation_enabled);
+
+    return { ownerUserId, isCaregiverCopy, holds };
+}
+
+/**
+ * D-9's burst: how many consecutive alerts one dose schedules, before any cap
+ * the budget applies on top.
+ *
+ * Two platform-shaped exceptions, both settled rather than open:
+ *
+ * - **Android is always one** (D-10). `setExactAndAllowWhileIdle` — the only API
+ *   `expo-notifications` uses — cannot fire more than once per nine minutes per
+ *   app while the device is idle, so a 30-second-spaced burst degrades to a
+ *   single alert overnight, which is the exact case it was designed for.
+ * - **A caregiver's escalation copy is always one.** Bursting them would
+ *   multiply the pressure on the iOS cap by up to six for every dependent, to
+ *   make an alert louder for someone who is already the backstop rather than the
+ *   person taking the dose.
+ *
+ * A reminder with no owner also degrades to one, because the identifier cannot
+ * carry a burst index unambiguously (see `notification-identifiers`). The
+ * scheduler says so out loud; here it is only arithmetic.
+ */
+export function plannedBurstCount(
+    alarmRepeatCount: unknown,
+    { platform, isCaregiverCopy, hasOwner }: { platform: string; isCaregiverCopy: boolean; hasOwner: boolean }
+): number {
+    if (platform !== 'ios' || isCaregiverCopy || !hasOwner) return 1;
+    // Mirrors migration 002's CHECK (1–6) and the column default of 3 rather
+    // than trusting the row to carry one: a reminder assembled client-side — the
+    // form's optimistic schedule, for instance — may not have the field at all.
+    return Math.min(Math.max(parseInt(String(alarmRepeatCount), 10) || 3, 1), 6);
+}
+
+/**
+ * What one reminder costs this device, or `null` if it holds nothing for it.
+ *
+ * `msUntilNext` is measured to the alarm as it will actually be *scheduled*,
+ * escalation delay included, because that is the moment the caregiver's phone
+ * rings and therefore the thing "soonest dose survives" is ordering.
+ */
+export function reminderCostFor(
+    reminder: any,
+    { viewerUserId, platform, now = new Date() }: { viewerUserId?: number; platform: string; now?: Date }
+): ReminderCost | null {
+    const { ownerUserId, isCaregiverCopy, holds } = reminderHold(reminder, viewerUserId);
+    if (!holds) return null;
+
+    const id = Number(reminder?.id);
+    if (!Number.isFinite(id)) return null;
+
+    const alarms: unknown[] = reminder.alarms;
+    const frequencyDays = Math.max(parseInt(reminder.frequency_days) || 1, 1);
+    const offsetMinutes = isCaregiverCopy
+        ? Math.max(parseInt(reminder.escalation_delay_minutes) || 30, 1)
+        : 0;
+
+    let msUntilNext = Infinity;
+    for (const timeStr of alarms) {
+        const at = computeNextTriggerDate(String(timeStr), frequencyDays, now, true, offsetMinutes);
+        const delta = at.getTime() - now.getTime();
+        // An unparseable alarm time yields an Invalid Date; leaving NaN in here
+        // would poison the ordering comparison and drop an arbitrary dependent.
+        if (Number.isFinite(delta)) msUntilNext = Math.min(msUntilNext, delta);
+    }
+
+    return {
+        id,
+        alarmCount: alarms.length,
+        burstCount: plannedBurstCount(reminder.alarm_repeat_count, {
+            platform,
+            isCaregiverCopy,
+            hasOwner: ownerUserId != null,
+        }),
+        isCaregiverCopy,
+        msUntilNext: Number.isFinite(msUntilNext) ? msUntilNext : 0,
     };
 }
