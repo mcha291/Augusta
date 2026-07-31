@@ -98,9 +98,10 @@ server-side escalation ladder (5.4), a server-to-device channel (5.9) and
 delivery observability (5.8's receipts). The only thing missing is a second
 *channel*, and SNS is still sandboxed.
 
-**Sessions 6 and 7 are uncommitted**, in the working tree on `main`. Sessions 1–5
-are committed — see §0.4, and note the branch name the session-5 handoff gave was
-wrong (§0.6).
+**Everything is committed and nothing is pushed.** Sessions 6 and 7 landed as
+`97d8d5b` on `main`, which is 5 ahead of `origin/main`. The only thing in the
+working tree is `opus 5 vs 4.8.txt`, an unrelated scratch file deliberately left
+out of every commit since session 5.
 
 **Landed in session 7, 2026-07-31: 5.9 and 5.8's receipts poll**, migration `006`,
 a deploy of all four Lambdas, and the EventBridge rate change below. Backend tests
@@ -355,14 +356,17 @@ Did not commit and did not deploy.
 
 ### 0.4 — State of the tree
 
-- **Sessions 1–5 are committed on `main`, as *two* commits, and nothing has been
-  pushed.** `e7c3cf1` (phases 1–5, the migration mechanism, server escalation)
-  and `a1454c8` (5.6's policy half plus the session-5 handoff). `main` is 4 ahead
-  of `origin/main`. **The session-5 handoff named a branch
-  `reminder-delivery-phases-1-5` that does not exist** — see §0.6; verify with
-  `git log --oneline -3` rather than believing a handoff. **Session 6's work
-  (5.6's wiring) and session 7's (5.9, 5.8's receipts) are uncommitted**, in the
-  working tree.
+- **Sessions 1–7 are committed on `main`, as three commits, and nothing has been
+  pushed.** `e7c3cf1` (phases 1–5, the migration mechanism, server escalation),
+  `a1454c8` (5.6's policy half plus the session-5 handoff) and `97d8d5b` (5.6's
+  wiring, 5.9, 5.8's receipts). `main` is 5 ahead of `origin/main`. **The
+  session-5 handoff named a branch `reminder-delivery-phases-1-5` that does not
+  exist** — see §0.6; verify with `git log --oneline -3` rather than believing a
+  handoff. The working tree holds only `opus 5 vs 4.8.txt`, an unrelated scratch
+  file excluded from every commit on purpose.
+- **A pre-commit hook runs the backend suite** when backend files are staged.
+  Worth knowing before a commit appears to hang: it is running 227 tests, not
+  stuck.
 - **⚠ There is now a scheduled job running unattended.** EventBridge rule
   `tish-escalation-schedule`, `rate(5 minutes)`, ENABLED, targeting
   `tish-escalate-dispatch`. This is the first thing in the project that acts
