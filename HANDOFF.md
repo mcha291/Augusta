@@ -2,132 +2,128 @@
 
 Everything below the line is the prompt. `PLAN.md` §0 carries the detail; this
 only has to get a cold session to the right starting point without re-deriving
-what session 4 already established.
+what session 5 already established.
 
 ---
 
 Read PLAN.md, starting with §0 (Progress). It is the ledger and the only part
 that tracks what is actually done. §0.3 says what comes next; §0.6 is the list of
 places the plan turned out to be wrong, and it is worth reading before trusting
-any section below §2 — session 4 added eight entries to it.
+anything below §2 — session 5 added twelve entries to it.
 
-**Nothing is half-edited.** But unlike the last handoff, this one is not a clean
-"just start the next feature": there is **one decision I need from you and a
-deploy that depends on it**, and it should be settled before any new backend work.
+Read the guardrails in §1 before deciding anything is too risky to try. The first
+one is new and it matters more than it looks.
 
-## Start here — the decision, §0.7 item 2
+**There is no decision waiting for you and no deploy owed.** Unlike the last two
+handoffs, this one is a clean "start the next thing". All four Lambdas are
+deployed and verified, the database is migrated, and every suite is green.
 
-`push_tokens` (2.5) and `POST`/`DELETE /push-tokens` (5.8's registration half)
-are written, tested and **not live**. The table has to reach the Taipei database
-and there are two real options:
+## Start here — 5.6's wiring half
 
-- **`/reset-db` + `/seed-data`** — cheapest. Recommended. It costs
-  `medication_reminders` and `medication_doses`, which today means reminder 1 and
-  its 16 doses. That fixture was worth protecting when it was the only way to test
-  4.4 and 5.7; both are now built, and one `POST /medication-reminders` recreates
-  it with its doses materialising automatically. `users`, `genders`, `conditions`
-  and `user_relationships` all survive, so the caregiver link (user 1 → user 2)
-  is kept.
-- **Build the VPC-attached migration runner** — half a day, and genuinely owed:
-  `users.timezone` (§0.6) cannot be added any other way. But it is worth doing
-  deliberately rather than under pressure for a table a reset creates for free.
+This is the only deliberately incomplete thing in the tree, and it is a boundary
+rather than a half-edit: no file is mid-change, 200/200 backend and 122/122
+client tests pass, `tsc` is clean.
 
-**Do not** add a migration route to the API — that recreates the P0.1 class of
-problem.
+`utils/notification-budget.ts` is finished and tested (22 tests). It decides how
+many days of alarms fit inside iOS's 64-pending cap and what to give up when they
+don't — audibility before horizon, a floor of two days, then the burst, then
+dropping dependents' escalation copies furthest-dose-first, reporting every
+degradation. **Nothing calls it.** Until it is wired, the app still schedules one
+occurrence per alarm time and 5.6 delivers nothing to a user.
 
-The ordering risk here is contained, unlike the `alarm_labels` incident:
-`push_tokens` is read by exactly one *new* route, so deploying the Lambda before
-the table exists breaks only `POST /push-tokens`, and the client swallows that by
-design. Deploy-then-create is safe in this specific case. It is not the general
-rule.
+§0.3 has the five concrete steps. The one that will cost you time if you meet it
+by surprise is step 3: **a burst member's identifier is currently the same string
+tomorrow as it is today.** That is load-bearing for the chain-forward, and it
+means scheduling several days at once makes today's and tomorrow's alerts
+overwrite each other silently. Identifier reuse has already produced two
+unpredicted bugs in this codebase (§0.6); this would be the third.
 
-Once that is settled: rebuild the zip, deploy, and verify `CodeSha256` against
-**the zip you just uploaded** — not a fresh rebuild, the hash is not stable
-across builds (§0.6). Then probe `POST /push-tokens`.
+Then 5.9 — silent push to repair the horizon, which reuses 5.4's sender directly
+and is much cheaper than its estimate now — then 5.5.
 
-## Then — 5.4, server-side caregiver escalation
+## What changed in session 5, in one paragraph
 
-**It is blocked on nothing but work now**, which is new. 5.1 materialises the
-rows it queries, 4.4 keeps `snooze_count` honest enough for D-12's circuit
-breaker, and 5.8's registration half gives it somewhere to send. §8 has the query
-and D-8's two-rung ladder.
-
-**Build 5.8's send half as 5.4's dispatch step, not as a separate module.** The
-Expo push call, the tickets it returns, the receipts poll and dead-token reaping
-have no caller until 5.4 exists, and a sender written without one is written
-against a guess. §0.3 says the same thing.
-
-This is the first item in a while that adds infrastructure (EventBridge + a small
-Lambda) rather than only code.
+`push_tokens` reached the live database via `/reset-db` (owner's call), which
+unblocked **5.4 — server-side caregiver escalation**, built together with 5.8's
+send half. Then the **VPC-attached migration runner**, deferred four times, and
+migration `005` giving `users` a `timezone` and a `locale`. Then 5.6's policy
+half. Sessions 1–5 were committed as one checkpoint.
 
 ## State you can rely on
 
-- **Tests: 129/129 backend, 100/100 client.** `tsc` clean, eslint 0 errors (41
-  pre-existing warnings, none new), translations 325 keys. The app bundles —
-  1866 modules, login screen renders, empty error console.
-- **The deployed Lambda is behind the tree** by exactly 2.5 + `/push-tokens`.
-  Every route that was live still is and none of them changed.
-- **The live database still has the session-3 fixture** — reminder 1 for user 1,
-  200mg at 08:00 and 20:00 daily, 16 doses, one confirmed — unless you take the
-  reset option above.
-- **Nothing is committed.** Sessions 1–4 all sit in the working tree on `main`,
-  ~60 files.
+- **Tests: 200/200 backend, 122/122 client.** `tsc` clean, eslint 0 errors (41
+  pre-existing warnings, none new), translations 325 keys.
+- **All four Lambdas carry `Luv6y6Wqg97oSqkEGsxJAO7WNaBkxVSHmI9/1QCKUYg=`**,
+  matching the uploaded zip. A deploy is now one build and **four**
+  `update-function-code` calls — see §1 for the build recipe, which has traps.
+- **All five migrations applied**, none pending, none orphaned. Check with
+  `tish-migrate {"command":"status"}` rather than believing this document.
+- **Committed** on `reminder-delivery-phases-1-5` (`e7c3cf1`), *not* merged to
+  `main`. Nothing has been pushed. `opus 5 vs 4.8.txt` is deliberately
+  uncommitted — it is an unrelated scratch file.
+- Live data: 2 users (both with `timezone: Asia/Taipei`, `locale: zh-Hant`), the
+  caregiver link user 1 → user 2, reminder 1 (200mg, 08:00 + 20:00, daily,
+  escalation-enabled) and its 15 doses.
 
-## Before starting any item, check the described state against the code
+## ⚠ Something now runs unattended
 
-§0.6 now records nineteen places this plan was already out of date or incomplete.
-Sections §3–§9 describe the *original* defects and are deliberately not updated
-as work lands.
+EventBridge `tish-escalation-schedule` invokes `tish-escalate-dispatch` every 5
+minutes. It is the only thing in this project that acts without a person and
+sends notifications to people. Bounded — two rungs per dose, a 24-hour lateness
+floor, skips anyone with no registered device — but know it exists before
+touching `medication_doses`, `push_tokens` or the reminder escalation columns.
 
-Three limits recorded there that will bite whoever touches this next:
-
-- **`APP_TIMEZONE` is a constant, not a `users.timezone` column**, because
-  `users` survives `/reset-db` and so cannot pick up a column from a rebuild. It
-  needs the migration runner that has never been built.
-- **The materialised window is anchored on today**, exact for
-  `frequency_days = 1` and only approximate for longer intervals. The missed list
-  is trustworthy for daily reminders only.
-- **The device and 5.4 will disagree about snoozed doses.** 4.2 item 4's
-  confirmed-check deliberately treats a snoozed dose as still escalatable rather
-  than mirroring D-12's threshold on the device. Expect a duplicate escalation in
-  that window and do not read it as a bug — decide in 5.4 whether to close it.
+```bash
+aws events disable-rule --name tish-escalation-schedule --region ap-east-2
+```
 
 ## Constraints
 
-- **Do not commit or push unless I ask.**
-- **Backend deploys are manual.** Rebuild the zip (stage `index.mjs` +
-  `package.json` + `package-lock.json`, `npm ci --omit=dev`, zip those plus
-  `node_modules` with forward-slash entry paths, resolving the staging directory
-  to its long path first — the `SEMAPH~1` short form mangles every entry). Deploy
-  with `aws lambda update-function-code`.
-- **`aws login` expires often.** Check `aws sts get-caller-identity` before any
-  AWS work; if it has lapsed, ask me and wait rather than working around it. It
-  was valid at the end of session 4.
-- Tests: `cd tish-app/backend && npm test` (129) and `cd tish-app && npm test`
-  (100). Extend coverage rather than renumbering assertions.
-- Any new user-facing string needs a key in **both** locale files.
-- `/debug/*` is unauthenticated by my deliberate choice — `/debug/users`,
-  `/debug/link?caregiver=&dependent=`, `/debug/unlink?all=1` and the rest are
-  bookmarkable. Recorded under P0.1; do not widen it further without asking.
+- **Do not commit or push unless asked.** Session 5 committed because it was
+  asked to.
+- **Act freely against the live stack** — `ALTER TABLE`, reset, deploy, migrate,
+  create and delete fixtures. Anything other than signing up new users is
+  negligible until the security refactor lands. This is the third time the owner
+  has had to say it; §1's first guardrail has the reasoning and the two bugs that
+  hiding behind local-only verification cost.
+- **A schema change no longer needs a reset.** Add a numbered `.sql`, mirror it
+  into `SCHEMA_SQL` (enforced by a test), invoke `tish-migrate`.
+- **`aws login` expires often** — it lapsed mid-deploy in session 5. Check
+  `aws sts get-caller-identity` before AWS work; if it has gone, ask and wait.
+- Backend deploys are manual, and the zip build has three traps that have each
+  cost a session: resolve the staging directory to its **long** path (`SEMAPH~1`
+  mangles every entry), build the archive with forward-slash entry names (there
+  is no `zip` binary and `Compress-Archive` writes backslashes), and include
+  `migrations/*.sql` or the runner deploys with nothing to run.
+- Tests: `cd tish-app/backend && npm test` (200) and `cd tish-app && npm test`
+  (122). Extend coverage rather than renumbering assertions.
+- Any new user-facing string needs a key in both locale files.
+- `/debug/*` is unauthenticated by deliberate choice. Do not widen it without
+  asking. Note it is *not* how you reach `/reset-db` — the gateway refuses that;
+  use a direct `aws lambda invoke`.
 
 ## Not verified, and why
 
-Everything native-only is still unverified on a device, and the list has grown:
-the alarm burst (4.7b), the iOS interruption level (5.3), all three notification
-sounds (4.7a), the Android channel (4.7e), exact alarms (5.2), and now **4.4's
-snooze alarm actually firing**, **4.7c's tray dismissal**, and **5.8's token
-registration** — `getExpoPushTokenAsync` cannot run on web or a simulator, so
-nothing has ever produced a real token. **They all need one native rebuild**,
-which has not been made since the `app.json` plugin changes. That rebuild is the
-single highest-value verification step available and it is mine to trigger, not
-yours.
+**No real device has ever received a push from this system**, because no real
+push token exists — `getExpoPushTokenAsync` cannot run on web or a simulator, so
+every token used in testing was synthetic and Expo answers those with
+`DeviceNotRegistered`. That exercised the reaping path properly, but the last
+hop, Expo to a physical phone, is unproven.
+
+It joins everything else waiting on **one native rebuild**, which has not been
+made since the `app.json` plugin changes and is the single highest-value
+verification step available: the alarm burst (4.7b), the iOS interruption level
+(5.3), all three sounds (4.7a), the Android channel (4.7e), exact alarms (5.2),
+4.4's snooze alarm firing, 4.7c's tray dismissal, and 5.8's token registration.
+**That rebuild is the owner's to trigger, not yours.**
 
 Also unverified: 4.2's attribution line, the delayed caregiver escalation, and
-5.7's missed-dose section, which all need a signed-in session on a device. Ask me
+5.7's missed-dose section, which all need a signed-in session on a device. Ask
 for a screenshot rather than attempting to sign in.
 
 ## Open questions
 
-§10 is empty. The only thing needing a decision is §0.7 item 2 above, which is a
-sequencing choice rather than a design one. If something else needs deciding, ask
-rather than assuming, and add it to §10.
+§10 has none outstanding. Both of session 5's decisions were answered by the
+owner at the time — how `push_tokens` reached the database (reset), and whether
+to buy a NAT gateway for 5.4 (no; two Lambdas instead). If something needs
+deciding, ask rather than assuming, and add it to §10.

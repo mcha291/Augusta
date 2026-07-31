@@ -80,18 +80,25 @@ Last updated **2026-07-31**, session 5.
 | 5.7 — missed dose list | `done` | Server half in session 3 (`GET /medication-doses?from=&to=`, scoped through `checkAccess`, bounded at 500). **Client half in session 4**: `utils/doses.ts` `missedDoses` (13 tests), a section on `medications.tsx` above the reminder list, 3 locale keys in both files. Shown only when non-empty; a dose still inside its snooze is not yet missed. The §0.6 phase caveat still applies — trustworthy for daily reminders only. |
 | 5.8 — push token infrastructure | **registration `done` + live; send half `done` except receipts** | Session 4 built registration: 2.5's table, `POST`/`DELETE /push-tokens` (upsert on token, owner reassignment, 12 tests), `utils/push-token.ts`, registration on sign-in from `_layout.tsx`, unregistration on sign-out from `AuthContext`. **Session 5 built the send half inside 5.4**, as §0.3 directed: the Expo call, chunking at 100, ticket classification and `DeviceNotRegistered` reaping all live in `escalate.mjs` as 5.4's dispatch step. **The receipts poll is the one piece still missing** — it needs somewhere to persist ticket ids between runs, i.e. a `push_tickets` table, i.e. another reset or the migration runner. Ticket-level reaping covers the synchronous case, which is the common one; see §0.6. |
 | 5.4 — server-side caregiver escalation | `done` | Session 5. `escalation-policy.mjs` (pure, 33 tests) + `escalate.mjs` (two handlers, 28 tests). **Two Lambdas, not one** — `tish-escalate-dispatch` (no VPC, has internet, EventBridge target) drives `tish-escalate-db` (VPC-attached, has RDS); §8's single-Lambda shape is impossible in this VPC and §0.6 records why. EventBridge `tish-escalation-schedule` at `rate(5 minutes)`. Claim increments `escalation_level` in the same statement it selects, under `FOR UPDATE ... SKIP LOCKED`. Adds a **lateness floor** the plan does not have (§0.6). |
-| 5.5, 5.6, 5.9 — rest of delivery layer | `—` | 5.9 reuses 5.4's sender. **5.5 (SMS) is what makes D-8's second rung real** — until it lands every SMS rung substitutes to push, which is D-8's intended fallback but means the ladder is effectively one rung twice. |
+| 5.6 — schedule N occurrences ahead | **policy half `done`, wiring `—`** | Session 5. `utils/notification-budget.ts` (new, 22 tests) decides the horizon and what to give up: audibility before horizon, floor of 2 days, then burst, then drop dependents' copies furthest-dose-first, every degradation reported. **Nothing calls it yet** — `scheduleMedicationNotifications` still schedules one occurrence per alarm time. See §0.3 for the exact wiring step; the split follows the same pure/IO pattern as `dose-queue-policy` and `escalation-policy`. |
+| 5.5, 5.9 — rest of delivery layer | `—` | 5.9 reuses 5.4's sender. **5.5 (SMS) is what makes D-8's second rung real** — until it lands every SMS rung substitutes to push, which is D-8's intended fallback but means the ladder is effectively one rung twice. |
 | 6.1, 6.2 — error contract | `—` | Lowest urgency. |
 
 ### 0.3 — In progress right now
 
-**Nothing is half-edited. Session 5 ended at a clean boundary**, and unlike the
-end of session 4 **there is no decision outstanding and no deploy owed.** §0.7
-item 2 is resolved; the backend and both new Lambdas are deployed and verified.
+**Nothing is half-edited, and there is no decision outstanding and no deploy
+owed.** §0.7 item 2 is resolved; all four Lambdas are deployed and verified.
+**Sessions 1–5 are now committed** — on branch `reminder-delivery-phases-1-5`,
+commit `e7c3cf1`, not merged to `main`.
+
+The one thing deliberately incomplete is **5.6's wiring**, described below. Its
+policy module is finished and tested; nothing calls it. That is a boundary, not
+a half-edit — no file is mid-change and every suite is green.
 
 **Landed in session 5, 2026-07-31:** the deploy and reset §0.7 item 2 was
-blocking, then **5.4** with **5.8's send half** built into it as §0.3 directed.
-Backend tests 129 → 190.
+blocking, then **5.4** with **5.8's send half** built into it as §0.3 directed,
+then the **migration runner** and **`users.timezone` / `users.locale`**, then
+**5.6's policy half**. Backend tests 129 → 200, client 100 → 122.
 
 **Phase 4 is complete** apart from 4.7d, which is declined. **Phase 5 now has a
 working delivery path** for the first time: a dose that goes unconfirmed is
@@ -107,11 +114,41 @@ participating at all.
 > escalation columns. Kill switch:
 > `aws events disable-rule --name tish-escalation-schedule --region ap-east-2`.
 
-**The next item is 5.6 — schedule N occurrences ahead.** It has been called
-"more urgent than its position suggests" since session 4 and nothing has reduced
-that: 4.7b multiplies every patient's pending count by `alarm_repeat_count`, 4.4
-adds a transient snooze alert, and the iOS 64-slot cap is binding rather than
-theoretical. Nothing yet counts against a budget.
+**The next item is 5.6's wiring half, and it is the only thing in the tree that
+is deliberately incomplete.** The policy half — `utils/notification-budget.ts`,
+22 tests — is done and green. **Nothing calls it yet.**
+
+Split this way for the reason `dose-queue-policy.ts` and `escalation-policy.mjs`
+were: the decisions are pure and testable, the scheduling is neither. But it does
+mean the horizon is still one occurrence deep until the wiring lands, so **5.6
+delivers nothing to a user yet.**
+
+The concrete step, which is the part worth getting right rather than
+re-deriving:
+
+1. **The budget is global, but `scheduleMedicationNotifications` is per
+   reminder.** That is the whole reason this needs wiring rather than a one-line
+   change. The caller that knows the full set is `hooks/use-notification-sync.ts`
+   — it already reconciles self plus every active dependent. Compute the plan
+   there, once, and pass the resulting `daysAhead` / `burstCap` down through
+   `ScheduleOptions`.
+2. `scheduleMedicationNotifications` then loops occurrences `0..daysAhead-1`
+   instead of scheduling only the next one. `computeNextTriggerDate`
+   (`utils/date.ts`) already takes the offset arithmetic; an occurrence `n` is
+   that date plus `n × frequencyDays` days.
+3. **Identifiers must gain an occurrence segment.** This is the trap, and §0.6
+   has bitten twice on it already: a burst member's identifier is currently the
+   *same string* tomorrow as today, which is what makes the chain-forward work.
+   Scheduling several days at once means today's and tomorrow's alerts would
+   collide and silently overwrite each other. `notification-identifiers.ts` needs
+   an occurrence index, and `belongsToReminder` needs to keep matching without
+   it.
+4. Once the horizon is several days deep, **`rescheduleNextOccurrence` largely
+   stops being the mechanism** — the chain-forward exists because only one
+   occurrence was ever scheduled. Decide whether it becomes a no-op or a
+   top-up; do not leave both mechanisms writing the same identifiers.
+5. Log `plan.truncations` wherever the reconciliation logs. A silently shortened
+   horizon is the invisible degradation this item exists to remove.
 
 **Then 5.9** (silent push to repair the horizon — it reuses 5.4's sender
 directly, so it is much cheaper now than it was), then **5.5**.
@@ -435,7 +472,7 @@ error console.
 **End of session 5**: **200/200 backend tests** (129 → 200: 33 for
 `escalation-policy.mjs`, 31 for `escalate.mjs`, 6 for migration 005 and 2 for
 the timezone wiring; no existing assertion renumbered or weakened),
-**100/100 client tests** unchanged — session 5 touched
+**122/122 client tests** (100 → 122: 22 for 5.6's `utils/notification-budget.ts`) — session 5 touched
 no client code — `npx tsc --noEmit` clean, `npx eslint .` 0 errors / 41 warnings
 (the same 41; two real errors were introduced and fixed, see below), and
 `npm run validate-translations` at **325 keys**, unchanged: 5.4 deliberately
@@ -637,6 +674,21 @@ resolves against `COALESCE(u.timezone, $2)` and 5.4 renders copy in
 session expired between applying the migration and deploying that wiring, which
 is worth noting only because the gap was *invisible*: the constants and the
 column values were identical, so nothing misbehaved in between.
+
+Finally **5.6's policy half** and the session's first commit — sessions 1–5 as
+one checkpoint on `reminder-delivery-phases-1-5`, 66 files, deliberately
+excluding the unrelated `opus 5 vs 4.8.txt` scratch file in the working tree.
+Stopped before 5.6's wiring rather than starting a multi-hour change with no
+room to finish it; §0.3 has the five concrete steps, including the identifier
+collision that would otherwise be discovered the hard way for the third time.
+
+Worth recording about the budget module itself: **the first failing test was the
+test, not the code.** The scenario written to prove "dependents get dropped
+first" never reached the dropping stage, because trimming the burst absorbed the
+pressure first — which is the priority order the plan specifies. Reaching the
+drop path at all takes more than thirty alarm times between reminders. Two other
+tests in the same block were passing *vacuously* for the same reason and now
+assert that a drop actually happened.
 
 Then wiring EventBridge turned up two more, and they are a matched pair: the
 execution role could only write logs for `operation-strix`, so both new
