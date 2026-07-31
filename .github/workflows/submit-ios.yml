@@ -32,6 +32,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fail fast. EAS only validates the submit config *after* the cloud build
+      # finishes, so a placeholder or an unpushed eas.json costs a full build
+      # (~20 min of EAS minutes) before erroring out. Catch it in seconds.
+      # Remember CI reads eas.json from the pushed commit, not your working copy.
+      - name: Validate TestFlight submit config
+        run: |
+          node -e '
+            const ios = JSON.parse(require("fs").readFileSync("eas.json", "utf8")).submit?.production?.ios ?? {};
+            const problems = [];
+            if (!/^[0-9]+$/.test(ios.ascAppId ?? ""))
+              problems.push(`ascAppId must be digits only, got ${JSON.stringify(ios.ascAppId)}`);
+            if (!/^[A-Z0-9]{10}$/.test(ios.appleTeamId ?? ""))
+              problems.push(`appleTeamId must be 10 uppercase letters/digits, got ${JSON.stringify(ios.appleTeamId)}`);
+            if (problems.length) {
+              console.error("eas.json submit.production.ios is not ready:");
+              for (const p of problems) console.error("  - " + p);
+              console.error("");
+              console.error("Fix tish-app/eas.json and PUSH the commit — see tish-app/TESTFLIGHT.md step 3.");
+              process.exit(1);
+            }
+            console.log(`OK - ascAppId ${ios.ascAppId}, appleTeamId ${ios.appleTeamId}`);
+          '
+
       # Builds on EAS's cloud (this runner only triggers it), then submits the
       # resulting .ipa to App Store Connect / TestFlight using the eas.json
       # submit config + the ASC API key stored in EAS credentials. No Apple

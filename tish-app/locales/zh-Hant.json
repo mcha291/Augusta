@@ -22,7 +22,8 @@
     "loading": "載入中...",
     "notProvided": "未提供",
     "selectPlaceholder": "請選擇...",
-    "done": "完成"
+    "done": "完成",
+    "retry": "再試一次"
   },
   "home": {
     "goodMorning": "早安，",
@@ -36,7 +37,8 @@
     "metricReports": "報告",
     "upcomingSchedule": "近期行程",
     "viewAll": "查看全部",
-    "newsAndAnnouncements": "新聞與公告"
+    "newsAndAnnouncements": "新聞與公告",
+    "updateStatusFailed": "無法更新此預約，請再試一次。"
   },
   "appointments": {
     "title": "預約",
@@ -65,7 +67,10 @@
     "selectStatus": "選擇狀態 *",
     "updateButton": "更新預約",
     "saveButton": "儲存預約",
-    "successAlert": "成功！"
+    "successAlert": "成功！",
+    "saveFailed": "無法儲存此預約，請再試一次。",
+    "configLoadFailed": "無法載入預約設定",
+    "configLoadFailedHint": "儲存前需要先取得預約狀態清單。請檢查網路連線後再試一次。"
   },
   "medications": {
     "title": "用藥管理",
@@ -80,7 +85,10 @@
     "updateStatusFailed": "更新提醒狀態失敗，請再試一次。",
     "frequencyEvery_one": "每 {{count}} 天",
     "frequencyEvery_other": "每 {{count}} 天",
-    "alarmDefaultLabel": "鬧鐘 {{number}}"
+    "alarmDefaultLabel": "鬧鐘 {{number}}",
+    "missedTitle": "未確認的用藥",
+    "missedSubtitle": "以下是過去一週已排程、但未標記為已服用的劑次。",
+    "missedFootnote": "這只是紀錄，並非要您現在補服。若不確定是否可以延後服用，請詢問醫師或藥師。"
   },
   "mealTypes": {
     "breakfast": "早餐",
@@ -104,10 +112,28 @@
     "alarmsSection": "鬧鐘",
     "soundSection": "提醒音效",
     "tapToPreview": "點擊以試聽音效",
+    "burstSection": "提醒次數",
+    "burstLabel": "鈴聲要響幾次",
+    "burstAndroidNote": "這支手機只會響一次，無論此處選擇為何。此設定仍會套用到這則提醒的其他手機。",
+    "escalationSection": "若您未回應",
+    "escalationEnabledLabel": "通知我的照護者",
+    "escalationDelayLabel": "先等待多久",
+    "escalationDelayOption": "{{minutes}} 分鐘",
+    "escalationDelayCustom": "其他",
+    "escalationDelayCustomLabel": "等待分鐘數",
+    "escalationDelayInvalid": "請輸入 {{min}} 到 {{max}} 之間的整數分鐘數。",
+    "escalationOrderLabel": "先聯絡誰",
+    "escalationOrderCaregiver": "我的照護者",
+    "escalationOrderSms": "先傳簡訊給我",
+    "escalationOrderSmsUnavailable": "簡訊功能尚未開放，因此會先聯絡您的照護者。",
     "repeatFrequency": "重複頻率",
     "repeatEveryDays": "每隔幾天重複（天）",
     "updateSchedule": "更新排程",
-    "addToSchedule": "加入我的排程"
+    "addToSchedule": "加入我的排程",
+    "mealAlarmLabel": "{{meal}}{{timing}}",
+    "saveFailed": "無法儲存此提醒，請再試一次。",
+    "configLoadFailed": "無法載入藥物清單",
+    "configLoadFailedHint": "設定提醒前需要先取得您的藥物資料庫。請檢查網路連線後再試一次。"
   },
   "medicationLibrary": {
     "title": "藥物資料庫",
@@ -122,7 +148,8 @@
     "validationError": "請同時提供名稱與劑量。",
     "addToLibrary": "加入資料庫",
     "availableDosage": "可選劑量：{{dosage}}",
-    "connectionError": "連線至資料庫失敗。"
+    "connectionError": "連線至資料庫失敗。",
+    "saveFailed": "無法新增該藥物，請再試一次。"
   },
   "results": {
     "titleDashboard": "數據分析",
@@ -153,7 +180,11 @@
     "saveReport": "儲存檢驗報告",
     "saveSuccessUpdated": "報告已成功更新。",
     "saveSuccessRecorded": "報告已成功記錄。",
-    "saveFailed": "儲存報告失敗。"
+    "saveFailed": "儲存報告失敗。",
+    "invalidNumber": "請輸入數字，或留空。",
+    "fixInvalidFields": "部分數值不是有效的數字，請修正標示的欄位。",
+    "configLoadFailed": "無法載入檢驗項目",
+    "configLoadFailedHint": "輸入結果前需要先取得檢驗項目清單。請檢查網路連線後再試一次。"
   },
   "profile": {
     "title": "使用者個人資料",
@@ -177,7 +208,10 @@
     "authorizedMessage": "已授予安全許可。",
     "accessDeniedTitle": "拒絕存取",
     "accessDeniedMessage": "驗證碼錯誤。",
-    "language": "語言"
+    "language": "語言",
+    "mealTimesSection": "用餐時間",
+    "mealTimesHint": "用於推算「晚餐前」或「早餐時」等提醒的實際響鈴時間。大致時間即可，隨時都能修改。",
+    "mealTimeSaveFailed": "無法儲存該用餐時間，請再試一次。"
   },
   "managedUsers": {
     "title": "家庭管理",
@@ -201,7 +235,44 @@
     "verifyAccountTitle": "驗證帳號",
     "verifyAccountMessage": "請先驗證您的電子郵件後再登入。",
     "loginFailedTitle": "登入失敗",
-    "invalidCredentials": "帳號或密碼錯誤。"
+    "invalidCredentials": "帳號或密碼錯誤。",
+    "forgotPassword": "忘記密碼？",
+    "actionNeededTitle": "還差一步",
+    "newPasswordRequired": "您的帳號必須設定新密碼才能登入。請聯絡客服協助重設。",
+    "mfaNotSupported": "您的帳號需要額外的驗證步驟，目前版本的應用程式尚無法完成。請聯絡客服。",
+    "unexpectedStep": "登入需要額外的步驟（{{step}}），目前版本的應用程式無法完成。請聯絡客服。"
+  },
+  "forgotPassword": {
+    "title": "重設密碼",
+    "subtitle": "請輸入您的電子郵件、電話號碼或使用者名稱，我們將寄送重設密碼的驗證碼給您。",
+    "identifierLabel": "電子郵件、電話號碼或使用者名稱",
+    "sendCode": "寄送重設驗證碼",
+    "backToSignIn": "返回登入",
+    "resetRequiredExplanation": "您必須先重設密碼才能登入。請於下方寄送驗證碼以設定新密碼。",
+    "newPasswordTitle": "設定新密碼",
+    "codeSentEmail": "重設驗證碼已以電子郵件寄送至 {{destination}}",
+    "codeSentSms": "重設驗證碼已以簡訊傳送至 {{destination}}",
+    "checkSpamFolder": "郵件可能需要一分鐘才會送達。若沒有收到，請檢查垃圾郵件匣。",
+    "codePlaceholder": "驗證碼",
+    "newPasswordLabel": "新密碼",
+    "confirmPasswordLabel": "確認新密碼",
+    "resetButton": "重設密碼",
+    "resendCode": "重新寄送驗證碼",
+    "startOver": "使用其他帳號",
+    "resentMessage": "重設驗證碼已寄送至 {{destination}}",
+    "enterIdentifier": "請輸入您的電子郵件、電話號碼或使用者名稱。",
+    "enterCode": "請輸入您收到的重設驗證碼。",
+    "enterNewPassword": "請輸入新密碼。",
+    "passwordsDoNotMatch": "兩次輸入的密碼不一致。",
+    "codeMismatch": "驗證碼不正確，請確認後再試一次。",
+    "codeExpired": "驗證碼已過期。請點選「重新寄送驗證碼」取得新的驗證碼。",
+    "tooManyAttempts": "嘗試次數過多，請稍候幾分鐘後再試。",
+    "userNotFound": "找不到此帳號，請確認資料後再試一次。",
+    "invalidPassword": "密碼不符合安全需求。請改用較長並混合英文字母、數字與符號的密碼。",
+    "noDeliveryMethod": "此帳號沒有已驗證的電子郵件或電話號碼，無法寄送重設驗證碼。請聯絡客服。",
+    "cannotReset": "此帳號目前無法重設密碼。可能尚未完成驗證，或已被停用。",
+    "successTitle": "密碼已更新",
+    "successMessage": "您的密碼已重設完成，請使用新密碼登入。"
   },
   "signup": {
     "confirmIdentity": "確認身分",
@@ -272,8 +343,9 @@
   },
   "notifications": {
     "doseDueTitle": "🚨 緊急提醒：該服藥了",
-    "doseDueBodyWithLabel": "{{label}}：該服用 {{medName}} 的 {{dosage}} 了",
-    "doseDueBody": "該服用 {{medName}} 的 {{dosage}} 了"
+    "doseDueGenericBody": "點擊查看要服用的藥物。",
+    "doseEscalationTitle": "⚠️ 尚未確認服藥",
+    "doseEscalationBody": "您照顧的對象可能錯過了一次服藥。點擊查看。"
   },
   "sounds": {
     "standard": "標準",
@@ -283,7 +355,12 @@
   "alarmOverlay": {
     "reminderTitle": "提醒：該服藥了",
     "confirmIngestion": "確認已服用",
-    "snooze": "稍後提醒（5分鐘）",
-    "footer": "智慧健康守護系統 v4.2"
+    "snooze": "稍後提醒（{{minutes}} 分鐘）",
+    "footer": "智慧健康守護系統 v4.2",
+    "forPerson": "{{name}} 的用藥",
+    "forDependent": "您照護對象的用藥",
+    "unknownMedication": "服藥提醒",
+    "unresolvedPrompt": "請查看藥物清單，確認這次要服用的藥物。",
+    "couldNotRefresh": "顯示已儲存的資料 — 目前無法更新。"
   }
 }

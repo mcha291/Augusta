@@ -2,7 +2,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import {
   ActivityIndicator,
   Appbar,
@@ -53,23 +53,38 @@ export default function AppointmentFormScreen() {
   const [dbStatuses, setDbStatuses] = useState<AppointmentStatus[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
+  const [configError, setConfigError] = useState(false);
 
-  useEffect(() => {
-    const loadConfig = async () => {
-      try {
-        const res = await apiRequest(`/appointment-statuses`);
-        const data = await res.json();
-        setDbStatuses(data);
-        if (!isEdit) {
-          const defaultStatus = data.find((s: any) => s.label === 'New');
-          if (defaultStatus) setSelectedStatusId(defaultStatus.id);
-        }
-      } finally {
-        setIsLoadingConfig(false);
+  const notifyUser = (title: string, message: string) => {
+    if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
+    else Alert.alert(title, message);
+  };
+
+  // try/finally with no catch: the screen rendered, but dbStatuses stayed
+  // empty and selectedStatusId stayed null, so handleSave's own validation
+  // then blocked on `status` and refused to save with no explanation at all.
+  const loadConfig = async () => {
+    setIsLoadingConfig(true);
+    setConfigError(false);
+    try {
+      const res = await apiRequest(`/appointment-statuses`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) throw new Error('No appointment statuses returned');
+      setDbStatuses(data);
+      if (!isEdit) {
+        const defaultStatus = data.find((s: any) => s.label === 'New');
+        if (defaultStatus) setSelectedStatusId(defaultStatus.id);
       }
-    };
-    loadConfig();
-  }, []);
+    } catch (e) {
+      console.error('Appointment status config load failed:', e);
+      setConfigError(true);
+    } finally {
+      setIsLoadingConfig(false);
+    }
+  };
+
+  useEffect(() => { loadConfig(); }, []);
 
   const handleSave = async () => {
     const newErrors = {
@@ -101,7 +116,13 @@ export default function AppointmentFormScreen() {
       if (response.ok) {
         if (Platform.OS === 'web') window.alert(t('appointmentForm.successAlert'));
         goBackOrHome(router);
+      } else {
+        const detail = await response.json().catch(() => ({}));
+        notifyUser(t('common.error'), detail.error || t('appointmentForm.saveFailed'));
       }
+    } catch (e) {
+      console.error('Appointment save failed:', e);
+      notifyUser(t('common.error'), t('appointmentForm.saveFailed'));
     } finally {
       setIsSaving(false);
     }
@@ -119,6 +140,21 @@ export default function AppointmentFormScreen() {
   );
 
   if (isLoadingConfig) return <View style={GlobalStyles.centered}><ActivityIndicator color={COLORS.primary} /></View>;
+
+  if (configError) {
+    return (
+      <View style={GlobalStyles.centered}>
+        <Text style={styles.errorTitle}>{t('appointmentForm.configLoadFailed')}</Text>
+        <Text style={styles.errorBody}>{t('appointmentForm.configLoadFailedHint')}</Text>
+        <Button mode="contained" onPress={loadConfig} icon="refresh" style={{ marginTop: 16 }}>
+          {t('common.retry')}
+        </Button>
+        <Button mode="text" onPress={() => goBackOrHome(router)} textColor={COLORS.slate}>
+          {t('common.cancel')}
+        </Button>
+      </View>
+    );
+  }
 
   return (
     <View style={GlobalStyles.container}>
@@ -268,6 +304,8 @@ export default function AppointmentFormScreen() {
 const styles = StyleSheet.create({
   headerTitle: { fontWeight: '800', fontSize: 18 },
   scrollContent: { padding: 24, paddingBottom: 60 },
+  errorTitle: { fontSize: 18, fontWeight: '800', color: COLORS.ink, textAlign: 'center', paddingHorizontal: 24 },
+  errorBody: { fontSize: 14, color: COLORS.slate, textAlign: 'center', marginTop: 8, paddingHorizontal: 32, lineHeight: 20 },
   
   // FIXED SPACING LOGIC
   fieldContainer: {

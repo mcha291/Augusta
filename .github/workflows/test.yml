@@ -1,16 +1,20 @@
 name: Tests
 
-# Runs on every push to any branch (and PRs) that touches the backend Lambda.
-# The deploy workflow has its own gate; this one gives feedback on branches
-# and PRs without deploying anything.
+# Runs on every push to any branch (and PRs) that touches the backend Lambda or
+# the client modules that have tests. The deploy workflow has its own gate; this
+# one gives feedback on branches and PRs without deploying anything.
 on:
   push:
     paths:
       - 'tish-app/backend/**'
+      - 'tish-app/utils/**'
+      - 'tish-app/package.json'
       - '.github/workflows/test.yml'
   pull_request:
     paths:
       - 'tish-app/backend/**'
+      - 'tish-app/utils/**'
+      - 'tish-app/package.json'
 
 jobs:
   backend-lambda:
@@ -28,5 +32,35 @@ jobs:
           cache-dependency-path: tish-app/backend/package-lock.json
 
       - run: npm ci --omit=dev
+
+      - run: npm test
+
+  # Client-side logic tests. These cover the dependency-free modules only —
+  # `utils/date.ts`, `utils/notification-identifiers.ts`, `utils/meal-alarms.ts`
+  # — which between them decide *when* a medication alarm fires. Anything that
+  # imports expo-notifications, react-native or AsyncStorage cannot be reached
+  # this way and would need jest + jest-expo; see §0.8 in PLAN.md.
+  #
+  # Node 24, not 22: these are `.ts` files run directly, and type stripping is
+  # only on by default from Node 22.18. Pinning 24 avoids depending on the
+  # runner's patch version for whether the suite runs at all.
+  client-utils:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tish-app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tish-app/package-lock.json
+
+      # The tested modules import nothing, so the suite needs no dependencies at
+      # all. `--ignore-scripts` skips the Expo postinstall, which is a
+      # significant chunk of the install time and irrelevant here.
+      - run: npm ci --ignore-scripts
 
       - run: npm test

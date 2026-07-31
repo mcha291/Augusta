@@ -8,6 +8,12 @@
     "pg": "^8.16.0"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "migrate": "node migrate.mjs up",
+    "migrate:status": "node migrate.mjs status",
+    "migrate:dry-run": "node migrate.mjs up --dry-run"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-lambda": "^3.1100.0"
   }
 }

@@ -1,4 +1,6 @@
 import { apiRequest } from '@/utils/api';
+import { unregisterPushToken } from '@/utils/push-token';
+import { cacheOwnerNames } from '@/utils/reminder-store';
 import { fetchAuthSession, signOut } from 'aws-amplify/auth';
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
@@ -47,6 +49,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const res = await apiRequest('/my-dependents');
       const data = await res.json();
       setDependents(Array.isArray(data) ? data : []);
+      // 4.2 — persist the names so an alarm that cold-starts the app can say
+      // whose dose it is. This is the only place the app already has dependent
+      // names in hand, and doing it here keeps the alarm path off the network.
+      if (Array.isArray(data)) await cacheOwnerNames(data);
     } catch (e) { console.error(e); }
   };
 
@@ -123,6 +129,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const logout = async () => {
     try {
+      // 5.8 — before `signOut()`, because unregistering needs the session's
+      // token to authenticate. Awaited but never fatal: a push token outlives
+      // the session, so leaving one behind means the previous user's caregiver
+      // escalations keep arriving on a phone somebody else may now be holding.
+      // That is a disclosure rather than an untidy row, which is why it is worth
+      // the round trip on a path that would otherwise be instant.
+      await unregisterPushToken();
       await signOut();
       setUser(null);
       setToken(null);

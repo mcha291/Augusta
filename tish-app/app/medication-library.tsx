@@ -57,6 +57,13 @@ export default function MedicationLibraryScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [formError, setFormError] = useState(false);
 
+  // Alert.alert is a no-op on react-native-web, and this screen is reachable
+  // in a web build — same helper the other screens use.
+  const notifyUser = (title: string, message: string) => {
+    if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
+    else Alert.alert(title, message);
+  };
+
   const loadLibrary = async () => {
     try {
       const res = await apiRequest('/medication-library',);
@@ -80,9 +87,12 @@ export default function MedicationLibraryScreen() {
 
     try {
       setIsSaving(true);
+      // apiRequest serialises `body` itself — pre-stringifying here sent a
+      // JSON string as the payload, which the server then parsed back into a
+      // string rather than an object.
       const res = await apiRequest('/medication-library', {
         method: 'POST',
-        body: JSON.stringify({ name: newName, default_dosage: newDosage }),
+        body: { name: newName.trim(), default_dosage: newDosage.trim() },
       }, activeDependent?.id);
 
       if (res.ok) {
@@ -91,9 +101,11 @@ export default function MedicationLibraryScreen() {
         setFormError(false);
         setVisible(false);
         loadLibrary();
+      } else {
+        notifyUser(t('common.error'), t('medicationLibrary.saveFailed'));
       }
     } catch (e) {
-      Alert.alert(t('common.error'), t('medicationLibrary.connectionError'));
+      notifyUser(t('common.error'), t('medicationLibrary.connectionError'));
     } finally {
       setIsSaving(false);
     }

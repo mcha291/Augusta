@@ -31,7 +31,7 @@ Account `180891490019`. Written 2026-07-24.
 | D3 RDS private | **done** — restored `PubliclyAccessible: false` |
 | D3b live 0.0.0.0/0 exposure | **closed** — Sydney SG tightened, verified still working |
 | D4 endpoints consolidated | **done** — single front door |
-| D6 lint + locale | **done** — 5 errors → 0, locale parity clean |
+| D6 lint + locale | **done** — 0 lint errors, locale parity clean; web date picker fixed 2026-07-30 |
 
 ### Resources created in ap-east-2
 
@@ -369,9 +369,10 @@ you do set it up, note the region moved:
 Function URL was never necessary; the app now calls the API Gateway route via
 `apiRequest` like everything else.
 
-**Do not delete the Function URL yet.** The TestFlight build in testers' hands
-still calls it, and deleting it breaks signup for those installs. Delete after
-the next build ships.
+**Do not delete the Function URL yet.** The endpoint consolidation ships in
+**build 8** (submitted to TestFlight 2026-07-25, commit `a6fd0c1`), but testers
+on build 7 or earlier still call the Function URL for `/check-availability`.
+Delete it only once testers have updated to build 8+.
 
 ### D1b. Original finding (for context)
 
@@ -428,13 +429,42 @@ migration — a lot of the steps above are destructive if mis-typed.
 
 ### D6. Smaller items
 
-- **Web date picker** renders `null` — birth date is unchangeable in a web build.
-  Pre-existing, unrelated to the beta reports, needs a different input entirely.
-- **Pre-existing lint errors**: 5 × `react/no-children-prop` from
-  `<HelperText children={undefined} />` in appointment-form, results-form and
-  medication-reminder-form.
-- **Locale gap**: `medications.frequencyEvery_one` missing from `zh-Hant.json`.
+*Re-verified 2026-07-30. Three of the four entries below were stale — recorded
+here rather than deleted, so the same items don't get re-investigated.*
+
+- ~~**Web date picker** renders `null` — birth date is unchangeable in a web
+  build.~~ **Fixed 2026-07-30.** `components/platform-date-picker.tsx` now has a
+  web branch using the browser's native `<input type="date|time">` inside the
+  same modal shell as iOS, following the pattern already used in `results.tsx`.
+  Both directions format in local time: `toISOString()` showed the previous day
+  for anyone east of UTC before their offset, and `new Date('2026-07-30')`
+  parses as UTC midnight. The same off-by-one was fixed in `results-form.tsx`
+  and in signup's `birth_date` (PLAN.md 1.8).
+- ~~**Pre-existing lint errors**: 5 × `react/no-children-prop`~~ — **stale, no
+  such code exists.** There is no `children={undefined}` anywhere in the repo,
+  and `npx eslint .` reports **0 errors** (41 warnings, all pre-existing
+  unused-vars and exhaustive-deps). Nothing to fix.
+- ~~**Locale gap**: `medications.frequencyEvery_one` missing from
+  `zh-Hant.json`~~ — **stale, already resolved.** Both `frequencyEvery_one` and
+  `frequencyEvery_other` are present in both files, and
+  `npm run validate-translations` passes.
 - `key.p8` is correctly gitignored and untracked — verified, no action.
+
+**One real gap remains, and it is worth fixing before Phases 3–5 of PLAN.md add
+more strings.** `.github/workflows/translations.yml` triggers only on
+`paths: tish-app/locales/**`, and the validator compares en against zh-Hant.
+So adding a `t('some.new.key')` in code and forgetting *both* locale files
+touches no locale path, runs no check, and ships the raw key as visible UI text.
+Parity is enforced; coverage is not.
+
+Partially mitigated by something the plan didn't note: **`t()` is typed against
+the generated key union**, so a key missing from *both* locale files is already a
+TypeScript error at the call site (this is what `npx tsc --noEmit` catches).
+The hole that remains is a key present in `en.json` but absent from `zh-Hant.json`
+— which parity *does* catch, but only when the workflow actually runs. Widening
+the trigger to include `tish-app/**` would close it; note that this workflow
+also publishes an EAS update on success, so changing its trigger changes what
+gets deployed and when. Deliberately left alone.
 
 ---
 

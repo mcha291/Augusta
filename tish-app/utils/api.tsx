@@ -2,8 +2,19 @@
 import { fetchAuthSession } from "@aws-amplify/auth";
 import { API_BASE_URL as BASE_URL } from "../constants/config";
 
-interface RequestOptions extends RequestInit {
-  body?: any; 
+interface RequestOptions extends Omit<RequestInit, 'body'> {
+  /**
+   * A plain object — this function serialises it for you. Do **not**
+   * pre-stringify.
+   *
+   * Typed as `object` rather than `any` deliberately. Two callers used to pass
+   * `JSON.stringify(...)` here, which got serialised a second time; the
+   * server's JSON.parse then yielded a *string*, `payload.id` was `undefined`,
+   * node-postgres coerced that to NULL, and `DELETE ... WHERE id = NULL`
+   * deleted nothing while returning 200 {"message":"Deleted"}. The narrower
+   * type makes that a compile error instead of a silent no-op.
+   */
+  body?: object;
 }
 
 export const apiRequest = async (

@@ -2,6 +2,11 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
+    // Lets a module import './date.ts' with the extension, which is what Node's
+    // type stripper needs to resolve it under `node --test`. Safe here because
+    // nothing in this project emits through tsc — Metro does the building and
+    // the only tsc invocation is `--noEmit`.
+    "allowImportingTsExtensions": true,
     "paths": {
       "@/*": [
         "./*"

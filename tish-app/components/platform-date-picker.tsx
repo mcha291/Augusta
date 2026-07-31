@@ -5,6 +5,45 @@ import { Modal, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { Button } from 'react-native-paper';
 
 import { COLORS, RADIUS } from '../constants/theme';
+import { toLocalDateString, toLocalTimeString } from '../utils/date';
+
+/**
+ * Parse an <input type="date|time"> value back into a local Date.
+ *
+ * `new Date('2026-07-30')` parses as UTC midnight, which lands on the previous
+ * day for anyone west of UTC — so the components are pulled apart and fed to
+ * the Date constructor, which is local-time.
+ */
+function parseLocalInputValue(raw: string, mode: 'date' | 'time', base: Date): Date | null {
+  if (!raw) return null;
+
+  if (mode === 'time') {
+    const [hours, minutes] = raw.split(':').map(Number);
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    const next = new Date(base);
+    next.setHours(hours, minutes, 0, 0);
+    return next;
+  }
+
+  const [year, month, day] = raw.split('-').map(Number);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  const next = new Date(base);
+  next.setFullYear(year, month - 1, day);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+const webInputStyle = {
+  padding: '14px',
+  borderRadius: '12px',
+  border: '1px solid #E2E8F0',
+  backgroundColor: 'white',
+  width: '100%',
+  fontFamily: 'inherit',
+  fontSize: '16px',
+  outline: 'none',
+  marginBottom: '12px',
+} as const;
 
 type Props = {
   visible: boolean;
@@ -50,8 +89,42 @@ export default function PlatformDatePicker({
 
   if (!visible) return null;
 
-  // Web: the library renders null and logs a warning. Nothing to show.
-  if (Platform.OS === 'web') return null;
+  // Web: @react-native-community/datetimepicker renders null here, which meant
+  // birth date simply could not be set or changed in a web build. The browser's
+  // own date/time input is the right substitute — it's the same control the web
+  // branches in results.tsx already use.
+  if (Platform.OS === 'web') {
+    return (
+      <Modal transparent visible animationType="fade" onRequestClose={onDismiss}>
+        <Pressable style={styles.backdrop} onPress={onDismiss}>
+          <Pressable style={styles.webSheet} onPress={() => {}}>
+            <input
+              type={mode === 'time' ? 'time' : 'date'}
+              // Formatted in local time on purpose. `toISOString()` would show
+              // the previous day for any user east of UTC before their offset
+              // — the same defect as the birth_date one in signup.
+              value={mode === 'time' ? toLocalTimeString(draft) : toLocalDateString(draft)}
+              min={mode === 'time' ? undefined : minimumDate && toLocalDateString(minimumDate)}
+              max={mode === 'time' ? undefined : maximumDate && toLocalDateString(maximumDate)}
+              onChange={(e) => {
+                const next = parseLocalInputValue(e.target.value, mode, draft);
+                if (next) setDraft(next);
+              }}
+              style={webInputStyle}
+            />
+            <View style={styles.actions}>
+              <Button mode="text" textColor={COLORS.slate} onPress={onDismiss}>
+                {t('common.cancel')}
+              </Button>
+              <Button mode="contained" onPress={() => onConfirm(draft)}>
+                {t('common.done')}
+              </Button>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    );
+  }
 
   // Android puts up its own modal dialog and fires onChange exactly once, with
   // event.type telling us whether the user confirmed or cancelled.
@@ -107,6 +180,13 @@ export default function PlatformDatePicker({
 
 const styles = StyleSheet.create({
   backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(15, 23, 42, 0.4)' },
+  webSheet: {
+    backgroundColor: 'white',
+    borderTopLeftRadius: RADIUS.lg,
+    borderTopRightRadius: RADIUS.lg,
+    padding: 20,
+    paddingBottom: 28,
+  },
   sheet: {
     backgroundColor: 'white',
     borderTopLeftRadius: RADIUS.lg,

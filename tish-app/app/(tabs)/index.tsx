@@ -4,7 +4,9 @@ import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ActivityIndicator,
+  Alert,
   Dimensions,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -28,7 +30,7 @@ import { GlobalStyles } from '../../styles/globalstyles';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, activeDependent } = useAuth();
   const { speakingId, toggle: toggleSpeech } = useTextToSpeech();
   const { t } = useTranslation();
 
@@ -36,14 +38,21 @@ export default function HomeScreen() {
   const [data, setData] = useState<any>({ appointments: [], meds: [], news: [] });
   const [checkInAppt, setCheckInAppt] = useState<any>(null);
 
+  // Home has to read from whoever is currently in scope. It used to read with
+  // `user?.id` while appointment-form.tsx *writes* with `activeDependent?.id`,
+  // so an appointment created from Home while managing a dependent was filed
+  // under the dependent and Home never showed it — it looked like the save had
+  // silently failed.
+  const scopedUserId = activeDependent?.id ?? user?.id;
+
   const fetchData = async () => {
     if (!user || user.id === 0) return;
     try {
       setLoading(true);
       const [apptRes, newsRes, medRes] = await Promise.all([
-        apiRequest(`/appointments`, {}, user?.id),
-        apiRequest(`/announcements`, {}, user?.id),
-        apiRequest(`/medication-reminders`, {}, user?.id)
+        apiRequest(`/appointments`, {}, scopedUserId),
+        apiRequest(`/announcements`, {}, scopedUserId),
+        apiRequest(`/medication-reminders`, {}, scopedUserId)
       ]);
 
       const appts = await apptRes.json();
@@ -63,15 +72,44 @@ export default function HomeScreen() {
     }
   };
 
-  useFocusEffect(useCallback(() => { fetchData(); }, []));
+  // Keyed on the active scope, not []. With an empty dependency array,
+  // switching the active dependent left the previous person's records on
+  // screen — medications.tsx and appointments.tsx already key on this.
+  useFocusEffect(useCallback(() => { fetchData(); }, [scopedUserId, user?.id]));
 
+  // Optimistic update with rollback and an explicit failure message, matching
+  // medications.tsx's toggleStatus. Previously this never checked res.ok, so a
+  // failed status change just refetched and silently redisplayed the old value.
   const updateStatus = async (id: number, statusId: number) => {
-    setLoading(true);
-    await apiRequest(`/appointments`, {
-      method: 'PUT',
-      body: { id, status_id: statusId }
-    }, user?.id);
-    fetchData();
+    const previous = { appointments: data.appointments, checkInAppt };
+
+    setData((prev: any) => ({
+      ...prev,
+      appointments: prev.appointments.map((a: any) =>
+        a.id === id ? { ...a, status_id: statusId, status_label: statusId === 4 ? 'Completed' : 'Cancelled' } : a
+      ),
+    }));
+    if (checkInAppt?.id === id) setCheckInAppt(null);
+
+    try {
+      const res = await apiRequest(`/appointments`, {
+        method: 'PUT',
+        body: { id, status_id: statusId }
+      }, scopedUserId);
+
+      if (!res.ok) throw new Error(String(res.status));
+      fetchData();
+    } catch (e) {
+      console.error('Appointment status update failed:', e);
+      setData((prev: any) => ({ ...prev, appointments: previous.appointments }));
+      setCheckInAppt(previous.checkInAppt);
+      notifyUser(t('common.error'), t('home.updateStatusFailed'));
+    }
+  };
+
+  const notifyUser = (title: string, message: string) => {
+    if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
+    else Alert.alert(title, message);
   };
 
   if (loading && !data.appointments.length) {

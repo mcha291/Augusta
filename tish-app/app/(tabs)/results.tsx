@@ -43,6 +43,12 @@ export default function ResultsScreen() {
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Alert.alert is a no-op on react-native-web, and this screen has a web build.
+  const notifyUser = (title: string, message: string) => {
+    if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
+    else Alert.alert(title, message);
+  };
   const [configs, setConfigs] = useState<TestConfig[]>([]);
   const [results, setResults] = useState<TestResult[]>([]);
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -68,7 +74,10 @@ export default function ResultsScreen() {
     }
   };
 
-  useFocusEffect(useCallback(() => { loadData(); }, []));
+  // Keyed on the active dependent, not []. With an empty dependency array,
+  // switching scope left the previous person's lab results on screen —
+  // medications.tsx and appointments.tsx already key on this.
+  useFocusEffect(useCallback(() => { loadData(); }, [activeDependent?.id]));
 
   const filteredResults = useMemo(() => {
     const s = new Date(startDate).setHours(0, 0, 0, 0);
@@ -97,14 +106,19 @@ export default function ResultsScreen() {
   const handleDelete = (id: number) => {
     const performDelete = async () => {
       try {
+        // apiRequest serialises `body` itself. Pre-stringifying here meant the
+        // server parsed a *string*, `payload.id` was undefined, and
+        // `DELETE ... WHERE id = NULL` deleted nothing while still returning
+        // 200 {"message":"Deleted"} — the list reloaded unchanged.
         const res = await apiRequest(`/test-results`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id })
-        });
+          body: { id }
+        }, activeDependent?.id);
         if (res.ok) loadData();
+        else notifyUser(t('common.error'), t('results.deleteFailed'));
       } catch (e) {
-        Alert.alert(t('common.error'), t('results.deleteFailed'));
+        notifyUser(t('common.error'), t('results.deleteFailed'));
       }
     };
 
@@ -299,12 +313,19 @@ export default function ResultsScreen() {
                     <Divider style={styles.divider} />
                     {configs.map(cfg => {
                       const val = report[`field_${cfg.field_number}`];
-                      return val ? (
+                      // Test explicitly for absence. `val ? … : null` hid any
+                      // falsy reading, and only worked at all because
+                      // node-postgres returns NUMERIC as the string "0", which
+                      // is truthy — a real 0 (or a type parser being added
+                      // later) would silently drop legitimate readings from
+                      // the report.
+                      const isMissing = val === null || val === undefined || val === '';
+                      return isMissing ? null : (
                         <View key={cfg.field_number} style={styles.dataRow}>
                           <Text style={styles.dataLabel}>{cfg.display_name}</Text>
                           <Text style={styles.dataValue}>{val} <Text style={styles.unitText}>{cfg.units}</Text></Text>
                         </View>
-                      ) : null;
+                      );
                     })}
                     <View style={styles.footerActions}>
                       <Button mode="text" textColor={COLORS.error} onPress={() => handleDelete(report.id)}>{t('common.delete')}</Button>

@@ -26,6 +26,7 @@ import {
 import PlatformDatePicker from '../components/platform-date-picker';
 import { DEFAULT_VERIFICATION_MEDIUM, SMS_VERIFICATION_ENABLED } from '../constants/config';
 import { GeneralOption } from '../constants/interfaces';
+import { toLocalDateString } from '../utils/date';
 
 // Design System
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
@@ -254,7 +255,7 @@ export default function SignupScreen() {
         body: {
           username: cleanUser,
           full_name: form.full_name,
-          birth_date: form.birth_date.toISOString(),
+          birth_date: toLocalDateString(form.birth_date),
           gender_id: form.gender_id,
           condition_id: form.condition_id,
           phone_number: form.phone_number.trim() || null,
@@ -346,7 +347,7 @@ export default function SignupScreen() {
         body: {
           username: form.username.trim(),
           full_name: form.full_name,
-          birth_date: form.birth_date.toISOString(),
+          birth_date: toLocalDateString(form.birth_date),
           gender_id: form.gender_id,
           condition_id: form.condition_id,
           phone_number: cleanPhone || null,

@@ -22,7 +22,8 @@
     "loading": "Loading...",
     "notProvided": "Not provided",
     "selectPlaceholder": "Select...",
-    "done": "Done"
+    "done": "Done",
+    "retry": "Try Again"
   },
   "home": {
     "goodMorning": "Good Morning,",
@@ -36,7 +37,8 @@
     "metricReports": "Reports",
     "upcomingSchedule": "Upcoming Schedule",
     "viewAll": "View All",
-    "newsAndAnnouncements": "News & Announcements"
+    "newsAndAnnouncements": "News & Announcements",
+    "updateStatusFailed": "Couldn't update the appointment. Please try again."
   },
   "appointments": {
     "title": "Appointments",
@@ -65,7 +67,10 @@
     "selectStatus": "Select Status *",
     "updateButton": "Update Appointment",
     "saveButton": "Save Appointment",
-    "successAlert": "Success!"
+    "successAlert": "Success!",
+    "saveFailed": "Couldn't save the appointment. Please try again.",
+    "configLoadFailed": "Couldn't load appointment settings",
+    "configLoadFailedHint": "We need the list of appointment statuses before you can save. Check your connection and try again."
   },
   "medications": {
     "title": "Medications",
@@ -80,7 +85,10 @@
     "updateStatusFailed": "Failed to update reminder status. Please try again.",
     "frequencyEvery_one": "Every {{count}} day",
     "frequencyEvery_other": "Every {{count}} days",
-    "alarmDefaultLabel": "Alarm {{number}}"
+    "alarmDefaultLabel": "Alarm {{number}}",
+    "missedTitle": "Doses not confirmed",
+    "missedSubtitle": "These were scheduled in the last week and were not marked as taken.",
+    "missedFootnote": "This is a record, not a reminder to take them now. If you are unsure whether to take a dose late, ask your doctor or pharmacist."
   },
   "mealTypes": {
     "breakfast": "Breakfast",
@@ -104,10 +112,28 @@
     "alarmsSection": "ALARMS",
     "soundSection": "ALERT SOUND",
     "tapToPreview": "Tap to preview sound",
+    "burstSection": "ALARM REPEATS",
+    "burstLabel": "How many times the alarm sounds",
+    "burstAndroidNote": "This phone sounds the alarm once, whatever you choose here. The setting still applies to other phones on this reminder.",
+    "escalationSection": "IF YOU DO NOT RESPOND",
+    "escalationEnabledLabel": "Tell my caregiver",
+    "escalationDelayLabel": "How long to wait first",
+    "escalationDelayOption": "{{minutes}} min",
+    "escalationDelayCustom": "Other",
+    "escalationDelayCustomLabel": "Minutes to wait",
+    "escalationDelayInvalid": "Enter a whole number of minutes between {{min}} and {{max}}.",
+    "escalationOrderLabel": "Who to contact first",
+    "escalationOrderCaregiver": "My caregiver",
+    "escalationOrderSms": "Text me first",
+    "escalationOrderSmsUnavailable": "Text messages are not available yet, so your caregiver is contacted first.",
     "repeatFrequency": "Repeat Frequency",
     "repeatEveryDays": "Repeat every (days)",
     "updateSchedule": "Update Schedule",
-    "addToSchedule": "Add to My Schedule"
+    "addToSchedule": "Add to My Schedule",
+    "mealAlarmLabel": "{{timing}} {{meal}}",
+    "saveFailed": "Couldn't save this reminder. Please try again.",
+    "configLoadFailed": "Couldn't load the medication list",
+    "configLoadFailedHint": "We need your medication library before you can set up a reminder. Check your connection and try again."
   },
   "medicationLibrary": {
     "title": "Medication Library",
@@ -122,7 +148,8 @@
     "validationError": "Please provide both name and dosages.",
     "addToLibrary": "Add to Library",
     "availableDosage": "Available: {{dosage}}",
-    "connectionError": "Connection to library failed."
+    "connectionError": "Connection to library failed.",
+    "saveFailed": "Couldn't add that medication. Please try again."
   },
   "results": {
     "titleDashboard": "Analytics",
@@ -153,7 +180,11 @@
     "saveReport": "Save Lab Report",
     "saveSuccessUpdated": "Results updated successfully.",
     "saveSuccessRecorded": "Results recorded successfully.",
-    "saveFailed": "Failed to save results."
+    "saveFailed": "Failed to save results.",
+    "invalidNumber": "Enter a number, or leave this blank.",
+    "fixInvalidFields": "Some readings aren't valid numbers. Please correct the highlighted fields.",
+    "configLoadFailed": "Couldn't load the test fields",
+    "configLoadFailedHint": "We need the list of test fields before you can enter results. Check your connection and try again."
   },
   "profile": {
     "title": "User Profile",
@@ -177,7 +208,10 @@
     "authorizedMessage": "Security clearance granted.",
     "accessDeniedTitle": "Access Denied",
     "accessDeniedMessage": "Handshake code incorrect.",
-    "language": "Language"
+    "language": "Language",
+    "mealTimesSection": "Meal Times",
+    "mealTimesHint": "Used to work out when \"before dinner\" or \"with breakfast\" reminders should go off. Rough times are fine — you can change these any time.",
+    "mealTimeSaveFailed": "Couldn't save that meal time. Please try again."
   },
   "managedUsers": {
     "title": "Family Management",
@@ -201,7 +235,44 @@
     "verifyAccountTitle": "Verify Account",
     "verifyAccountMessage": "Please verify your email before logging in.",
     "loginFailedTitle": "Login Failed",
-    "invalidCredentials": "Invalid credentials."
+    "invalidCredentials": "Invalid credentials.",
+    "forgotPassword": "Forgot your password?",
+    "actionNeededTitle": "One More Step",
+    "newPasswordRequired": "Your account needs a new password before you can sign in. Please contact support to have it reset.",
+    "mfaNotSupported": "Your account requires an extra verification step that this app version can't complete yet. Please contact support.",
+    "unexpectedStep": "Sign-in needs an additional step ({{step}}) that this app can't complete. Please contact support."
+  },
+  "forgotPassword": {
+    "title": "Reset Password",
+    "subtitle": "Enter your email, phone number, or username and we'll send you a code to reset your password.",
+    "identifierLabel": "Email, Phone Number, or Username",
+    "sendCode": "Send Reset Code",
+    "backToSignIn": "Back to Sign In",
+    "resetRequiredExplanation": "Your password must be reset before you can sign in. Send yourself a code below to choose a new one.",
+    "newPasswordTitle": "Choose a New Password",
+    "codeSentEmail": "We emailed a reset code to {{destination}}",
+    "codeSentSms": "We texted a reset code to {{destination}}",
+    "checkSpamFolder": "It can take a minute to arrive. If you don't see it, check your spam or junk folder.",
+    "codePlaceholder": "Code",
+    "newPasswordLabel": "New Password",
+    "confirmPasswordLabel": "Confirm New Password",
+    "resetButton": "Reset Password",
+    "resendCode": "Resend Code",
+    "startOver": "Use a Different Account",
+    "resentMessage": "Reset code sent to {{destination}}",
+    "enterIdentifier": "Enter your email, phone number, or username.",
+    "enterCode": "Enter the reset code you received.",
+    "enterNewPassword": "Enter a new password.",
+    "passwordsDoNotMatch": "Those passwords don't match.",
+    "codeMismatch": "That code isn't right. Check the code and try again.",
+    "codeExpired": "That code has expired. Tap \"Resend Code\" to get a new one.",
+    "tooManyAttempts": "Too many attempts. Please wait a few minutes and try again.",
+    "userNotFound": "We couldn't find that account. Check the details and try again.",
+    "invalidPassword": "That password doesn't meet the requirements. Try a longer one with a mix of letters, numbers, and symbols.",
+    "noDeliveryMethod": "This account has no verified email or phone number, so we can't send a reset code. Please contact support.",
+    "cannotReset": "This account can't be reset right now. It may not be verified yet, or it may be disabled.",
+    "successTitle": "Password Updated",
+    "successMessage": "Your password has been reset. Please sign in with your new password."
   },
   "signup": {
     "confirmIdentity": "Confirm Identity",
@@ -272,8 +343,9 @@
   },
   "notifications": {
     "doseDueTitle": "🚨 MISSION CRITICAL: DOSE DUE",
-    "doseDueBodyWithLabel": "{{label}}: Time to take {{dosage}} of {{medName}}",
-    "doseDueBody": "Time to take {{dosage}} of {{medName}}"
+    "doseDueGenericBody": "Tap to see which dose is due.",
+    "doseEscalationTitle": "⚠️ UNCONFIRMED DOSE",
+    "doseEscalationBody": "Someone you care for may have missed a dose. Tap to check."
   },
   "sounds": {
     "standard": "Standard",
@@ -283,7 +355,12 @@
   "alarmOverlay": {
     "reminderTitle": "REMINDER: MEDICATION DUE",
     "confirmIngestion": "CONFIRM INGESTION",
-    "snooze": "Snooze (5m)",
-    "footer": "WISE HEALTH PROTOCOL v4.2"
+    "snooze": "Snooze ({{minutes}}m)",
+    "footer": "WISE HEALTH PROTOCOL v4.2",
+    "forPerson": "For {{name}}",
+    "forDependent": "For someone in your care",
+    "unknownMedication": "Medication reminder",
+    "unresolvedPrompt": "Check your medication list for the dose that is due.",
+    "couldNotRefresh": "Showing saved details — could not refresh just now."
   }
 }

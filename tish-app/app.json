@@ -14,6 +14,9 @@
         "NSMicrophoneUsageDescription": "Allow $(PRODUCT_NAME) to use the microphone for voice dictation.",
         "ITSAppUsesNonExemptEncryption": false
       },
+      "entitlements": {
+        "com.apple.developer.usernotifications.time-sensitive": true
+      },
       "bundleIdentifier": "com.ti-smarthealth.app"
     },
     "android": {
@@ -62,7 +65,18 @@
       "expo-localization",
       "expo-font",
       "expo-audio",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-notifications",
+        {
+          "sounds": [
+            "./assets/sounds/alarm_default.wav",
+            "./assets/sounds/alarm_emergency.wav",
+            "./assets/sounds/alarm_calm.wav"
+          ]
+        }
+      ],
+      "./plugins/with-exact-alarms"
     ],
     "experiments": {
       "typedRoutes": true,

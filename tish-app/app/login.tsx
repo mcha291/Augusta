@@ -34,27 +34,84 @@ export default function LoginScreen() {
       });
 
       if (isSignedIn) {
-        // 2. CRITICAL: Sync the Cognito session with your RDS profile 
+        // 2. CRITICAL: Sync the Cognito session with your RDS profile
         // before navigating. This populates the 'user' object.
-        await checkUser(); 
-        
+        await checkUser();
+
         // 3. Move to the main app
         router.replace('/(tabs)');
-      } else if (nextStep.signInStep === 'CONFIRM_SIGN_UP') {
-        // Signed up but never verified. Hand the username across so signup
-        // opens on the confirm step — sending them to a blank registration
-        // form left them stuck, since re-registering hits "already exists".
-        notifyUser(t('login.verifyAccountTitle'), t('login.verifyAccountMessage'));
-        router.push({
-          pathname: '/signup',
-          params: { username: identifier.trim(), pendingConfirm: '1' },
-        });
+      } else {
+        // Not signed in, and Cognito wants something more. Every branch below
+        // must say *something*: an unhandled step used to leave the spinner
+        // simply stopping, with no indication that anything was required.
+        handleNextStep(nextStep.signInStep, identifier.trim());
       }
     } catch (error: any) {
       console.error("Login Error:", error);
       notifyUser(t('login.loginFailedTitle'), error.message || t('login.invalidCredentials'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * Cognito can return a dozen different `signInStep` values and this screen
+   * only ever knew two of them. Anything else fell through both branches, so
+   * `isSignedIn` stayed false, nothing navigated, and the spinner just
+   * stopped — the user was told nothing at all.
+   *
+   * RESET_PASSWORD is the one that actually bites: it is what Cognito returns
+   * after an administrator forces a password reset, which was the only
+   * recovery route for a forgotten password. That is now routed into the
+   * reset flow rather than dead-ending here.
+   */
+  const handleNextStep = (signInStep: string, username: string) => {
+    switch (signInStep) {
+      case 'CONFIRM_SIGN_UP':
+        // Signed up but never verified. Hand the username across so signup
+        // opens on the confirm step — sending them to a blank registration
+        // form left them stuck, since re-registering hits "already exists".
+        notifyUser(t('login.verifyAccountTitle'), t('login.verifyAccountMessage'));
+        router.push({
+          pathname: '/signup',
+          params: { username, pendingConfirm: '1' },
+        });
+        return;
+
+      case 'RESET_PASSWORD':
+        router.push({
+          pathname: '/forgot-password',
+          params: { username, reason: 'reset_required' },
+        });
+        return;
+
+      case 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED':
+        // A pool-side temporary password. Amplify wants confirmSignIn() with
+        // the new password, which this app has no screen for — say so plainly
+        // rather than appearing to do nothing.
+        notifyUser(t('login.actionNeededTitle'), t('login.newPasswordRequired'));
+        return;
+
+      case 'CONFIRM_SIGN_IN_WITH_SMS_CODE':
+      case 'CONFIRM_SIGN_IN_WITH_EMAIL_CODE':
+      case 'CONFIRM_SIGN_IN_WITH_TOTP_CODE':
+      case 'CONFIRM_SIGN_IN_WITH_PASSWORD':
+      case 'CONFIRM_SIGN_IN_WITH_CUSTOM_CHALLENGE':
+      case 'CONTINUE_SIGN_IN_WITH_MFA_SELECTION':
+      case 'CONTINUE_SIGN_IN_WITH_MFA_SETUP_SELECTION':
+      case 'CONTINUE_SIGN_IN_WITH_TOTP_SETUP':
+      case 'CONTINUE_SIGN_IN_WITH_EMAIL_SETUP':
+      case 'CONTINUE_SIGN_IN_WITH_FIRST_FACTOR_SELECTION':
+        // MFA is not configured on this pool today. If it ever is, these need
+        // real screens; until then the user at least learns why they're stuck.
+        notifyUser(t('login.actionNeededTitle'), t('login.mfaNotSupported'));
+        return;
+
+      default:
+        // Includes 'DONE' arriving with isSignedIn false, which shouldn't
+        // happen. Carry the step name so a tester's screenshot is diagnosable.
+        console.warn('[login] unhandled signInStep:', signInStep);
+        notifyUser(t('login.actionNeededTitle'), t('login.unexpectedStep', { step: signInStep }));
     }
   };
 
@@ -118,6 +175,20 @@ export default function LoginScreen() {
           contentStyle={{ height: 56 }}
         >
           {t('login.authenticate')}
+        </Button>
+
+        {/* Carry whatever they already typed across, so the reset screen
+            doesn't ask for the identifier a second time. */}
+        <Button
+          mode="text"
+          onPress={() => router.push({
+            pathname: '/forgot-password',
+            params: identifier.trim() ? { username: identifier.trim() } : {},
+          })}
+          textColor={COLORS.slate}
+          compact
+        >
+          {t('login.forgotPassword')}
         </Button>
       </View>
 

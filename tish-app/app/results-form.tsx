@@ -17,6 +17,7 @@ import { useAuth } from '@/context/AuthContext';
 import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
+import { toLocalDateString } from '../utils/date';
 
 
 
@@ -33,26 +34,68 @@ export default function ResultsFormScreen() {
   const [configs, setConfigs] = useState<any[]>([]);
   const [formValues, setFormValues] = useState<any>(initialData || {});
   const [loading, setLoading] = useState(true);
+  const [configError, setConfigError] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, boolean>>({});
 
   // --- Date State ---
   const [date, setDate] = useState(new Date(initialData?.test_date || new Date()));
   const [showPicker, setShowPicker] = useState(false);
 
-  useEffect(() => {
-    apiRequest(`/test-config`)
-      .then(res => res.json())
-      .then(data => {
-        setConfigs(data);
-        setLoading(false);
-      });
-  }, []);
+  const notifyUser = (title: string, message: string) => {
+    if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
+    else Alert.alert(title, message);
+  };
+
+  // Was a bare .then() chain with no .catch(), and it cleared the loading flag
+  // only on success — so offline or a 5xx left a permanent spinner with no
+  // error and no way to retry.
+  const loadConfigs = async () => {
+    setLoading(true);
+    setConfigError(false);
+    try {
+      const res = await apiRequest(`/test-config`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setConfigs(Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error('Test config load failed:', e);
+      setConfigError(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadConfigs(); }, []);
+
+  /**
+   * parseFloat("12o") is 12, and parseFloat("abc") is NaN which serialises to
+   * JSON null — so a typo was silently stored as a missing reading. Validate
+   * before saving rather than after.
+   */
+  const validate = () => {
+    const errors: Record<string, boolean> = {};
+    for (const cfg of configs) {
+      const key = `field_${cfg.field_number}`;
+      const raw = formValues[key];
+      if (raw === undefined || raw === null || String(raw).trim() === '') continue; // blank is allowed
+      // Number() rejects trailing junk that parseFloat happily truncates.
+      if (!Number.isFinite(Number(String(raw).trim()))) errors[key] = true;
+    }
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
 
   const handleSave = async () => {
+    if (!validate()) {
+      notifyUser(t('common.error'), t('resultsForm.fixInvalidFields'));
+      return;
+    }
+
     try {
       setSaving(true);
-      
-      const payload = {
+
+      const payload: any = {
         id: initialData?.id,
         test_date: date.toISOString(),
         ...formValues
@@ -61,9 +104,13 @@ export default function ResultsFormScreen() {
       // Ensure numeric fields are cast to floats
       configs.forEach(cfg => {
         const key = `field_${cfg.field_number}`;
-        if (payload[key] !== undefined && payload[key] !== "") {
-          payload[key] = parseFloat(payload[key]);
+        const raw = payload[key];
+        if (raw === undefined || raw === null || String(raw).trim() === '') {
+          // Send an explicit null rather than "" so the column is cleared.
+          if (key in payload) payload[key] = null;
+          return;
         }
+        payload[key] = Number(String(raw).trim());
       });
 
       const res = await apiRequest(`/test-results`, {
@@ -75,15 +122,35 @@ export default function ResultsFormScreen() {
       if (res.ok) {
         if (Platform.OS === 'web') window.alert(isEdit ? t('resultsForm.saveSuccessUpdated') : t('resultsForm.saveSuccessRecorded'));
         goBackOrHome(router);
+      } else {
+        // Previously fell through silently on a non-2xx, so the form just sat
+        // there looking like nothing had happened.
+        const detail = await res.json().catch(() => ({}));
+        notifyUser(t('common.error'), detail.error || t('resultsForm.saveFailed'));
       }
     } catch (e) {
-      Alert.alert(t('common.error'), t('resultsForm.saveFailed'));
+      notifyUser(t('common.error'), t('resultsForm.saveFailed'));
     } finally {
       setSaving(false);
     }
   };
 
   if (loading) return <View style={GlobalStyles.centered}><ActivityIndicator color={COLORS.primary} size="large" /></View>;
+
+  if (configError) {
+    return (
+      <View style={GlobalStyles.centered}>
+        <Text style={styles.errorTitle}>{t('resultsForm.configLoadFailed')}</Text>
+        <Text style={styles.errorBody}>{t('resultsForm.configLoadFailedHint')}</Text>
+        <Button mode="contained" onPress={loadConfigs} icon="refresh" style={{ marginTop: 16 }}>
+          {t('common.retry')}
+        </Button>
+        <Button mode="text" onPress={() => goBackOrHome(router)} textColor={COLORS.slate}>
+          {t('common.cancel')}
+        </Button>
+      </View>
+    );
+  }
 
   return (
     <View style={GlobalStyles.container}>
@@ -106,11 +173,20 @@ export default function ResultsFormScreen() {
 
         <View style={styles.fieldContainer}>
             <Text style={styles.sectionLabel}>{t('resultsForm.testDate')}</Text>
+            {/* Local-time formatting both ways below. `toISOString()` showed the
+                previous day for anyone east of UTC before their offset, and
+                `new Date('2026-07-30')` parses as UTC midnight — the same
+                off-by-one-day defect in each direction. */}
             {Platform.OS === 'web' ? (
               <input
                 type="date"
-                value={date.toISOString().split('T')[0]}
-                onChange={(e) => setDate(new Date(e.target.value))}
+                value={toLocalDateString(date)}
+                onChange={(e) => {
+                  const [y, m, d] = e.target.value.split('-').map(Number);
+                  if (Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d)) {
+                    setDate(new Date(y, m - 1, d));
+                  }
+                }}
                 style={webInputStyle}
               />
             ) : (
@@ -130,7 +206,7 @@ export default function ResultsFormScreen() {
               </Pressable>
             )}
             {/* Standardized Helper height for vertical rhythm */}
-            <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
+            <HelperText type="info" visible={false} style={styles.helper}>{''}</HelperText>
         </View>
 
         <PlatformDatePicker
@@ -146,23 +222,34 @@ export default function ResultsFormScreen() {
             <Text style={styles.sectionHeaderText}>{t('resultsForm.numericValues')}</Text>
         </View>
 
-        {configs.map((cfg) => (
-          <View key={cfg.field_number} style={styles.fieldContainer}>
-            <TextInput
-              label={`${cfg.display_name} (${cfg.units})`}
-              value={formValues[`field_${cfg.field_number}`]?.toString() || ''}
-              mode="outlined"
-              outlineColor={COLORS.background}
-              activeOutlineColor={COLORS.primary}
-              keyboardType="numeric"
-              style={styles.input}
-              onChangeText={(val) => setFormValues({ ...formValues, [`field_${cfg.field_number}`]: val })}
-              disabled={saving}
-            />
-            {/* Empty space to keep alignment same as screens with validation */}
-            <HelperText type="info" visible={false} style={styles.helper}>{null}</HelperText>
-          </View>
-        ))}
+        {configs.map((cfg) => {
+          const key = `field_${cfg.field_number}`;
+          const hasError = !!fieldErrors[key];
+          return (
+            <View key={cfg.field_number} style={styles.fieldContainer}>
+              <TextInput
+                label={`${cfg.display_name} (${cfg.units})`}
+                value={formValues[key]?.toString() || ''}
+                mode="outlined"
+                outlineColor={COLORS.background}
+                activeOutlineColor={hasError ? COLORS.error : COLORS.primary}
+                error={hasError}
+                keyboardType="numeric"
+                style={styles.input}
+                onChangeText={(val) => {
+                  setFormValues({ ...formValues, [key]: val });
+                  if (hasError) setFieldErrors(prev => ({ ...prev, [key]: false }));
+                }}
+                disabled={saving}
+              />
+              {/* Reserved space keeps vertical rhythm whether or not the
+                  message is showing. */}
+              <HelperText type="error" visible={hasError} style={styles.helper}>
+                {t('resultsForm.invalidNumber')}
+              </HelperText>
+            </View>
+          );
+        })}
 
         <Button 
           mode="contained" 
@@ -197,6 +284,8 @@ const webInputStyle = {
 
 const styles = StyleSheet.create({
   headerTitle: { fontWeight: '800', fontSize: 18, color: COLORS.ink },
+  errorTitle: { fontSize: 18, fontWeight: '800', color: COLORS.ink, textAlign: 'center', paddingHorizontal: 24 },
+  errorBody: { fontSize: 14, color: COLORS.slate, textAlign: 'center', marginTop: 8, paddingHorizontal: 32, lineHeight: 20 },
   
   // Consistency logic
   fieldContainer: {

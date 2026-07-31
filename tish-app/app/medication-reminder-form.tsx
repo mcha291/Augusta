@@ -4,7 +4,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import {
     Appbar,
     Button,
@@ -23,7 +23,17 @@ import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 
+import { SMS_VERIFICATION_ENABLED } from '@/constants/config';
 import { apiRequest } from '@/utils/api';
+import {
+    DEFAULT_MEAL_TIMES,
+    MEAL_LABEL_KEY,
+    TIMING_LABEL_KEY,
+    buildAlarmSet,
+    dateToTimeString,
+    type MealKey,
+    type MealTimes,
+} from '@/utils/meal-alarms';
 import { scheduleMedicationNotifications } from '@/utils/notification-helper';
 import ActiveProfileBadge from '@/components/active-profile-badge';
 import { useAuth } from '@/context/AuthContext';
@@ -35,11 +45,28 @@ interface MealSelectionsState { breakfast: MealSelection; lunch: MealSelection; 
 
 const formatTimeForWeb = (date: Date) => date.toTimeString().slice(0, 5);
 
+/** 4.6 — escalation delay presets, in minutes. */
+const DELAY_PRESETS = [15, 30, 60, 120];
+
+/**
+ * The custom delay floor is 10, not the 5 the plan originally proposed, and the
+ * reason is Android rather than taste: 4.2 schedules the caregiver's copy
+ * locally at dose time + delay, and Android throttles the app to one alarm per
+ * nine minutes while the device is idle (P0.3). A 5-minute delay puts the
+ * escalation alarm inside that window, where it can be silently deferred. The
+ * database keeps the wider 5-240 bound so this stays a UI decision.
+ */
+const CUSTOM_DELAY_MIN = 10;
+const CUSTOM_DELAY_MAX = 240;
+
+/** D-9 / 2.6 — how many consecutive alerts one dose schedules. */
+const BURST_OPTIONS = [1, 2, 3, 4, 5, 6];
+
 export default function MedicationReminderForm() {
     const router = useRouter();
     const params = useLocalSearchParams();
     const { t } = useTranslation();
-    const { activeDependent } = useAuth();
+    const { activeDependent, user } = useAuth();
     const [selectedSound, setSelectedSound] = useState('default');
     const previewPlayer = useRef<AudioPlayer | null>(null);
 
@@ -61,9 +88,25 @@ export default function MedicationReminderForm() {
     const initialData = isEdit ? JSON.parse(params.reminder as string) : null;
 
     const [library, setLibrary] = useState<any[]>([]);
+    const [mealTimes, setMealTimes] = useState<MealTimes>(DEFAULT_MEAL_TIMES);
     const [loadingConfig, setLoadingConfig] = useState(true);
+    const [configError, setConfigError] = useState(false);
+
+    // Localised display label for a derived alarm, e.g. "Before dinner".
+    const labelForMeal = (meal: MealKey, timing: 'before' | 'after' | 'at'): string =>
+        timing === 'at'
+            ? t(MEAL_LABEL_KEY[meal])
+            : t('medicationReminderForm.mealAlarmLabel', {
+                timing: t(TIMING_LABEL_KEY[timing]),
+                meal: t(MEAL_LABEL_KEY[meal]),
+            });
     const [medMenuVisible, setMedMenuVisible] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+
+    const notifyUser = (title: string, message: string) => {
+        if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
+        else Alert.alert(title, message);
+    };
 
     // --- FORM STATE ---
     const [selectedMed, setSelectedMed] = useState<any>(initialData ? { id: initialData.med_id, name: initialData.med_name, default_dosage: '' } : null);
@@ -90,21 +133,79 @@ export default function MedicationReminderForm() {
     const [alarmLabels, setAlarmLabels] = useState<string[]>(
         [0, 1, 2, 3].map((i) => initialData?.alarm_labels?.[i] || t('medications.alarmDefaultLabel', { number: i + 1 }))
     );
+    // --- 4.6 / 2.4 / 2.6 — escalation and alarm-burst settings (D-3, D-8, D-9) ---
+    //
+    // **The form default is ON while the column default is OFF, and that is
+    // deliberate** (D-3). The column must not retroactively switch escalation on
+    // for reminders that already exist — that would page caregivers about
+    // historical doses the moment this ships. But a safety net nobody enables
+    // isn't one, so new reminders opt in.
+    const initialDelay = Number(initialData?.escalation_delay_minutes) || 30;
+    const [escalationEnabled, setEscalationEnabled] = useState(
+        initialData ? !!initialData.escalation_enabled : true
+    );
+    const [escalationDelay, setEscalationDelay] = useState(initialDelay);
+    const [useCustomDelay, setUseCustomDelay] = useState(!DELAY_PRESETS.includes(initialDelay));
+    const [customDelayText, setCustomDelayText] = useState(
+        DELAY_PRESETS.includes(initialDelay) ? '' : String(initialDelay)
+    );
+    const [escalationOrder, setEscalationOrder] = useState<'caregiver_first' | 'sms_first'>(
+        initialData?.escalation_order === 'sms_first' ? 'sms_first' : 'caregiver_first'
+    );
+    const [alarmRepeatCount, setAlarmRepeatCount] = useState(
+        Number(initialData?.alarm_repeat_count) || 3
+    );
+
+    // Presets over a raw number input: the primary users are elderly, and the app
+    // already leans on large targets elsewhere.
+    const effectiveDelay = useCustomDelay ? parseInt(customDelayText, 10) : escalationDelay;
+    const delayIsValid = Number.isInteger(effectiveDelay)
+        && effectiveDelay >= CUSTOM_DELAY_MIN
+        && effectiveDelay <= CUSTOM_DELAY_MAX;
+
     const [showTimePicker, setShowTimePicker] = useState<number | null>(null);
 
     // Error State
-    const [errors, setErrors] = useState({ med: false, dosage: false, frequency: false });
+    const [errors, setErrors] = useState({ med: false, dosage: false, frequency: false, delay: false });
 
-    useEffect(() => {
-        apiRequest(`/medication-library`).then(res => res.json()).then(data => {
-            setLibrary(data);
+    // Was a bare .then() chain with no .catch(), clearing the loading flag only
+    // on success — offline or a 5xx left a permanent spinner with no error and
+    // no retry.
+    const loadLibrary = async () => {
+        setLoadingConfig(true);
+        setConfigError(false);
+        try {
+            const [libRes, mealRes] = await Promise.all([
+                apiRequest(`/medication-library`),
+                apiRequest(`/meal-times`, {}, activeDependent?.id),
+            ]);
+
+            if (!libRes.ok) throw new Error(`HTTP ${libRes.status}`);
+            const data = await libRes.json();
+            setLibrary(Array.isArray(data) ? data : []);
             if (isEdit) {
                 const fullMed = data.find((m: any) => m.id === initialData.med_id);
                 if (fullMed) setSelectedMed(fullMed);
             }
+
+            // Meal times are not fatal to this screen — a failure here just
+            // means meal selections resolve against the defaults, which is a
+            // better outcome than blocking the whole form.
+            if (mealRes.ok) {
+                const times = await mealRes.json();
+                setMealTimes({ ...DEFAULT_MEAL_TIMES, ...times });
+            } else {
+                console.warn('Meal times unavailable; falling back to defaults');
+            }
+        } catch (e) {
+            console.error('Medication library load failed:', e);
+            setConfigError(true);
+        } finally {
             setLoadingConfig(false);
-        });
-    }, []);
+        }
+    };
+
+    useEffect(() => { loadLibrary(); }, []);
 
     const toggleMealTiming = (meal: keyof MealSelectionsState, timing: MealTiming) => {
         setMealSelections(prev => {
@@ -115,7 +216,15 @@ export default function MedicationReminderForm() {
 
     const handleSave = async () => {
         const finalDosage = customDosage.trim() !== '' ? customDosage : dosage;
-        const newErrors = { med: !selectedMed, dosage: !finalDosage, frequency: !frequencyDays };
+        const newErrors = {
+            med: !selectedMed,
+            dosage: !finalDosage,
+            frequency: !frequencyDays,
+            // Only blocks when escalation is actually on — an invalid custom
+            // delay on a reminder with escalation switched off is not a reason to
+            // refuse the save.
+            delay: escalationEnabled && !delayIsValid,
+        };
         setErrors(newErrors);
         if (Object.values(newErrors).some(v => v)) return;
 
@@ -123,9 +232,21 @@ export default function MedicationReminderForm() {
             setIsSaving(true);
 
             const activeIndexes = [0, 1, 2, 3].filter(i => activeAlarms[i]);
-            const activeAlarmTimes = activeIndexes.map(i =>
-                alarmTimes[i].toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }));
-            const activeAlarmLabels = activeIndexes.map(i => alarmLabels[i].trim() || t('medications.alarmDefaultLabel', { number: i + 1 }));
+            const manualTimes = activeIndexes.map(i => dateToTimeString(alarmTimes[i]));
+            const manualLabels = activeIndexes.map(i => alarmLabels[i].trim() || t('medications.alarmDefaultLabel', { number: i + 1 }));
+
+            // Meal selections become real alarms here. They were previously
+            // collected, stored and displayed back to the patient, but the
+            // scheduler only ever reads `alarms` — so "with breakfast" showed
+            // as active and never fired. Resolving at save time means the
+            // device scheduler needs no meal logic of its own.
+            const resolved = buildAlarmSet({
+                manualTimes,
+                manualLabels,
+                mealSelections,
+                mealTimes,
+                labelForMeal,
+            });
 
             const payload = {
                 id: initialData?.id,
@@ -136,9 +257,17 @@ export default function MedicationReminderForm() {
                 at_dinner: mealSelections.dinner.enabled, dinner_timing: mealSelections.dinner.timing,
                 at_bedtime: mealSelections.bedtime.enabled,
                 frequency_days: parseInt(frequencyDays) || 1,
-                alarms: activeAlarmTimes,
-                alarm_labels: activeAlarmLabels,
+                alarms: resolved.alarms,
+                alarm_labels: resolved.alarm_labels,
+                alarm_sources: resolved.alarm_sources,
                 reminder_sound: selectedSound, // <-- was missing entirely before
+                // 4.6 — the delay is only meaningful when escalation is on, but
+                // it is sent either way so switching escalation back on later
+                // restores the value the user chose rather than the default.
+                escalation_enabled: escalationEnabled,
+                escalation_delay_minutes: effectiveDelay,
+                escalation_order: escalationOrder,
+                alarm_repeat_count: alarmRepeatCount,
             };
 
             const res = await apiRequest(`/medication-reminders`, {
@@ -161,22 +290,65 @@ export default function MedicationReminderForm() {
                 if (savedId && Platform.OS !== 'web') {
                     await scheduleMedicationNotifications({
                         id: savedId,
-                        status: 'active',
+                        // 4.2 — the owner, so this alarm gets an owner-namespaced
+                        // identifier straight away. Without it the alarm is
+                        // written un-namespaced and only gets rewritten at the
+                        // next reconciliation; it would still be cancellable, but
+                        // the device would briefly hold a set it can't attribute.
+                        user_id: activeDependent?.id ?? user?.id,
+                        // Carry the reminder's real status. Hardcoding 'active'
+                        // meant editing an *inactive* reminder scheduled alarms
+                        // for it — the device then held alarms the server
+                        // considered inactive until the next medications-screen
+                        // re-sync repaired it.
+                        status: initialData?.status ?? 'active',
                         med_name: selectedMed.name,
                         selected_dosage: finalDosage,
-                        alarms: activeAlarmTimes,
-                        alarm_labels: activeAlarmLabels,
+                        alarms: resolved.alarms,
+                        alarm_labels: resolved.alarm_labels,
                         reminder_sound: selectedSound,
                         frequency_days: parseInt(frequencyDays) || 1, // <-- added
-                    });
+                        // 4.2 item 4 — carried so a caregiver saving a
+                        // dependent's reminder schedules the *escalation* copy
+                        // straight away, at dose time + delay, rather than a
+                        // duplicate alarm that only gets corrected at the next
+                        // reconciliation. Without these the object below would
+                        // read as escalation-off and the caregiver's device
+                        // would schedule nothing at all until then.
+                        escalation_enabled: escalationEnabled,
+                        escalation_delay_minutes: effectiveDelay,
+                    }, { viewerUserId: user?.id });
                 }
 
                 goBackOrHome(router);
+            } else {
+                // A non-2xx used to fall straight through to the finally block,
+                // leaving the form looking like nothing had happened.
+                const detail = await res.json().catch(() => ({}));
+                notifyUser(t('common.error'), detail.error || t('medicationReminderForm.saveFailed'));
             }
+        } catch (e) {
+            console.error('Reminder save failed:', e);
+            notifyUser(t('common.error'), t('medicationReminderForm.saveFailed'));
         } finally { setIsSaving(false); }
     };
 
     if (loadingConfig) return <View style={GlobalStyles.centered}><ActivityIndicator color={COLORS.primary} /></View>;
+
+    if (configError) {
+        return (
+            <View style={GlobalStyles.centered}>
+                <Text style={styles.errorTitle}>{t('medicationReminderForm.configLoadFailed')}</Text>
+                <Text style={styles.errorBody}>{t('medicationReminderForm.configLoadFailedHint')}</Text>
+                <Button mode="contained" onPress={loadLibrary} icon="refresh" style={{ marginTop: 16 }}>
+                    {t('common.retry')}
+                </Button>
+                <Button mode="text" onPress={() => goBackOrHome(router)} textColor={COLORS.slate}>
+                    {t('common.cancel')}
+                </Button>
+            </View>
+        );
+    }
 
     return (
         <View style={GlobalStyles.container}>
@@ -328,6 +500,145 @@ export default function MedicationReminderForm() {
                     <Text variant="labelSmall" style={styles.audioHint}>{t('medicationReminderForm.tapToPreview')}</Text>
                 </Surface>
 
+                {/* --- 5b. ALARM REPEATS (D-9 / 2.6) --- */}
+                <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionHeaderText}>{t('medicationReminderForm.burstSection')}</Text>
+                </View>
+                <Surface style={[styles.cardSurface, { padding: 12 }]} elevation={0}>
+                    <Text style={styles.sectionLabel}>{t('medicationReminderForm.burstLabel')}</Text>
+                    <View style={styles.chipRow}>
+                        {BURST_OPTIONS.map((count) => {
+                            const isSel = alarmRepeatCount === count;
+                            return (
+                                <Chip
+                                    key={count}
+                                    selected={isSel}
+                                    onPress={() => setAlarmRepeatCount(count)}
+                                    style={[styles.chip, { backgroundColor: isSel ? COLORS.primary : 'white' }]}
+                                    selectedColor={isSel ? 'white' : COLORS.primary}
+                                    showSelectedCheck={false}
+                                >
+                                    {String(count)}
+                                </Chip>
+                            );
+                        })}
+                    </View>
+                    {/*
+                      Left enabled on Android rather than hidden: the setting lives
+                      on the reminder, not the device, and a patient on Android may
+                      have a caregiver on iOS whose phone honours it. But say
+                      plainly what Android will do — one alert regardless, because
+                      the platform rate-limits an app to one alarm per nine minutes
+                      while idle (D-10).
+                    */}
+                    {Platform.OS === 'android' ? (
+                        <Text variant="labelSmall" style={styles.audioHint}>{t('medicationReminderForm.burstAndroidNote')}</Text>
+                    ) : null}
+                </Surface>
+
+                {/* --- 5c. CAREGIVER ESCALATION (D-3 / D-8 / 2.4) --- */}
+                <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionHeaderText}>{t('medicationReminderForm.escalationSection')}</Text>
+                </View>
+                <Surface style={[styles.cardSurface, { padding: 12 }]} elevation={0}>
+                    <Chip
+                        selected={escalationEnabled}
+                        onPress={() => setEscalationEnabled(!escalationEnabled)}
+                        icon={escalationEnabled ? 'account-alert' : 'account-off-outline'}
+                        style={[styles.chip, { backgroundColor: escalationEnabled ? COLORS.primary : 'white', alignSelf: 'flex-start' }]}
+                        selectedColor={escalationEnabled ? 'white' : COLORS.primary}
+                        showSelectedCheck={false}
+                    >
+                        {t('medicationReminderForm.escalationEnabledLabel')}
+                    </Chip>
+
+                    {escalationEnabled ? (
+                        <View style={{ marginTop: 14 }}>
+                            <Text style={styles.sectionLabel}>{t('medicationReminderForm.escalationDelayLabel')}</Text>
+                            <View style={styles.chipRow}>
+                                {DELAY_PRESETS.map((minutes) => {
+                                    const isSel = !useCustomDelay && escalationDelay === minutes;
+                                    return (
+                                        <Chip
+                                            key={minutes}
+                                            selected={isSel}
+                                            onPress={() => {
+                                                setUseCustomDelay(false);
+                                                setEscalationDelay(minutes);
+                                                setErrors({ ...errors, delay: false });
+                                            }}
+                                            style={[styles.chip, { backgroundColor: isSel ? COLORS.primary : 'white' }]}
+                                            selectedColor={isSel ? 'white' : COLORS.primary}
+                                            showSelectedCheck={false}
+                                        >
+                                            {t('medicationReminderForm.escalationDelayOption', { minutes })}
+                                        </Chip>
+                                    );
+                                })}
+                                <Chip
+                                    selected={useCustomDelay}
+                                    onPress={() => setUseCustomDelay(true)}
+                                    style={[styles.chip, { backgroundColor: useCustomDelay ? COLORS.primary : 'white' }]}
+                                    selectedColor={useCustomDelay ? 'white' : COLORS.primary}
+                                    showSelectedCheck={false}
+                                >
+                                    {t('medicationReminderForm.escalationDelayCustom')}
+                                </Chip>
+                            </View>
+
+                            {useCustomDelay ? (
+                                <TextInput
+                                    label={t('medicationReminderForm.escalationDelayCustomLabel')}
+                                    value={customDelayText}
+                                    onChangeText={(val) => { setCustomDelayText(val); setErrors({ ...errors, delay: false }); }}
+                                    keyboardType="numeric"
+                                    mode="outlined"
+                                    error={errors.delay}
+                                    style={styles.input}
+                                    dense
+                                />
+                            ) : null}
+                            <HelperText type="error" visible={errors.delay} style={styles.helper}>
+                                {t('medicationReminderForm.escalationDelayInvalid', { min: CUSTOM_DELAY_MIN, max: CUSTOM_DELAY_MAX })}
+                            </HelperText>
+
+                            <Text style={styles.sectionLabel}>{t('medicationReminderForm.escalationOrderLabel')}</Text>
+                            <View style={styles.chipRow}>
+                                <Chip
+                                    selected={escalationOrder === 'caregiver_first'}
+                                    onPress={() => setEscalationOrder('caregiver_first')}
+                                    style={[styles.chip, { backgroundColor: escalationOrder === 'caregiver_first' ? COLORS.primary : 'white' }]}
+                                    selectedColor={escalationOrder === 'caregiver_first' ? 'white' : COLORS.primary}
+                                    showSelectedCheck={false}
+                                >
+                                    {t('medicationReminderForm.escalationOrderCaregiver')}
+                                </Chip>
+                                {/*
+                                  D-8: sms_first stays unselectable until Track B
+                                  lands and phone numbers are actually verified.
+                                  Texting a medication reminder to an unverified
+                                  number risks sending PHI to a stranger. Disabled
+                                  with a reason rather than hidden, and rather than
+                                  offered as a choice that silently falls back.
+                                */}
+                                <Chip
+                                    selected={escalationOrder === 'sms_first'}
+                                    disabled={!SMS_VERIFICATION_ENABLED}
+                                    onPress={() => setEscalationOrder('sms_first')}
+                                    style={[styles.chip, { backgroundColor: escalationOrder === 'sms_first' ? COLORS.primary : 'white' }]}
+                                    selectedColor={escalationOrder === 'sms_first' ? 'white' : COLORS.primary}
+                                    showSelectedCheck={false}
+                                >
+                                    {t('medicationReminderForm.escalationOrderSms')}
+                                </Chip>
+                            </View>
+                            {!SMS_VERIFICATION_ENABLED ? (
+                                <Text variant="labelSmall" style={styles.audioHint}>{t('medicationReminderForm.escalationOrderSmsUnavailable')}</Text>
+                            ) : null}
+                        </View>
+                    ) : null}
+                </Surface>
+
                 <PlatformDatePicker
                     visible={showTimePicker !== null}
                     value={showTimePicker !== null ? alarmTimes[showTimePicker] : new Date()}
@@ -364,6 +675,8 @@ const webTimeInputStyle = { border: '1px solid #E2E8F0', padding: '10px', border
 
 const styles = StyleSheet.create({
     headerTitle: { fontWeight: '800', fontSize: 18 },
+    errorTitle: { fontSize: 18, fontWeight: '800', color: COLORS.ink, textAlign: 'center', paddingHorizontal: 24 },
+    errorBody: { fontSize: 14, color: COLORS.slate, textAlign: 'center', marginTop: 8, paddingHorizontal: 32, lineHeight: 20 },
     fieldContainer: { marginBottom: 4 },
     sectionLabel: { fontSize: 16, fontWeight: '800', color: COLORS.ink, marginBottom: 8 },
     pickerButton: { borderRadius: RADIUS.md, backgroundColor: 'white', borderColor: COLORS.background },

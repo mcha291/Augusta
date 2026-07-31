@@ -91,6 +91,13 @@ the translations pipeline — repo Settings → Secrets and variables → Action
 No Apple secrets are needed in GitHub because the ASC API key lives in EAS
 (step 4).
 
+> **CI reads `eas.json` from the pushed commit, not your working copy.** If the
+> IDs from step 3 are only committed locally, the workflow checks out the old
+> file and fails with *"Invalid Apple App Store Connect App ID"* — even though
+> `npx eas-cli submit` works fine on your machine. Push before you trigger it.
+> The workflow's *Validate TestFlight submit config* step catches this in
+> seconds, before any build minutes are spent.
+
 ## After the upload
 
 1. Apple processes the build (~5–15 min); it appears in App Store Connect →
