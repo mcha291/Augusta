@@ -92,11 +92,12 @@ All four Lambdas are deployed and verified on
 `m9Ru8ESiAP+b8GGg8Sv2/T39Ojiui95KvcAvFbf24jE=`, all **seven** migrations are
 applied, and every suite is green: **255 backend, 194 client**.
 
-**⚠ But session 8's work is NOT COMMITTED**, on the standing instruction not to
-commit unless asked. The tree is ahead of the repository, which is the reverse of
-the usual gap — the deploy and the migration are live and the source for them
-exists only in the working tree. Nothing here needs a commit to be correct; it is
-worth knowing before running anything destructive locally.
+**Everything is committed and nothing is pushed.** Session 8 landed as `da11341`
+on `main` — 20 files, migration `007` included — plus this correction. The only
+thing in the working tree is `opus 5 vs 4.8.txt`, an unrelated scratch file
+deliberately left out of every commit since session 5. The commit was made on the
+owner's explicit instruction at the end of the session, not on the session's own
+initiative; the standing rule in §1 still holds.
 
 **Phase 3 is finished.** Session 8 landed 2.3, 3.2, 3.3 and 3.4 — the consent
 model now has revocation with an access history, enforcement that follows for
@@ -394,21 +395,22 @@ Did not commit and did not deploy.
 
 ### 0.4 — State of the tree
 
-- **Sessions 1–7 are committed on `main` and nothing has been pushed.**
+- **Sessions 1–8 are committed on `main` and nothing has been pushed.**
   `e7c3cf1` (phases 1–5, the migration mechanism, server escalation), `a1454c8`
   (5.6's policy half plus the session-5 handoff), `97d8d5b` (5.6's wiring, 5.9,
-  5.8's receipts) and `9437f75` (a documentation correction). `main` is 5 ahead
-  of `origin/main`. **The session-5 handoff named a branch
-  `reminder-delivery-phases-1-5` that does not exist** — see §0.6; verify with
-  `git log --oneline -3` rather than believing a handoff.
-- **⚠ Session 8's work is UNCOMMITTED**, on the owner's standing instruction not
-  to commit unless asked. That is the whole of Phase 3's consent batch — 2.3,
-  3.2, 3.3, 3.4 — across nine source files, two locale files, three test files
-  and one new migration. **It is deployed and migrated but not committed**,
-  which is the reverse of the usual gap and worth knowing before running
-  anything destructive in the working tree. `git status` also still holds
-  `opus 5 vs 4.8.txt`, an unrelated scratch file excluded from every commit on
-  purpose.
+  5.8's receipts), `9437f75` (a documentation correction) and `da11341` (Phase
+  3's consent batch — 2.3, 3.2, 3.3, 3.4, 20 files, migration `007` included).
+  **The session-5 handoff named a branch `reminder-delivery-phases-1-5` that does
+  not exist** — see §0.6; verify with `git log --oneline -3` rather than
+  believing a handoff.
+- **`main` is 8 ahead of `origin/main`, not the 5 this section claimed for three
+  sessions.** The five session commits above plus `a6fd0c1` and `b3979c3`, which
+  predate the plan's work and were never pushed either, plus this correction.
+  Nobody had run `git rev-list --count origin/main..main`; the number was carried
+  forward from a handoff and then re-copied by two sessions that had no reason to
+  doubt it. Third entry in the same family as the phantom branch — see §0.6.
+- The working tree holds only `opus 5 vs 4.8.txt`, an unrelated scratch file
+  excluded from every commit on purpose.
 - **A pre-commit hook runs the backend suite** when backend files are staged.
   Worth knowing before a commit appears to hang: it is running 255 tests, not
   stuck.
@@ -1815,6 +1817,17 @@ revocation columns. The fixture was restored afterwards. Did not commit.
   below §0.3 saying it was. **`git log --oneline -3` costs nothing; a handoff's
   claim about the repo is worth exactly as much as `tish-migrate status` is worth
   against a claim about the database.**
+
+  **And the ahead-count was wrong too, which session 8 found by running the
+  command.** §0.4 said `main` was 5 ahead of `origin/main` for three sessions; it
+  was 6 before session 8 committed. The extra two are `a6fd0c1` and `b3979c3`,
+  which predate this plan's work and were never pushed either — so the number was
+  only ever counting the commits *this document* knew about. Session 6 corrected
+  the "4 ahead" it inherited to "5" by counting the named commits again, which
+  reproduced the original mistake rather than checking it. **Counting the things
+  you listed is not the same as counting the things that are there**, and the
+  distinction is invisible unless you run
+  `git rev-list --count origin/main..main`.
 - **⚠ 5.9 cannot send on the write, and §8 assumes it can.** "Any write to a
   reminder sends a data-only push" describes `index.mjs` calling Expo. That
   function is VPC-attached because RDS is private, and a VPC-attached function in
