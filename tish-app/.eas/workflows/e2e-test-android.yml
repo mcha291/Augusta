@@ -1,0 +1,36 @@
+# Android end-to-end tests.
+#
+# The same flows the iOS workflow runs, against an unsigned APK on an EAS
+# emulator. These can also be run locally — Maestro is native on Windows and
+# the Android SDK is already installed — so treat this workflow as the CI
+# safety net rather than the primary loop. See .maestro/README.md.
+name: e2e-test-android
+
+# PARKED until after the security refactor — the project is shipping iOS first.
+# The flows themselves are platform-neutral, so nothing here needs rewriting to
+# come back: restore the automatic trigger by replacing `workflow_dispatch`
+# below with the same `pull_request` block the iOS workflow uses, and re-add the
+# `e2e:build:android` / `e2e:android` scripts to package.json (see git history).
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build_android_for_e2e:
+    name: Build Android APK
+    type: build
+    params:
+      platform: android
+      profile: e2e-test
+
+  maestro_test:
+    name: Run Maestro flows
+    needs: [build_android_for_e2e]
+    type: maestro
+    environment: preview
+    env:
+      MAESTRO_APP_ID: com.mcha2910.tish
+    params:
+      build_id: ${{ needs.build_android_for_e2e.outputs.build_id }}
+      flow_path: ['.maestro']
+      retries: 1
+      record_screen: true

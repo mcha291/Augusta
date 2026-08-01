@@ -1,0 +1,18 @@
+# Smoke test: a real account can sign in and reach the app.
+#
+# This is the flow worth having even if there is never a second one. It is the
+# only check in the repo that exercises Cognito, AuthContext and the RDS profile
+# lookup together against a real build — the unit suites all stop at the
+# module boundary, and a broken Amplify config or a Lambda that 500s on
+# /users/me fails here and nowhere else.
+appId: ${MAESTRO_APP_ID}
+name: Sign in
+tags:
+  - smoke
+---
+- runFlow: subflows/sign-in.yml
+
+# Reaching Home is asserted inside the subflow. Assert the tab bar too, so a
+# render that mounts the route but crashes the navigator still fails.
+- assertVisible:
+    id: 'tab-index'

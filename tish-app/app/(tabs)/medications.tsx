@@ -142,8 +142,8 @@ export default function MedicationsScreen() {
   };
 
   return (
-    <View style={GlobalStyles.container}>
-      
+    <View style={GlobalStyles.container} testID="screen-medications">
+
       {/* --- 2. THE REFACTORED HEADER --- */}
       <ProfileHeader 
         rightActions={

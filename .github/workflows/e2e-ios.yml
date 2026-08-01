@@ -1,0 +1,112 @@
+name: iOS E2E (Maestro)
+
+# Runs the .maestro flows against a real iOS build on a real simulator.
+#
+# **Why here and not on EAS.** EAS Workflows has a purpose-built `maestro` job
+# and tish-app/.eas/workflows/e2e-test-ios.yml is written against it — but that
+# job requires a paid EAS plan. This repository is public, so GitHub's macOS
+# runners are free and unmetered, which makes this the same test at no cost.
+# If the project ever moves to a paid EAS plan, that workflow is the simpler
+# home for this and can be un-parked.
+#
+# **Why iOS only.** The project ships iOS first; Android E2E is parked until
+# after the security refactor. The flows themselves are platform-neutral, so
+# adding an Android job later is a copy of this file with a different runner.
+
+on:
+  pull_request:
+    paths:
+      - 'tish-app/app/**'
+      - 'tish-app/components/**'
+      - 'tish-app/context/**'
+      - 'tish-app/hooks/**'
+      - 'tish-app/utils/**'
+      - 'tish-app/.maestro/**'
+      - 'tish-app/package.json'
+      - 'tish-app/app.json'
+      - '.github/workflows/e2e-ios.yml'
+  workflow_dispatch: {}
+
+# A second push to the same PR makes the in-flight run pointless, and these are
+# 20+ minute jobs.
+concurrency:
+  group: e2e-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-e2e:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: tish-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tish-app/package-lock.json
+
+      - run: npm ci
+
+      - name: Install Maestro
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      # Cheap gate before the expensive part: a typo'd command in a flow should
+      # fail in seconds, not after a 20-minute native build.
+      - name: Check flow syntax
+        run: |
+          maestro --version
+          npm run e2e:check
+
+      # `expo run:ios` handles prebuild, pod install, xcodebuild and installing
+      # onto a booted simulator. Release rather than debug so the JS bundle is
+      # embedded in the app — a debug build needs Metro alive for the whole run,
+      # which is one more thing to fail for reasons unrelated to the app.
+      - name: Build and install on simulator
+        run: npx expo run:ios --configuration Release --no-bundler
+
+      - name: Run Maestro flows
+        env:
+          # The iOS bundle identifier from app.json. Flows read it as
+          # ${MAESTRO_APP_ID}; Maestro exposes MAESTRO_-prefixed shell
+          # variables to flows under the same name.
+          MAESTRO_APP_ID: com.ti-smarthealth.app
+          MAESTRO_USERNAME: ${{ secrets.MAESTRO_USERNAME }}
+          MAESTRO_PASSWORD: ${{ secrets.MAESTRO_PASSWORD }}
+        run: |
+          if [ -z "$MAESTRO_USERNAME" ] || [ -z "$MAESTRO_PASSWORD" ]; then
+            echo "::error::MAESTRO_USERNAME / MAESTRO_PASSWORD repository secrets are not set."
+            echo "The flows sign in as a real account; see tish-app/.maestro/README.md."
+            exit 1
+          fi
+
+          # One flow per invocation rather than `maestro test .maestro/`.
+          # maestro#3318 reports the iOS XCUITest driver socket dropping
+          # between flows in directory batch mode, so flow #2 onwards die with
+          # a connection error that looks nothing like a real assertion
+          # failure. Running them separately restarts the driver each time.
+          status=0
+          for flow in .maestro/[0-9]*.yml; do
+            echo "::group::$flow"
+            maestro test "$flow" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      # Maestro writes screenshots and a view hierarchy per step here, which is
+      # the only way to tell a genuine failure from a mistyped selector without
+      # a Mac to reproduce on.
+      - name: Upload Maestro debug output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-debug-output
+          path: ~/.maestro/tests
+          if-no-files-found: ignore
+          retention-days: 14

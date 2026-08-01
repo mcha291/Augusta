@@ -156,7 +156,7 @@ export default function ResultsScreen() {
   };
 
   return (
-    <View style={GlobalStyles.container}>
+    <View style={GlobalStyles.container} testID="screen-results">
       {/* --- 2. THE REFACTORED HEADER --- */}
       <ProfileHeader
         rightActions={

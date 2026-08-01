@@ -141,6 +141,7 @@ export default function LoginScreen() {
 
       <View style={styles.formCard}>
         <TextInput
+          testID="login-identifier"
           label={t('login.identifierLabel')}
           value={identifier}
           onChangeText={setIdentifier}
@@ -154,10 +155,11 @@ export default function LoginScreen() {
         />
 
         <TextInput
+          testID="login-password"
           label={t('login.passwordLabel')}
-          value={password} 
-          onChangeText={setPassword} 
-          mode="outlined" 
+          value={password}
+          onChangeText={setPassword}
+          mode="outlined"
           outlineColor={COLORS.background}
           activeOutlineColor={COLORS.primary}
           style={styles.input} 
@@ -165,9 +167,10 @@ export default function LoginScreen() {
           left={<TextInput.Icon icon="lock" />}
         />
 
-        <Button 
-          mode="contained" 
-          onPress={handleLogin} 
+        <Button
+          testID="login-submit"
+          mode="contained"
+          onPress={handleLogin}
           icon="shield-key"
           loading={loading} 
           disabled={loading}

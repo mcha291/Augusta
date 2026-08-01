@@ -1,0 +1,48 @@
+# iOS end-to-end tests on EAS.
+#
+# PARKED — `maestro` jobs require a paid EAS plan, and this account is on the
+# free tier (`eas workflow:validate` rejects the file with exactly that
+# message). The live iOS E2E job is .github/workflows/e2e-ios.yml, which does
+# the same work on GitHub's macOS runners; those are free and unmetered because
+# this repository is public.
+#
+# Kept rather than deleted because it is the better home for this if the
+# project ever moves to a paid EAS plan: the `maestro` job handles simulator
+# provisioning, sharding, retries and video capture that the GitHub Actions
+# version has to spell out by hand. To un-park, subscribe and restore the
+# `pull_request` trigger below.
+name: e2e-test-ios
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build_ios_for_e2e:
+    name: Build iOS simulator app
+    type: build
+    params:
+      platform: ios
+      profile: e2e-test
+
+  maestro_test:
+    name: Run Maestro flows
+    needs: [build_ios_for_e2e]
+    type: maestro
+    # Pulls the EAS environment variables for `preview` into this job's shell.
+    # The test account lives there as MAESTRO_USERNAME / MAESTRO_PASSWORD
+    # (both secret) — named with Maestro's own prefix on purpose, since Maestro
+    # exposes MAESTRO_-prefixed shell variables to flows under the same name,
+    # so no mapping step is needed. See .maestro/README.md.
+    environment: preview
+    env:
+      # The iOS bundle identifier, which differs from the Android package name
+      # — hence a variable in the flows rather than a literal.
+      MAESTRO_APP_ID: com.ti-smarthealth.app
+    params:
+      build_id: ${{ needs.build_ios_for_e2e.outputs.build_id }}
+      flow_path: ['.maestro']
+      # A failing E2E run is more often a slow simulator than a real defect;
+      # one retry of only the failed flows keeps the signal without hiding a
+      # genuine break, which would fail twice.
+      retries: 1
+      record_screen: true

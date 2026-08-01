@@ -10,7 +10,9 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "validate-translations": "node scripts/validate-translations.mjs",
-    "test": "node --test \"utils/*.test.ts\""
+    "test": "node --test \"utils/*.test.ts\"",
+    "e2e:check": "node scripts/check-maestro-syntax.mjs",
+    "e2e:build:ios": "eas build --profile e2e-test --platform ios"
   },
   "dependencies": {
     "@aws-amplify/auth": "^6.20.0",
