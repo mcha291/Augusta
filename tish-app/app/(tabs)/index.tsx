@@ -123,7 +123,7 @@ export default function HomeScreen() {
   const upcomingAppointments = data.appointments.filter((a: any) => a.status_label === 'New').slice(0, 3);
 
   return (
-    <View style={GlobalStyles.container}>
+    <View style={GlobalStyles.container} testID="screen-home">
       {/* 1. PROFESSIONAL HEADER (Uses GlobalStyles) */}
       <View style={GlobalStyles.header}>
         <View>

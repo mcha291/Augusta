@@ -34,6 +34,11 @@ export default function TabLayout() {
             // Force return as string to prevent Symbol errors
             return typeof label === 'string' ? label : route.name;
           }}
+          // E2E selectors. Keyed on `route.name`, not the label, because the
+          // labels are translated — a flow matching on "Medications" would
+          // pass in English and fail the moment the device locale is zh-Hant.
+          // Route names are what the filesystem router already guarantees.
+          getTestID={({ route }) => `tab-${route.name}`}
         />
       )}
     >

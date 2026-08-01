@@ -101,7 +101,7 @@ export default function AppointmentsScreen() {
   }
 
   return (
-    <View style={GlobalStyles.container}>
+    <View style={GlobalStyles.container} testID="screen-appointments">
       {/* 1. PROFESSIONAL HEADER */}
 
       {/* --- 2. THE REFACTORED HEADER --- */}

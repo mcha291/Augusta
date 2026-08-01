@@ -1,0 +1,47 @@
+# Reusable sign-in. Every flow that needs an authenticated session starts here.
+#
+# Lives under subflows/ so `flows: ['*.yml']` in config.yaml does not pick it up
+# as a test — it has no assertions of its own beyond reaching Home, and running
+# it twice per suite would only slow things down.
+appId: ${MAESTRO_APP_ID}
+---
+- launchApp:
+    # Start from a signed-out app every time. Without this the second flow in a
+    # run inherits the first one's session and silently stops testing login.
+    clearState: true
+    permissions:
+      notifications: allow
+
+- extendedWaitUntil:
+    visible:
+      id: 'login-identifier'
+    timeout: 30000
+
+- tapOn:
+    id: 'login-identifier'
+- inputText: ${MAESTRO_USERNAME}
+
+- tapOn:
+    id: 'login-password'
+- inputText: ${MAESTRO_PASSWORD}
+
+# The submit button sits below the password field, and on shorter viewports the
+# keyboard covers it. `hideKeyboard` is the obvious fix but Maestro documents it
+# as unreliable on iOS, which has no native keyboard-dismissal API — and iOS is
+# the release target. Scrolling the button into view does not depend on the
+# keyboard going away at all, and is a no-op when it is already visible.
+- scrollUntilVisible:
+    element:
+      id: 'login-submit'
+    direction: DOWN
+
+- tapOn:
+    id: 'login-submit'
+
+# Sign-in is two round trips, not one: Cognito authenticates, then AuthContext
+# calls checkUser() against RDS before it will navigate. 30s covers a cold
+# Lambda on top of both.
+- extendedWaitUntil:
+    visible:
+      id: 'screen-home'
+    timeout: 30000

@@ -1,0 +1,44 @@
+# Every tab mounts and renders its own screen.
+#
+# Cheap, but it covers the one failure mode the unit suites structurally
+# cannot: a screen that throws on mount. Each of these four screens fetches on
+# focus through apiRequest and reads AuthContext, so an unhandled null in
+# either shows up as a missing screen root here.
+#
+# Selectors are testIDs, never the tab labels — the labels are translated, and
+# a text-matching flow would pass in English and fail under zh-Hant.
+appId: ${MAESTRO_APP_ID}
+name: Tab navigation
+tags:
+  - smoke
+---
+- runFlow: subflows/sign-in.yml
+
+- tapOn:
+    id: 'tab-appointments'
+- extendedWaitUntil:
+    visible:
+      id: 'screen-appointments'
+    timeout: 20000
+
+- tapOn:
+    id: 'tab-medications'
+- extendedWaitUntil:
+    visible:
+      id: 'screen-medications'
+    timeout: 20000
+
+- tapOn:
+    id: 'tab-results'
+- extendedWaitUntil:
+    visible:
+      id: 'screen-results'
+    timeout: 20000
+
+# Back to Home, so the flow ends where it started and a rerun is idempotent.
+- tapOn:
+    id: 'tab-index'
+- extendedWaitUntil:
+    visible:
+      id: 'screen-home'
+    timeout: 20000

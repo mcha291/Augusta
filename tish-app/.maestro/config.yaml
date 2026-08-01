@@ -1,0 +1,6 @@
+# Maestro workspace config.
+#
+# `flows` matches only the top level of .maestro/, so everything under
+# subflows/ is reusable-only and never runs as a test in its own right.
+flows:
+  - '*.yml'
