@@ -364,6 +364,67 @@ test('005 is replay-safe, because 001-004 were replayed against a current databa
   assert.match(sql, /SELECT 1 FROM pg_constraint WHERE conname = 'users_locale_check'/);
 });
 
+// ---------------------------------------------------------------------------
+// Migration 007 — user_relationships.revoked_at / revoked_by (2.3)
+// ---------------------------------------------------------------------------
+
+test('user_relationships carries the revocation columns 3.2 writes', () => {
+  const rel = /CREATE TABLE user_relationships[\s\S]*?\);/.exec(schemaSql());
+  assert.ok(rel, 'user_relationships must exist in SCHEMA_SQL');
+  for (const column of ['revoked_at', 'revoked_by']) {
+    assert.match(rel[0], new RegExp(`\\b${column}\\b`), `user_relationships is missing ${column}`);
+  }
+});
+
+test('user_relationships is preserved across a reset, which is why 007 had to be a migration', () => {
+  // The same load-bearing fact as migration 005, and the second table to prove
+  // it. A reset rebuilds from SCHEMA_SQL, and this table is never rebuilt —
+  // preserved since session 3 because re-pairing costs a verification-code
+  // exchange between two signed-in devices. So mirroring the columns into
+  // SCHEMA_SQL is necessary and *not sufficient*: only the migration can put
+  // them on the live table.
+  assert.ok(RESET_PRESERVED_TABLES.includes('user_relationships'));
+  assert.doesNotMatch(RESET_SQL, /DROP TABLE[^;]*\buser_relationships\b/i);
+});
+
+test('THE STATUS VOCABULARY IS CLOSED, so a misspelled revocation cannot leave access standing', () => {
+  // `checkAccess` tests `status = 'active'`. Without this constraint an UPDATE
+  // writing 'revoke' or 'REVOKED' succeeds, the client reports access withdrawn,
+  // and the caregiver goes on reading the records — a consent failure that
+  // reports success. This is the one place in the schema where the free-text
+  // column is an access-control hazard rather than an untidy row.
+  const rel = /CREATE TABLE user_relationships[\s\S]*?\);/.exec(schemaSql())[0];
+  assert.match(rel, /status[\s\S]{0,120}CHECK\s*\(\s*status IN \('pending', 'active', 'revoked'\)\s*\)/i);
+});
+
+test('revoked_at and status must agree in both directions', () => {
+  // The reverse direction is the one that earns the constraint: re-activating a
+  // revoked pair — /relationships/request re-requesting it, or /debug/link
+  // re-linking it — has to *clear* revoked_at rather than leave a live
+  // relationship carrying one. Both write paths clear it; this is what stops a
+  // third from forgetting.
+  const rel = /CREATE TABLE user_relationships[\s\S]*?\);/.exec(schemaSql())[0];
+  assert.match(rel, /CHECK\s*\(\(status = 'revoked'\) = \(revoked_at IS NOT NULL\)\)/i);
+});
+
+test('revoked_by does not cascade the relationship away with the actor', () => {
+  // Losing the actor must never be a reason to lose the record of the act. In
+  // practice it never fires — revoked_by is always one of the two participants
+  // and both cascade the row first — so this is declared for what it means.
+  const rel = /CREATE TABLE user_relationships[\s\S]*?\);/.exec(schemaSql())[0];
+  assert.match(rel, /revoked_by\s+INTEGER\s+REFERENCES\s+users\(id\)\s+ON DELETE SET NULL/i);
+});
+
+test('007 is replay-safe, like every migration that adds a constraint', () => {
+  // ADD CONSTRAINT has no IF NOT EXISTS in Postgres, and the runner has already
+  // replayed 001-004 against an up-to-date database once.
+  const sql = readFileSync(path.join(HERE, 'migrations', '007_relationship_revocation.sql'), 'utf8');
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS revoked_at/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS revoked_by/);
+  assert.match(sql, /SELECT 1 FROM pg_constraint WHERE conname = 'user_relationships_status_check'/);
+  assert.match(sql, /SELECT 1 FROM pg_constraint WHERE conname = 'user_relationships_revoked_at_check'/);
+});
+
 test('users is preserved across a reset, which is why these two needed a migration', () => {
   // The load-bearing fact behind this whole migration existing. Every other
   // schema change reached the live database by /reset-db rebuilding the table

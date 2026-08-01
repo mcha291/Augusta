@@ -2,7 +2,7 @@ import { apiRequest } from '@/utils/api';
 import { unregisterPushToken } from '@/utils/push-token';
 import { cacheOwnerNames } from '@/utils/reminder-store';
 import { fetchAuthSession, signOut } from 'aws-amplify/auth';
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -35,6 +35,9 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/** The scope a previous session was viewing. 3.3 both writes and validates it. */
+const ACTIVE_DEPENDENT_KEY = 'active_dependent';
+
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -44,29 +47,89 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [dependents, setDependents] = useState<User[]>([]);
 
 
-  const loadDependents = async () => {
+  /**
+   * 3.3 — reloads the dependent list and **revalidates the selected scope
+   * against it.**
+   *
+   * The selected dependent is the answer to "whose records am I looking at",
+   * and until now nothing ever rechecked that the relationship behind it still
+   * existed. After 3.2 that gap is reachable on purpose: a dependent revokes
+   * consent on their own device, and the caregiver's app carries on showing
+   * their name in the header and requesting their data until some route happens
+   * to 403.
+   *
+   * **Cleared only on a definite answer.** A failed request leaves the scope
+   * alone — the server enforces access on every route regardless (`checkAccess`
+   * filters on `status = 'active'`), so a stale client scope discloses nothing;
+   * it only produces errors. Dropping the user out of a dependent's records
+   * every time the network hiccups would be a worse trade.
+   */
+  const loadDependents = useCallback(async () => {
     try {
       const res = await apiRequest('/my-dependents');
+      if (!res.ok) return;
       const data = await res.json();
-      setDependents(Array.isArray(data) ? data : []);
+      if (!Array.isArray(data)) return;
+
+      setDependents(data);
       // 4.2 — persist the names so an alarm that cold-starts the app can say
       // whose dose it is. This is the only place the app already has dependent
       // names in hand, and doing it here keeps the alarm path off the network.
-      if (Array.isArray(data)) await cacheOwnerNames(data);
-    } catch (e) { console.error(e); }
-  };
+      await cacheOwnerNames(data);
 
-  // --- PERSISTENCE LOGIC: SAVE ON CHANGE ---
-  const updateActiveDependent = async (dep: User | null) => {
+      setActiveDependent((current) => {
+        if (!current) return current;
+        if (data.some((d: User) => Number(d.id) === Number(current.id))) return current;
+        console.info('[auth] active dependent', current.id, 'is no longer accessible — clearing scope');
+        AsyncStorage.removeItem(ACTIVE_DEPENDENT_KEY).catch(() => {});
+        return null;
+      });
+    } catch (e) { console.error(e); }
+  }, []);
+
+  /**
+   * --- PERSISTENCE LOGIC: SAVE ON CHANGE ---
+   *
+   * **This was written and then never wired up.** The context exposed the raw
+   * `setActiveDependent` state setter instead, so nothing ever wrote the key and
+   * nothing ever read it back — which meant 3.3's premise ("`activeDependent` is
+   * restored from AsyncStorage without checking the relationship still exists")
+   * described a restore that did not happen. Validating a scope that never loads
+   * would have been a no-op, so the fix is both halves: make the persistence
+   * real, and check it before trusting it.
+   */
+  const updateActiveDependent = useCallback(async (dep: User | null) => {
     setActiveDependent(dep);
-    if (dep) {
-      // Save to phone's hard drive
-      await AsyncStorage.setItem('active_dependent', JSON.stringify(dep));
-    } else {
-      // Clear from phone's hard drive
-      await AsyncStorage.removeItem('active_dependent');
+    try {
+      if (dep) await AsyncStorage.setItem(ACTIVE_DEPENDENT_KEY, JSON.stringify(dep));
+      else await AsyncStorage.removeItem(ACTIVE_DEPENDENT_KEY);
+    } catch (e) {
+      // The scope is already set in memory; losing the persistence costs a
+      // reset to "self" on the next launch, not a broken session.
+      console.warn('[auth] could not persist the active dependent', e);
     }
-  };
+  }, []);
+
+  /**
+   * Restores the scope a previous session was in.
+   *
+   * **Deliberately restored *before* `/my-dependents` answers, and cleared
+   * afterwards if it turns out to be stale.** Waiting for the round trip would
+   * flash the caregiver's own records on every cold start. The window is real
+   * but harmless: every request in it is scoped server-side, so the worst
+   * outcome is a screen that briefly asks for data it is about to be told it
+   * cannot have.
+   */
+  const restoreActiveDependent = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem(ACTIVE_DEPENDENT_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && Number.isFinite(Number(saved.id))) setActiveDependent(saved);
+    } catch {
+      await AsyncStorage.removeItem(ACTIVE_DEPENDENT_KEY).catch(() => {});
+    }
+  }, []);
 
   const checkUser = async () => {
     // 1. Keep isLoading = true throughout the whole process
@@ -88,6 +151,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       // 2. Instead of setting the user twice, fetch the RDS data first
       // We use a temporary variable so the UI doesn't see the "basic" user
       const res = await apiRequest('/me');
+      // 3.3 — restore the persisted scope, then let `loadDependents` confirm or
+      // clear it. Neither is awaited: the profile fetch below is what the UI is
+      // waiting on, and both of these correct themselves a moment later.
+      restoreActiveDependent();
       loadDependents();
 
       if (res.ok) {
@@ -140,7 +207,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setUser(null);
       setToken(null);
       setActiveDependent(null);
-      await AsyncStorage.multiRemove(['user_session', 'active_dependent']);
+      setDependents([]);
+      await AsyncStorage.multiRemove(['user_session', ACTIVE_DEPENDENT_KEY]);
     } catch (e) {
       console.error("Logout error", e);
     }
@@ -158,7 +226,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         checkUser,
         dependents,
         loadDependents,
-        setActiveDependent
+        // 3.3 — the persisting version, not the bare state setter. The bare one
+        // was what the context exposed until now, which is why `active_dependent`
+        // was never written by anything.
+        setActiveDependent: updateActiveDependent
       }}
     >
       {children}

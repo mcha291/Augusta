@@ -280,13 +280,25 @@ const ENRICH_SQL = `
  * send then fails.
  */
 const OUTBOX_SQL = `
-    SELECT id, user_id
+    SELECT id, user_id, reason
     FROM push_outbox
     WHERE sent_at IS NULL
       AND attempts < $2
     ORDER BY created_at
     LIMIT $1
     FOR UPDATE SKIP LOCKED`;
+
+/**
+ * 3.2 — the one reason whose recipients are *not* the schedule fan-out below.
+ *
+ * `schedule-changed` asks every device holding a copy of this person's schedule
+ * to re-read it. `access-revoked` is the opposite event: it is addressed to the
+ * person who has just *stopped* holding one, and the row is filed under that
+ * caregiver rather than under the patient precisely because the fan-out query
+ * would exclude them — it filters on `status = 'active'`, which the relationship
+ * no longer is.
+ */
+const REASON_ACCESS_REVOKED = 'access-revoked';
 
 /**
  * Every device that should hear about a change to this user's schedule.
@@ -311,6 +323,23 @@ const OUTBOX_RECIPIENTS_SQL = `
            SELECT r.caregiver_id FROM user_relationships r
            WHERE r.dependent_id = u.id AND r.status = 'active'
          )
+    GROUP BY u.id`;
+
+/**
+ * 3.2's recipients: **this user's own devices, and nobody else's.**
+ *
+ * An `access-revoked` row names the caregiver whose access ended, and the only
+ * devices that need to hear about it are theirs — they are the ones still
+ * holding the dependent's alarms. Running it through the query above would send
+ * it to *their* caregivers as well, which is a wider blast radius than the event
+ * has any business having: a third party would be woken to be told nothing that
+ * concerns them.
+ */
+const OUTBOX_SELF_RECIPIENTS_SQL = `
+    SELECT u.id AS owner_user_id,
+           ARRAY_REMOVE(ARRAY_AGG(DISTINCT p.token), NULL) AS tokens
+    FROM UNNEST($1::int[]) AS u(id)
+    LEFT JOIN push_tokens p ON p.user_id = u.id
     GROUP BY u.id`;
 
 /**
@@ -369,19 +398,43 @@ export async function dbHandler(event) {
         // **Grouped by subject, so several edits are one push.** Editing four
         // reminders in a minute enqueues four rows and sends one notification
         // per device, which matters because iOS rate-limits silent pushes.
-        const byUser = new Map();
+        //
+        // **Keyed on the reason as well as the user since 3.2**, because the
+        // reason is what the device *does* with the push: `schedule-changed`
+        // re-reads one owner's reminders, `access-revoked` re-reads who the
+        // viewer still has access to and drops the alarms of anyone missing.
+        // Coalescing two different instructions into one message would silently
+        // drop whichever lost — and the one that loses is the rarer, which is
+        // the revocation.
+        const byKey = new Map();
         for (const row of pending.rows) {
-            if (!byUser.has(row.user_id)) byUser.set(row.user_id, { ownerUserId: row.user_id, outboxIds: [] });
-            byUser.get(row.user_id).outboxIds.push(row.id);
+            const reason = row.reason === REASON_ACCESS_REVOKED ? REASON_ACCESS_REVOKED : 'schedule-changed';
+            const key = `${row.user_id}:${reason}`;
+            if (!byKey.has(key)) byKey.set(key, { ownerUserId: row.user_id, reason, outboxIds: [] });
+            byKey.get(key).outboxIds.push(row.id);
         }
 
-        const recipients = await pool.query(OUTBOX_RECIPIENTS_SQL, [[...byUser.keys()]]);
-        for (const row of recipients.rows) {
-            const batch = byUser.get(row.owner_user_id);
-            if (batch) batch.tokens = (row.tokens ?? []).filter(Boolean);
+        const batches = [...byKey.values()];
+        // Two recipient queries rather than one, because the two reasons address
+        // genuinely different sets — see OUTBOX_SELF_RECIPIENTS_SQL. Each runs
+        // only when that reason is present, so the common all-`schedule-changed`
+        // drain still costs exactly one query.
+        for (const [reason, sql] of [
+            ['schedule-changed', OUTBOX_RECIPIENTS_SQL],
+            [REASON_ACCESS_REVOKED, OUTBOX_SELF_RECIPIENTS_SQL],
+        ]) {
+            const group = batches.filter((b) => b.reason === reason);
+            if (group.length === 0) continue;
+
+            const recipients = await pool.query(sql, [group.map((b) => b.ownerUserId)]);
+            for (const row of recipients.rows) {
+                for (const batch of group) {
+                    if (batch.ownerUserId === row.owner_user_id) batch.tokens = (row.tokens ?? []).filter(Boolean);
+                }
+            }
         }
 
-        return { batches: [...byUser.values()].map((b) => ({ ...b, tokens: b.tokens ?? [] })) };
+        return { batches: batches.map((b) => ({ ...b, tokens: b.tokens ?? [] })) };
     }
 
     if (op === 'outbox-done') {
@@ -793,8 +846,10 @@ async function runOutbox(summary, reap, tickets) {
         summary.silentBatches += 1;
         let delivered = false;
 
-        for (const messages of chunk(silentMessagesFor(batch.ownerUserId, tokens))) {
-            const result = await sendChunk(messages, 'schedule-changed');
+        const kind = batch.reason === REASON_ACCESS_REVOKED ? REASON_ACCESS_REVOKED : 'schedule-changed';
+
+        for (const messages of chunk(silentMessagesFor(batch.ownerUserId, tokens, kind))) {
+            const result = await sendChunk(messages, kind);
             summary.silent += result.sent;
             reap.push(...result.reap);
             tickets.push(...result.tickets);
@@ -833,10 +888,15 @@ async function runOutbox(summary, reap, tickets) {
  * do. There is no medication name here to leak, but the rule is worth keeping
  * uniform rather than argued case by case.
  */
-function silentMessagesFor(ownerUserId, tokens) {
+function silentMessagesFor(ownerUserId, tokens, kind = 'schedule-changed') {
     return tokens.map((token) => ({
         to: token,
-        data: { kind: 'schedule-changed', ownerUserId },
+        // `ownerUserId` means different things per kind and the client reads it
+        // accordingly: for `schedule-changed` it is whose reminders to re-read,
+        // and for 3.2's `access-revoked` it is the *viewer* whose access set
+        // changed. Both are "the user this push is about", which is what keeps
+        // one field rather than two.
+        data: { kind, ownerUserId },
         _contentAvailable: true,
         // Deliberately *not* `EXPO_INTERRUPTION_LEVEL`: this is not an alert and
         // must never present as one. A schedule change is not time-sensitive to

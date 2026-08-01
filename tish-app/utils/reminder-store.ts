@@ -121,6 +121,61 @@ export async function cacheReminders(reminders: any[], alsoOwners: Iterable<numb
 }
 
 /**
+ * 3.2 — drop everything cached about an owner this device no longer has access
+ * to.
+ *
+ * **Cancelling the alarms is not enough on its own.** The payload was slimmed by
+ * 4.3 to `{reminderId, ownerUserId, timeStr, …}`, so an alarm's medication name
+ * and dosage come from *here* — which means a revoked caregiver's device is
+ * holding the dependent's prescription in plain storage after it has stopped
+ * being allowed to. The alarms are the visible half; this is the half that would
+ * still be sitting on disk afterwards.
+ *
+ * Best-effort per owner, like everything else in this module: a storage failure
+ * must not take down the sync pass that called it, and the next launch tries
+ * again.
+ */
+export async function forgetOwners(ownerUserIds: Iterable<number>): Promise<number> {
+  const keys: string[] = [];
+  for (const owner of ownerUserIds) {
+    if (Number.isFinite(Number(owner))) keys.push(keyFor(Number(owner)));
+  }
+  if (keys.length === 0) return 0;
+
+  try {
+    await AsyncStorage.multiRemove(keys);
+    // The names go too. `cacheOwnerNames` deliberately *merges* rather than
+    // replaces, on the reasoning that a name dropping out of `/my-dependents`
+    // is still the right label for alarms already on the device — which is
+    // exactly right for every other way an owner can leave that list, and
+    // exactly wrong for this one, because there are no alarms left to label.
+    await forgetOwnerNames(ownerUserIds);
+    return keys.length;
+  } catch (e) {
+    console.warn('[reminder-store] could not evict cached reminders for', keys.length, 'owner(s)', e);
+    return 0;
+  }
+}
+
+async function forgetOwnerNames(ownerUserIds: Iterable<number>): Promise<void> {
+  try {
+    const names = (await readMapAt(OWNER_NAMES_KEY)) as unknown as Record<string, string>;
+    let changed = false;
+    for (const owner of ownerUserIds) {
+      const key = String(Number(owner));
+      // `delete` returns true for a key that was never there, so it cannot be
+      // the test — that would rewrite the whole map on every sync pass.
+      if (!(key in names)) continue;
+      delete names[key];
+      changed = true;
+    }
+    if (changed) await AsyncStorage.setItem(OWNER_NAMES_KEY, JSON.stringify(names));
+  } catch (e) {
+    console.warn('[reminder-store] could not evict owner names', e);
+  }
+}
+
+/**
  * Looks up one reminder. `ownerUserId` comes from the notification payload; when
  * it is absent — a notification scheduled by a build from before it was carried,
  * still sitting in the queue — fall back to scanning the owner maps. Slower, but

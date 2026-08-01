@@ -68,9 +68,28 @@ const TABLE_DEFINITIONS = [
         caregiver_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         dependent_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         relationship_type TEXT,
-        status TEXT DEFAULT 'pending',
+        -- Migration 007 closed this vocabulary. Free text here is an
+        -- access-control hazard rather than an untidy column: \`checkAccess\`
+        -- tests \`status = 'active'\`, so a revocation that misspelled the new
+        -- status would report success and leave the caregiver reading the
+        -- records.
+        status TEXT DEFAULT 'pending'
+            CHECK (status IN ('pending', 'active', 'revoked')),
         verification_code TEXT,
-        UNIQUE(caregiver_id, dependent_id)
+        -- Migration 007 (2.3). The row outlives revocation deliberately: access
+        -- *was* held, and who ended it and when is the only record that a
+        -- caregiver could once read this patient's history. The deny branch of
+        -- /relationships/respond still deletes, because a request that was never
+        -- granted has no history to keep.
+        revoked_at TIMESTAMPTZ,
+        revoked_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        UNIQUE(caregiver_id, dependent_id),
+        -- Both directions. The reverse one is what forces a re-activation to
+        -- clear the revocation rather than leaving a live relationship carrying
+        -- a revoked_at. \`revoked_by\` is not coupled — it is legitimately NULL
+        -- on a revoked row whose actor has since been deleted.
+        CONSTRAINT user_relationships_revoked_at_check
+            CHECK ((status = 'revoked') = (revoked_at IS NOT NULL))
     );` },
     { name: 'medication_library', create: `CREATE TABLE medication_library (id SERIAL PRIMARY KEY, name TEXT NOT NULL, default_dosage TEXT NOT NULL);` },
     { name: 'medication_reminders', create: `CREATE TABLE medication_reminders (
@@ -696,7 +715,19 @@ export const handler = async (event) => {
                         INSERT INTO user_relationships (caregiver_id, dependent_id, relationship_type, status, verification_code)
                         VALUES ($1, $2, $3, 'active', NULL)
                         ON CONFLICT (caregiver_id, dependent_id)
-                        DO UPDATE SET status = 'active', relationship_type = EXCLUDED.relationship_type, verification_code = NULL
+                        DO UPDATE SET status = 'active',
+                                      relationship_type = EXCLUDED.relationship_type,
+                                      verification_code = NULL,
+                                      -- Cleared because the pair is live again.
+                                      -- Migration 007's CHECK rejects a live row
+                                      -- carrying a revocation, so re-linking a
+                                      -- revoked pair would otherwise fail here —
+                                      -- which is precisely what that constraint
+                                      -- is for: it turns "forgot to clear it"
+                                      -- into a loud error instead of an access
+                                      -- history that contradicts itself.
+                                      revoked_at = NULL,
+                                      revoked_by = NULL
                         RETURNING *`,
                         [caregiverId, dependentId, queryParams.type || payload?.relationship_type || 'family']
                     );
@@ -912,8 +943,182 @@ export const handler = async (event) => {
             const target = await pool.query('SELECT id FROM users WHERE email = $1 OR username = $1', [payload.dependent_email]);
             if (target.rows.length === 0) throw new Error("Agent not found");
             const code = "TISH-" + Math.floor(100 + Math.random() * 899);
-            await pool.query('INSERT INTO user_relationships (caregiver_id, dependent_id, relationship_type, verification_code) VALUES ($1,$2,$3,$4)', [userId, target.rows[0].id, payload.relationship_type, code]);
-            body = { handshakeCode: code };
+
+            // **An upsert since 3.2, and that is a consequence of revocation
+            // rather than a tidy-up.** The row now *survives* being revoked
+            // (2.3), and `UNIQUE(caregiver_id, dependent_id)` means a bare
+            // INSERT for a pair that has ever been linked fails on the duplicate
+            // key — so without this, revoking access once would permanently bar
+            // that caregiver from ever asking again. Revocation has to be
+            // reversible by the dependent's own consent; a one-way door is a
+            // different feature and not the one 3.2 describes.
+            //
+            // `revoked_at`/`revoked_by` are cleared here because the row is live
+            // again, and the CHECK added by migration 007 enforces exactly that
+            // — a live relationship carrying a `revoked_at` is rejected by the
+            // database rather than sitting in the access history as a lie.
+            //
+            // **The DO UPDATE is guarded on the existing row not being active**,
+            // so re-requesting access you already hold cannot silently downgrade
+            // a live relationship back to pending and demand a fresh code from
+            // the dependent. `rowCount` is then how that case is recognised.
+            const requested = await pool.query(`
+                INSERT INTO user_relationships (caregiver_id, dependent_id, relationship_type, status, verification_code)
+                VALUES ($1, $2, $3, 'pending', $4)
+                ON CONFLICT (caregiver_id, dependent_id) DO UPDATE
+                    SET status = 'pending',
+                        relationship_type = EXCLUDED.relationship_type,
+                        verification_code = EXCLUDED.verification_code,
+                        revoked_at = NULL,
+                        revoked_by = NULL
+                    WHERE user_relationships.status <> 'active'
+                RETURNING id`,
+                [userId, target.rows[0].id, payload.relationship_type, code]
+            );
+
+            if (requested.rowCount === 0) {
+                // The conflict target matched and the guard refused it: this pair
+                // is already active. Reported rather than swallowed, because
+                // returning a handshake code the dependent will never be asked
+                // for is the silent-failure shape Phase 1 exists to remove.
+                statusCode = 409;
+                body = { error: "Access to this account has already been granted." };
+            } else {
+                body = { handshakeCode: code };
+            }
+        }
+
+        /**
+         * 3.2 — who currently has access, in both directions.
+         *
+         * Both directions from one route because **either participant may
+         * revoke**, and the two sides of that are asked by different screens:
+         * the profile screen's "who can see my records" is the dependent's view,
+         * and a caregiver stepping back from someone they no longer care for is
+         * the same row seen from the other end. A second route would have
+         * duplicated the join to say the same thing.
+         *
+         * `role` is the *other* party's relationship to the caller, so a client
+         * never has to compare ids to work out which name it is showing.
+         *
+         * Pending rows are included. A caregiver whose request has not been
+         * answered can withdraw it here, which is the gap §3.1 deliberately left
+         * open when it made both branches of `/relationships/respond`
+         * dependent-only.
+         */
+        else if (path === "/relationships/granted") {
+            const userId = await getUserId(cognitoSub);
+            const q = `
+                SELECT r.id,
+                       r.status,
+                       r.relationship_type,
+                       CASE WHEN r.caregiver_id = $1 THEN 'dependent' ELSE 'caregiver' END AS role,
+                       other.id       AS other_user_id,
+                       other.username AS other_username,
+                       other.full_name AS other_full_name
+                FROM user_relationships r
+                JOIN users other
+                  ON other.id = CASE WHEN r.caregiver_id = $1 THEN r.dependent_id ELSE r.caregiver_id END
+                WHERE (r.caregiver_id = $1 OR r.dependent_id = $1)
+                  AND r.status IN ('pending', 'active')
+                ORDER BY r.id`;
+            body = (await pool.query(q, [userId])).rows;
+        }
+
+        /**
+         * 3.2 — withdraw access.
+         *
+         * **Either participant, which is wider than `/relationships/respond`'s
+         * dependent-only rule and deliberately so.** Consent is the dependent's
+         * to withdraw, and a caregiver who no longer wants the responsibility —
+         * or who never should have asked — must be able to step back without
+         * needing the other person to act.
+         *
+         * Ownership is in the WHERE clause rather than a SELECT-then-UPDATE, the
+         * same shape 3.1 established: there is no window between checking and
+         * writing, so two revokes racing cannot both pass the check.
+         *
+         * **Enforcement follows for free.** `checkAccess` already filters on
+         * `status = 'active'`, so nothing downstream needs to learn about
+         * revocation — every scoped route starts denying the moment this commits.
+         * The same is true of 5.9's recipient query, which is why a revoked
+         * caregiver stops receiving silent schedule pushes without any change
+         * there.
+         *
+         * Not-yours is a 404 rather than a 403, for 3.1's reason: `id` is a
+         * sequential SERIAL and a 403 would confirm that a given relationship
+         * exists.
+         */
+        else if (path === "/relationships/revoke") {
+            const userId = await getUserId(cognitoSub);
+            const relationshipId = Number(payload?.relationship_id);
+
+            if (!Number.isInteger(relationshipId)) {
+                statusCode = 400;
+                body = { error: "relationship_id is required." };
+            } else {
+                const revoked = await pool.query(`
+                    UPDATE user_relationships
+                       SET status = 'revoked', revoked_at = now(), revoked_by = $2
+                     WHERE id = $1
+                       AND (caregiver_id = $2 OR dependent_id = $2)
+                       AND status <> 'revoked'
+                    RETURNING caregiver_id, dependent_id`,
+                    [relationshipId, userId]
+                );
+
+                if (revoked.rowCount === 0) {
+                    // **Already-revoked is a 200, not a 404, and that distinction
+                    // is worth the extra round trip.** Two devices, or one
+                    // impatient double-tap, must not turn a completed revocation
+                    // into an error the user reads as "it did not work" — the
+                    // same non-idempotency that made 5.1's second confirm a 404
+                    // (§0.6). The SELECT is scoped to the caller for the same
+                    // reason the UPDATE is: it must not confirm the existence of
+                    // a relationship the caller is not part of.
+                    const existing = await pool.query(
+                        `SELECT 1 FROM user_relationships
+                          WHERE id = $1 AND (caregiver_id = $2 OR dependent_id = $2) AND status = 'revoked'`,
+                        [relationshipId, userId]
+                    );
+                    if (existing.rowCount > 0) {
+                        body = { message: "Access already revoked." };
+                    } else {
+                        statusCode = 404;
+                        body = { error: "Relationship not found" };
+                    }
+                } else {
+                    const { caregiver_id: caregiverId } = revoked.rows[0];
+
+                    // **The caregiver's phone is still holding this dependent's
+                    // alarms, and nothing else in the system will take them
+                    // away.** Under 4.2 item 2 a caregiver's device carries an
+                    // escalation copy of every escalation-enabled reminder their
+                    // dependent has, and since 5.6 it carries up to a week of
+                    // them. They resolve their medication name and dosage from
+                    // the device's own cache (4.3), so left alone they go on
+                    // announcing a revoked patient's prescription on a phone
+                    // that no longer has any right to it — for as long as the
+                    // horizon reaches.
+                    //
+                    // The obvious enqueue does not work: the drain resolves
+                    // recipients through `user_relationships ... status =
+                    // 'active'`, so a row filed under the *dependent* correctly
+                    // reaches everyone except the one device that needs it. So
+                    // the row is filed under the **caregiver**, with its own
+                    // reason, and the drain sends `access-revoked` to that
+                    // user's own devices only.
+                    //
+                    // The push is the prompt half, never the reliable one — §8
+                    // is explicit that this channel is an optimisation. The
+                    // durable half is device-side: the launch reconcile now
+                    // drops alarms belonging to anyone who is no longer a
+                    // dependent, so an ignored or undelivered push costs
+                    // latency rather than correctness.
+                    await enqueueSchedulePush({ userId: caregiverId, reason: 'access-revoked' });
+                    body = { message: "Access revoked." };
+                }
+            }
         }
 
         else if (path === "/relationships/pending") {
@@ -945,16 +1150,30 @@ export const handler = async (event) => {
             const { request_id, action, provided_code } = payload;
             const userId = await getUserId(cognitoSub);
 
+            // **Both branches are scoped to `status = 'pending'` since 3.2, and
+            // that is a second access-control fix rather than tidiness.** Before
+            // revocation existed, a row was only ever pending or active and
+            // approving an active one was merely redundant. Now a revoked row
+            // survives in the table, and without this filter the *old handshake
+            // code still works on it* — so a relationship the dependent had
+            // deliberately ended could be brought back by replaying a code from
+            // before it ended. Re-granting access has to go through
+            // `/relationships/request` again, which mints a fresh code.
+            //
+            // The deny branch is scoped for a different reason: it DELETEs, and
+            // a revoked row is the access history 2.3 exists to keep. Declining
+            // a request that was never granted destroys nothing; deleting a
+            // revoked one destroys the record that access was ever held.
             if (action === 'active') {
-                const check = await pool.query('SELECT verification_code FROM user_relationships WHERE id = $1 AND dependent_id = $2', [request_id, userId]);
+                const check = await pool.query("SELECT verification_code FROM user_relationships WHERE id = $1 AND dependent_id = $2 AND status = 'pending'", [request_id, userId]);
                 if (check.rows.length === 0) { statusCode = 404; body = { error: "Relationship request not found" }; }
                 else if (check.rows[0].verification_code !== provided_code) throw new Error("Security Mismatch");
                 else {
-                    await pool.query('UPDATE user_relationships SET status = $1 WHERE id = $2 AND dependent_id = $3', ['active', request_id, userId]);
+                    await pool.query("UPDATE user_relationships SET status = $1 WHERE id = $2 AND dependent_id = $3 AND status = 'pending'", ['active', request_id, userId]);
                     body = { message: "Granted" };
                 }
             } else {
-                const denied = await pool.query('DELETE FROM user_relationships WHERE id = $1 AND dependent_id = $2 RETURNING id', [request_id, userId]);
+                const denied = await pool.query("DELETE FROM user_relationships WHERE id = $1 AND dependent_id = $2 AND status = 'pending' RETURNING id", [request_id, userId]);
                 if (denied.rows.length === 0) { statusCode = 404; body = { error: "Relationship request not found" }; }
                 else body = { message: "Denied" };
             }

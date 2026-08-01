@@ -39,7 +39,7 @@ Status vocabulary: `done` · `WIP` · `blocked` · `—` (not started) ·
 
 ### 0.2 — Status ledger
 
-Last updated **2026-07-31**, session 5.
+Last updated **2026-08-01**, session 8.
 
 | Item | Status | Where it landed |
 |---|---|---|
@@ -51,15 +51,15 @@ Last updated **2026-07-31**, session 5.
 | 2.1 — migration mechanism | `done`, **and finally usable against Taipei** | `backend/migrate.mjs`, `backend/migrations/`, `migrate.test.mjs`. **Session 5 added the VPC-attached runner** §0.7 item 1 described and four sessions deferred: `migrate.handler` deployed as `tish-migrate`. Not a route on the API — a separate function with no API Gateway integration, invoked by hand, no schedule. `status` / `up --dry-run` / `up`. |
 | 2.8 — `users.timezone` + `users.locale` | `done` | Session 5, migration `005`, mirrored into `SCHEMA_SQL`. **The two columns that could only ever arrive by migration**, because `users` is preserved across a reset and so never picks up a column from a rebuild. Defaults reproduce the constants they replaced exactly (`Asia/Taipei`, `zh-Hant`), so applying it changed no behaviour. Both live rows carry them. Server now reads them: materialisation resolves alarms in `u.timezone`, 5.4 renders copy in `u.locale`. 10 tests. |
 | 2.2 — `medication_doses` | `done` | Migration `003`, mirrored into `SCHEMA_SQL`, including 2.4's deferred `escalation_level` / `last_escalated_at`. Three indexes (5.4's partial pending index, 5.7's per-user, materialisation's per-reminder). Live — created by the reset, since the table is not preserved. |
-| 2.3 — relationship revocation columns | `—` | Blocks 3.2. |
+| 2.3 — relationship revocation columns | `done`, **live** | Session 8, migration `007`, mirrored into `SCHEMA_SQL`. `revoked_at` + `revoked_by`, and **two CHECK constraints the item does not ask for**: `status IN ('pending','active','revoked')`, because `checkAccess` tests `status = 'active'` and a misspelled revocation would otherwise report success while access continued; and `(status = 'revoked') = (revoked_at IS NOT NULL)`, which is what forces a re-activation to *clear* the revocation rather than leave a live row carrying one. **The second table to need a migration because a reset cannot reach it** — `user_relationships` is preserved under D-11, exactly as `users` was for 2.8. 6 tests. |
 | 2.4 — escalation settings | `done` | **Row corrected in session 6: it said `WIP` and both halves had in fact landed**, so the ledger overstated what was left. `medication_reminders` half — migration `002`, mirrored into `SCHEMA_SQL`, with CHECK constraints and a partial index for 5.4. `medication_doses` half (`escalation_level`, `last_escalated_at`) — migration `003`, deferred into 2.2 so the table is created complete rather than in two migrations, and 2.2's own row has said so since session 3. Verified by grep against `migrations/002` and `003`. 4.6 is unblocked. |
 | 2.5 — `push_tokens` | `done`, **live** | Session 4. Migration `004`, mirrored into `SCHEMA_SQL`, indexed on `user_id`. **UNIQUE on `token` alone, not `(user_id, token)`** — see §0.6; the natural-looking constraint is the wrong one. Not in D-11's preserved set: a token costs nothing to recreate. 3 tests. **Reached the live database in session 5** via `/reset-db` + `/seed-data` (owner's decision, §0.7 item 2 — now resolved). |
 | 2.6 — alarm burst setting | `done` | `alarm_repeat_count`, migration `002` alongside 2.4 — same table, same form. CHECK 1–6. 4.7b's form control is unblocked. |
 | 2.7 — meal time preferences | `done` | Migration `001`, mirrored into `SCHEMA_SQL`. Done as part of 4.8. |
 | 3.1 — enforce responder identity | `done` | Owner's call, 2026-07-30: action it here as functional correctness. `backend/index.mjs` `/relationships/respond`, both branches scoped by `dependent_id`; 6 tests. Tests 51 → 57. |
-| 3.2 — revocation | `—` | Needs 2.3. |
-| 3.3 — revalidate persisted scope | `—` | |
-| 3.4 — relationship type | `—` | |
+| 3.2 — revocation | `done`, **server half verified live** | Session 8. `POST /relationships/revoke` (either participant, ownership in the `WHERE`, idempotent second call), `GET /relationships/granted` (both directions, `role` computed server-side), a "who can see my records" section on `profile.tsx` with a confirmed revoke, 10 locale keys. **Three consequences the item does not mention, all found by building it** — `/relationships/request` had to become an upsert or revocation would be a one-way door on `UNIQUE(caregiver_id, dependent_id)`; `/relationships/respond` had to be scoped to `status = 'pending'` or a *stale handshake code would resurrect a revoked relationship*; and `/debug/link` had to clear the revocation columns. **Plus the stale-alarm answer** the directive asked to be decided deliberately — see §0.6 and 5.9's row. 25 backend tests, 6 client. |
+| 3.3 — revalidate persisted scope | `done` | Session 8. **The item's premise was wrong and §0.6 records it**: `activeDependent` was never restored from AsyncStorage at all — `updateActiveDependent` was written, never wired up, and the context exposed the bare `setState` instead, so nothing wrote the key and nothing read it. Validating a scope that never loads is a no-op, so both halves shipped: the persistence is now real (restore in `checkUser`, `setActiveDependent` is the persisting version), and `loadDependents` clears the scope when the relationship is absent from a *successful* response. Fails open on a network error — the server enforces access on every route regardless, so a stale client scope discloses nothing. |
+| 3.4 — relationship type | `done` | Session 8. `utils/relationship-types.ts` (new, dependency-free, 6 tests) + a chip row in `managed-users.tsx`'s request dialog, 9 locale keys. **Stores a stable key and renders a translated label**, which the hardcoded version conflated: `'Family'` went into the database and was displayed straight back, so a user's own choice would have baked their language into a row every other device reads. Unknown values fall back to the raw string, so the two spellings already in the column (`'Family'`, `'family'`) keep rendering. Carries a hint saying the choice does **not** narrow access, because that is the first thing a user would assume. |
 | 3.5 — password reset flow | `done` | `app/forgot-password.tsx`, `login.tsx`, `_layout.tsx`, both locale files. |
 | 3.6 — unhandled sign-in next-steps | `done` | `login.tsx` `handleNextStep`, covers all 13 Amplify steps. |
 | 4.1 — re-sync at app launch | `done` | `hooks/use-notification-sync.ts`, called from `_layout.tsx`; `medications.tsx` reuses it. |
@@ -81,7 +81,7 @@ Last updated **2026-07-31**, session 5.
 | 5.8 — push token infrastructure | `done`, **complete including receipts** | **Session 7 added the receipts poll**, the last missing piece: migration `006`'s `push_tickets`, `record-tickets` / `due-receipts` / `receipts-checked` ops on the db half, and a `runReceipts` step on the dispatcher that reaps `DeviceNotRegistered` from a *delayed* failure rather than only a synchronous one. Gives up after 24h because Expo keeps receipts about that long. **Not exercised against a real receipt** — that needs an `ok` ticket, which needs a real device (§0.4). History: session 4 built registration: 2.5's table, `POST`/`DELETE /push-tokens` (upsert on token, owner reassignment, 12 tests), `utils/push-token.ts`, registration on sign-in from `_layout.tsx`, unregistration on sign-out from `AuthContext`. **Session 5 built the send half inside 5.4**, as §0.3 directed: the Expo call, chunking at 100, ticket classification and `DeviceNotRegistered` reaping all live in `escalate.mjs` as 5.4's dispatch step. The receipts poll was the one piece left, and session 7 closed it. |
 | 5.4 — server-side caregiver escalation | `done` | Session 5. `escalation-policy.mjs` (pure, 33 tests) + `escalate.mjs` (two handlers, 28 tests). **Two Lambdas, not one** — `tish-escalate-dispatch` (no VPC, has internet, EventBridge target) drives `tish-escalate-db` (VPC-attached, has RDS); §8's single-Lambda shape is impossible in this VPC and §0.6 records why. EventBridge `tish-escalation-schedule`, **`rate(1 minute)` since session 7** — it was 5, and 5.9's drain rides on the same schedule. Claim increments `escalation_level` in the same statement it selects, under `FOR UPDATE ... SKIP LOCKED`. Adds a **lateness floor** the plan does not have (§0.6). |
 | 5.6 — schedule N occurrences ahead | `done` | Policy half session 5 (`utils/notification-budget.ts`, 22 tests): audibility before horizon, floor of 2 days, then burst, then drop dependents' copies furthest-dose-first, every degradation reported. **Wiring session 6.** `utils/alarm-schedule.ts` (new, 25 tests) lays the horizon out; `notification-budget.ts` gained the cost model both halves read (`reminderHold`, `plannedBurstCount`, `reminderCostFor`, 16 tests) so the budget cannot cost a set the scheduler would not write. `notification-identifiers.ts` gained an **occurrence segment** — the trap §0.3 named, see §0.6. `use-notification-sync.ts` is now fetch-all → one budget → schedule-all. `rescheduleNextOccurrence` became a horizon top-up. Client tests 122 → 183. |
-| 5.9 — silent push on schedule change | `done` | Session 7. **Not sent on the write, and that is forced rather than chosen**: `index.mjs` is VPC-attached and this account has no NAT and no interface endpoints, so it can reach neither Expo nor the Lambda API. Verified 2026-07-31 — `describe-vpc-endpoints` and `describe-nat-gateways` are both empty. So a reminder write enqueues into `push_outbox` (migration `006`) and the non-VPC dispatcher drains it. **EventBridge tightened to `rate(1 minute)`** so the queue costs ≤1 min rather than ≤5. Recipients are the owner's devices *and* their active caregivers' — one step wider than §8, see §0.6. Client handler in `_layout.tsx`; `UIBackgroundModes` added to `app.json`, so background delivery on iOS needs the owed native rebuild. 23 tests. |
+| 5.9 — silent push on schedule change | `done` | Session 7. **Not sent on the write, and that is forced rather than chosen**: `index.mjs` is VPC-attached and this account has no NAT and no interface endpoints, so it can reach neither Expo nor the Lambda API. Verified 2026-07-31 — `describe-vpc-endpoints` and `describe-nat-gateways` are both empty. So a reminder write enqueues into `push_outbox` (migration `006`) and the non-VPC dispatcher drains it. **EventBridge tightened to `rate(1 minute)`** so the queue costs ≤1 min rather than ≤5. Recipients are the owner's devices *and* their active caregivers' — one step wider than §8, see §0.6. Client handler in `_layout.tsx`; `UIBackgroundModes` added to `app.json`, so background delivery on iOS needs the owed native rebuild. 23 tests. **Session 8 added a second reason, `access-revoked`** (3.2), which is the one case the recipient fan-out gets wrong by design — the row is filed under the revoked *caregiver* and resolved through a second query returning that user's own devices only. The drain now keys batches on `(user_id, reason)`, because the two reasons ask the device to do different things and coalescing them would drop the rarer one. 6 more tests. |
 | 5.5 — SMS escalation | `—`, **externally blocked** | **The last item in Phase 5.** Gated on Track B: SNS is still sandboxed in `ap-east-2` (B0 filed, B1 spend limit still $1, zero numbers registered). Until it lands every SMS rung substitutes to push, which is D-8's intended fallback but means the ladder is effectively one rung twice. |
 | 6.1, 6.2 — error contract | `—` | Lowest urgency. |
 
@@ -89,19 +89,25 @@ Last updated **2026-07-31**, session 5.
 
 **Nothing is half-edited, there is no decision outstanding and no deploy owed.**
 All four Lambdas are deployed and verified on
-`duN/2QDdFDiNw9yjKKEXUhIhPBzJGKwjdhfczNbYAgA=`, all six migrations are applied,
-and every suite is green.
+`m9Ru8ESiAP+b8GGg8Sv2/T39Ojiui95KvcAvFbf24jE=`, all **seven** migrations are
+applied, and every suite is green: **255 backend, 194 client**.
 
-**Phase 5 is finished except 5.5, which is blocked on AWS rather than on us.**
-That is the headline: the delivery layer now has a device-side horizon (5.6), a
-server-side escalation ladder (5.4), a server-to-device channel (5.9) and
-delivery observability (5.8's receipts). The only thing missing is a second
-*channel*, and SNS is still sandboxed.
+**⚠ But session 8's work is NOT COMMITTED**, on the standing instruction not to
+commit unless asked. The tree is ahead of the repository, which is the reverse of
+the usual gap — the deploy and the migration are live and the source for them
+exists only in the working tree. Nothing here needs a commit to be correct; it is
+worth knowing before running anything destructive locally.
 
-**Everything is committed and nothing is pushed.** Sessions 6 and 7 landed as
-`97d8d5b` on `main`, which is 5 ahead of `origin/main`. The only thing in the
-working tree is `opus 5 vs 4.8.txt`, an unrelated scratch file deliberately left
-out of every commit since session 5.
+**Phase 3 is finished.** Session 8 landed 2.3, 3.2, 3.3 and 3.4 — the consent
+model now has revocation with an access history, enforcement that follows for
+free from `checkAccess`, a client that stops trusting a stale scope, and a
+relationship label that is stored as a key rather than as English. Phase 5 was
+already finished except 5.5. **Together that leaves Phase 6 as the only
+unblocked feature work in this document**, which is what session 9 is for.
+
+**Landed in session 8, 2026-08-01: the Phase 3 consent batch**, migration `007`,
+a deploy of all four Lambdas, and revocation exercised end to end against the
+live stack. Backend tests 227 → 255, client 183 → 194.
 
 **Landed in session 7, 2026-07-31: 5.9 and 5.8's receipts poll**, migration `006`,
 a deploy of all four Lambdas, and the EventBridge rate change below. Backend tests
@@ -125,9 +131,19 @@ device now holds up to seven days of alarms instead of one. Client tests 122 →
 > `push_tickets` or the reminder escalation columns. Kill switch:
 > `aws events disable-rule --name tish-escalation-schedule --region ap-east-2`.
 
-**The next item is 3.2's group — the Phase 3 consent batch.** See the session 8
-directive at the end of this section; it is the last coherent block of feature
-work that is not blocked on something external.
+**The next item is Phase 6 — the error contract.** See the session 9 directive at
+the end of this section. It is now the only unblocked feature work left here:
+5.5 waits on SNS leaving the sandbox, and everything else on the list waits on a
+native rebuild.
+
+**A new thing on the device that deletes alarms, worth knowing before touching
+`use-notification-sync.ts`.** 3.2 added `cancelAlarmsForOtherOwners`, which
+cancels every scheduled alarm whose owner is not in the set the caller passes.
+It runs on the launch reconcile only, and it is guarded twice — an empty
+allow-list is refused outright, and an identifier with no owner segment is left
+alone. Both guards exist because the failure mode is wiping a patient's own
+alarms rather than a revoked caregiver's. If alarms ever start disappearing,
+this is the first thing to look at, and §0.6 records why each guard is there.
 
 **What 5.6 did not and could not verify.** Every rule in it is unit-tested and
 the mutation check in §0.5 confirms the tests are not vacuous, but **no alarm
@@ -173,66 +189,88 @@ file:
 
 ---
 
-## ▶ DIRECTIVE FOR SESSION 8 — the Phase 3 consent batch
+## ▶ DIRECTIVE FOR SESSION 9 — Phase 6, the error contract
 
-**Do these four, in this order, because 3.2 needs 2.3's columns and everything
-else is independent.** They are one coherent block: one migration, one deploy,
-one screen, one relationships area. Estimated ~6h in total, which is the one
-thing here that may not fit — if it does not, **drop 3.4 first**; it is the least
-load-bearing and the only one that is cosmetic rather than correctness.
+**Do 6.1 and 6.2, together, and nothing else.** They are one item split across
+two ends of the wire: 6.1 gives every route a typed error shape, 6.2 turns those
+codes into text a user reads. Doing 6.1 alone ships a contract nobody consumes;
+doing 6.2 first is impossible. Estimated ~5h (3 + 2).
 
-1. **2.3 — revocation columns** *(~30m)*. `revoked_at`, `revoked_by` on
-   `user_relationships`. Migration `007`, mirrored into `SCHEMA_SQL`, then
-   `tish-migrate {"command":"up"}`. Keep the row rather than deleting it, so
-   access history survives revocation. **Note `user_relationships` is one of the
-   four preserved tables (D-11)** — a reset will not rebuild it, so the migration
-   is the only way these columns can arrive. That is the same situation
-   `users.timezone` was in, and §0.6 records what it cost to not notice.
-2. **3.2 — revocation** *(~4h)*. `POST /relationships/revoke`, either participant
-   may revoke, sets `status = 'revoked'` plus 2.3's columns. Enforcement then
-   follows for free: `checkAccess` already filters on `status = 'active'`.
-   Client half is a "who can see my records" list with a revoke action on
-   `profile.tsx`, next to the existing pending-requests section. Locale keys in
-   **both** files. Tests: a revoked relationship denies access on every scoped
-   route.
+**Give the session nothing else, and that is a scope instruction rather than an
+estimate.** 6.1 touches *every route in `index.mjs`* — it is the widest single
+change left in this plan, and the file is now well past two thousand lines with
+four Lambdas deploying from it. A session that also carries an unrelated item
+will either leave the contract half-applied across the route chain, which is
+worse than not starting it, or drop the other item anyway.
 
-   **Two things 5.9 just made true that §6's text predates.** Revocation now has
-   a second consequence: a former caregiver's device is still holding escalation
-   copies of that dependent's reminders (4.2 item 4), and nothing cancels them.
-   Consider enqueuing a `push_outbox` row for the dependent on revoke — the drain
-   resolves recipients through `user_relationships ... status = 'active'`, so the
-   revoked caregiver correctly will *not* receive it, which means their stale
-   alarms need a different answer. Worth deciding deliberately and recording;
-   do not let it silently ship as "the alarms just stay there".
-3. **3.3 — revalidate persisted scope** *(~30m)*. `activeDependent` is restored
-   from AsyncStorage in `AuthContext` without checking the relationship still
-   exists, so after a revocation a caregiver sits in a stale scope until some
-   request 403s. Cross-check against `/my-dependents` inside `checkUser()` and
-   clear if absent.
-4. **3.4 — relationship type** *(~1h)*. `relationship_type` is hardcoded
-   `'Family'` in `managed-users.tsx:38`. Offer a selection at request time. This
-   does **not** change access scope — the model stays all-or-nothing, which is a
-   known limitation rather than a defect.
+1. **6.1 — typed errors** *(~3h)*. Mirror `dashboard/server/index.mjs`'s
+   `{ error, code, problems? }` shape, which §1 already names as the reference
+   for this. Read that file before designing anything; the point is to converge
+   on a shape that exists, not to invent a second one.
+
+   Three things this codebase will make you decide, all of them recorded in §0.6
+   as existing behaviour that must survive:
+
+   - **404-not-403 is deliberate in three places** — `/relationships/respond`,
+     `/relationships/revoke`, and the reminder `PUT`s from 1.14. Ids are
+     sequential SERIALs and a 403 confirms a row exists. Whatever `code` those
+     get must not undo that by being more specific than the status.
+   - **`/me` and `/my-id` return 404 rather than 401** when a Cognito user has no
+     RDS row, because 401 invites the client to sign them out. A code that maps
+     to "session expired" would reintroduce exactly that.
+   - **4.6's validation already returns named-field 400s** and they are verified
+     live (§0.4). Those are `problems?` in the new shape — start there rather
+     than rewriting them.
+
+   The suite is the safety net worth using here: 255 backend tests assert status
+   codes and, in the places that matter, the parameters of the write. If the
+   contract change is done as a mechanical pass, they should stay green except
+   where the *body* shape is asserted, and each of those is a deliberate edit.
+
+2. **6.2 — codes to i18n keys** *(~2h)*. Client-side mapping, keys in **both**
+   locale files (`validate-translations` is at 344 keys and is CI-enforced).
+   Every message currently produced by comparing an error *string* becomes a
+   lookup on `code`. Grep for the places that read `data.error` and show it
+   directly — `managed-users.tsx`'s request dialog and `profile.tsx`'s
+   respond/revoke paths both do, and the second of those is new in session 8.
+
+   The unmapped-code path needs a decision rather than a default: a code the
+   client has never heard of must produce a real sentence, not a blank alert or
+   a raw identifier. That case is reachable on the *next* backend deploy after
+   any client build, permanently, because the two ship independently — build 8
+   is in TestFlight and client changes need a new build (§1).
 
 **Before you start:** `aws sts get-caller-identity`, and ask Robin to re-login if
-it has lapsed rather than working around it. **Before you believe anything in
-this document about the database:** `tish-migrate {"command":"status"}`.
+it has lapsed rather than working around it — it had lapsed at the start of
+session 8 and the answer took one message. **Before you believe anything in this
+document about the database:** `tish-migrate {"command":"status"}`; it should say
+seven applied, none pending. And note §0.6's ordering finding: for a *new*
+migration the runner has to be deployed before it can see the file, so the order
+is deploy-then-migrate, not the reverse.
 
-**End session 8 by writing the session 9 directive**, in this same place and this
-same shape, replacing this block. Session 9 is **Phase 6 — the error contract**:
-6.1 typed errors mirroring `dashboard/server/index.mjs`'s `{ error, code,
-problems? }` shape (~3h), then 6.2 mapping those codes to i18n keys client-side
-with keys in both locale files (~2h). Do them together — 6.2 is meaningless
-without 6.1's codes — and give that session nothing else, because 6.1 touches
-every route. Fold in the three carried fixes listed above if there is room.
-**And instruct session 9 to end by writing the session 10 directive**, which is
-**device verification**: it cannot start until Robin triggers a native rebuild,
-and it is the session that finally exercises the ten things now waiting on one —
-the three sounds, the burst, the Android channel, exact alarms, the iOS
-interruption level, snooze firing, tray dismissal, token registration, 5.4's and
-5.9's last hop to a real phone, and 5.6's entire horizon. Budget it as *at least*
-one session: every time this project has verified something live rather than
-stopping at green tests, it has found a bug the suite could not see.
+Fold in the three carried fixes listed above if there is room, but only if 6.1
+and 6.2 are both finished. They have waited five sessions and will wait another.
+
+**End session 9 by writing the session 10 directive**, in this same place and
+this same shape, replacing this block. Session 10 is **device verification**, and
+it **cannot start until Robin triggers a native rebuild** — so the directive
+should say so in its first line and should not be written as though the session
+can begin on demand.
+
+It is the session that finally exercises everything now waiting on one build:
+the three sounds (4.7a), the burst (4.7b), the Android channel (4.7e), exact
+alarms (5.2), the iOS interruption level (5.3), snooze firing (4.4), tray
+dismissal (4.7c), token registration (5.8), 5.4's and 5.9's last hop to a real
+phone, 5.8's receipts poll reading an actual receipt, and **5.6's entire
+horizon** — which is the largest single unverified thing in the project, since no
+alarm written under the six-segment identifier scheme has ever been handed to an
+OS. Session 8 adds one more: `cancelAlarmsForOtherOwners` has never run against a
+real notification queue, and it is a mechanism whose job is to *delete* alarms.
+
+Budget it as **at least** one session. Every time this project has verified
+something live rather than stopping at green tests, it has found a bug the suite
+could not see — 5.1's non-idempotent lookup, 5.4's Expo casing, and the two
+vacuous test assertions session 8 found while writing a third one.
 
 ---
 
@@ -356,16 +394,23 @@ Did not commit and did not deploy.
 
 ### 0.4 — State of the tree
 
-- **Sessions 1–7 are committed on `main`, as three commits, and nothing has been
-  pushed.** `e7c3cf1` (phases 1–5, the migration mechanism, server escalation),
-  `a1454c8` (5.6's policy half plus the session-5 handoff) and `97d8d5b` (5.6's
-  wiring, 5.9, 5.8's receipts). `main` is 5 ahead of `origin/main`. **The
-  session-5 handoff named a branch `reminder-delivery-phases-1-5` that does not
-  exist** — see §0.6; verify with `git log --oneline -3` rather than believing a
-  handoff. The working tree holds only `opus 5 vs 4.8.txt`, an unrelated scratch
-  file excluded from every commit on purpose.
+- **Sessions 1–7 are committed on `main` and nothing has been pushed.**
+  `e7c3cf1` (phases 1–5, the migration mechanism, server escalation), `a1454c8`
+  (5.6's policy half plus the session-5 handoff), `97d8d5b` (5.6's wiring, 5.9,
+  5.8's receipts) and `9437f75` (a documentation correction). `main` is 5 ahead
+  of `origin/main`. **The session-5 handoff named a branch
+  `reminder-delivery-phases-1-5` that does not exist** — see §0.6; verify with
+  `git log --oneline -3` rather than believing a handoff.
+- **⚠ Session 8's work is UNCOMMITTED**, on the owner's standing instruction not
+  to commit unless asked. That is the whole of Phase 3's consent batch — 2.3,
+  3.2, 3.3, 3.4 — across nine source files, two locale files, three test files
+  and one new migration. **It is deployed and migrated but not committed**,
+  which is the reverse of the usual gap and worth knowing before running
+  anything destructive in the working tree. `git status` also still holds
+  `opus 5 vs 4.8.txt`, an unrelated scratch file excluded from every commit on
+  purpose.
 - **A pre-commit hook runs the backend suite** when backend files are staged.
-  Worth knowing before a commit appears to hang: it is running 227 tests, not
+  Worth knowing before a commit appears to hang: it is running 255 tests, not
   stuck.
 - **⚠ There is now a scheduled job running unattended.** EventBridge rule
   `tish-escalation-schedule`, `rate(5 minutes)`, ENABLED, targeting
@@ -461,6 +506,42 @@ through the gateway (§0.6):
 The probe reminder and the synthetic token were both removed afterwards.
 `/debug/medication_reminders` is back to one row: session 3's fixture, reminder 1,
 200mg at 08:00 and 20:00, escalation enabled. **Leave it.**
+
+**Session 8 probes, 2026-08-01.** `/debug/*` over the public gateway needs no
+credentials, which is how the live schema was read *before* `aws login` had been
+renewed — worth knowing as a technique: a question about the database's shape
+does not always have to wait for AWS.
+
+| Probe | Result |
+|---|---|
+| `/debug/user_relationships`, before any change | 1 row, `status: 'active'` — which is what made 007's status CHECK safe to add against live data rather than hoped |
+| deploy of all four Lambdas | all `m9Ru8ESiAP+b8GGg8Sv2/T39Ojiui95KvcAvFbf24jE=`, matching the uploaded zip |
+| `tish-migrate {"command":"up","dryRun":true}` | `pending: ["007_relationship_revocation.sql"]` — and note `status` *before* the deploy reported nothing pending at all (§0.6) |
+| `{"command":"up"}` then `status` | **applied**; none pending, none orphaned — **seven applied** |
+| `/debug/user_relationships` after | `revoked_at: null, revoked_by: null` present on the preserved table |
+| `GET /relationships/granted` as user 2 | 1 row, `role: 'caregiver'`, `other_username: 'robinchang'` — the direction is computed right |
+| `POST /relationships/revoke` as user 2 | **200** `"Access revoked."` |
+| the row afterwards | `status: 'revoked'`, `revoked_at` set, **`revoked_by: 2`** — the dependent, not the caregiver |
+| `push_outbox` afterwards | one new row, **`user_id: 1`** (the caregiver) and `reason: 'access-revoked'` — filed under the person whose device is holding the alarms |
+| `GET /medication-reminders?user_id=2` as user 1 | **403 Access Denied** — enforcement really does follow from `checkAccess` with no new code |
+| second `POST /relationships/revoke` | **200** `"Access already revoked."` — idempotent, not a 404 |
+| `GET /relationships/granted` as user 2 | `[]` |
+| dispatcher | `silentBatches: 1, reaped: 1, errors: []` — the `access-revoked` push resolved to the caregiver's own device, Expo answered `DeviceNotRegistered` for the synthetic token, the VPC half reaped it |
+| `push_outbox` row | `sent_at` set, `attempts: 1` — closed, not retried |
+| `/debug/link?caregiver=1&dependent=2` | **200**, row back to `status: 'active'` with `revoked_at: null, revoked_by: null` — the re-link path clears the revocation, which migration 007's second CHECK would otherwise have rejected |
+| `GET /medication-reminders?user_id=2` as user 1 | **200** — access restored |
+
+**The fixture is back exactly as it was**: user 1 is again an active caregiver
+for user 2, `push_tokens` is empty (the synthetic token was reaped by the run
+above), and reminder 1 with its doses is untouched. **Leave them.**
+
+**One thing these probes could not reach: the two screens.** `profile.tsx`'s
+"who can see my records" section and `managed-users.tsx`'s relationship-type
+chips both render only for a signed-in user, and creating that session means
+entering the owner's password. Same standing limitation that left 4.2's
+attribution line and 4.6's delay presets unseen. Everything behind them — the
+routes, the SQL, the identifier parsing, the type keys — is covered by tests and,
+for the routes, by the live probes above.
 
 **`/debug/*` was widened after all**, in the same session. It was initially left
 alone — the guardrail at the time said not to widen it without asking, and
@@ -603,6 +684,25 @@ user-facing copy by design, because it is silent.
 `app.json` gained `UIBackgroundModes: ['remote-notification']`, confirmed present
 through `npx expo config --type introspect` alongside the `audio` mode that was
 already there. **It has no effect until the native rebuild.**
+
+**End of session 8**: **255/255 backend tests** (227 → 255: 6 for migration
+007's columns and both CHECK constraints, 19 for 3.2's routes and the drain's new
+reason; no existing assertion renumbered, and **two pre-existing ones were
+repaired rather than left** — see the vacuous-`pool.calls` finding in §0.6),
+**194/194 client** (183 → 194: 5 for `ownerOfIdentifier` and the sweep property,
+6 for 3.4's `relationship-types.ts`), `npx tsc --noEmit` clean, `npx eslint .`
+0 errors / **40** warnings — one *fewer* than the long-standing 41, from
+`loadDependents` becoming a `useCallback`; none new — and
+`npm run validate-translations` at **344 keys** (325 + 3.2's ten + 3.4's nine).
+The app bundles: **1905 modules**, no resolution error, login screen renders with
+an empty error console.
+
+Two new tests were mutation-checked rather than trusted, following session 6's
+practice. Dropping `ownerOfIdentifier`'s segment-count guard — the single change
+that makes the sweep read a reminder id as an owner — fails **2** tests including
+the one named `THE UN-NAMESPACED FORM HAS NO OWNER`. Keying the outbox drain on
+`user_id` alone rather than `user_id:reason` fails the test that says two reasons
+must not coalesce.
 
 **End of session 6**: **183/183 client tests** (122 → 183, all from 5.6's
 wiring: 5 for `addDays`, 17 for the identifier occurrence segment, 16 for
@@ -966,6 +1066,58 @@ of bullets, one of which still said the snooze disagreement would last "until 5.
 lands" — it landed in session 5 — and §0.4 said "nothing is committed" while §0.3
 three sections above said the opposite. The commit facts in the session-5 handoff
 were wrong in two ways; see §0.6.
+
+**Session 8 — 2026-08-01.** The Phase 3 consent batch, all four items: **2.3**,
+**3.2**, **3.3**, **3.4**. `aws login` had lapsed at the start, so the session
+was ordered around it — everything buildable locally first, the owner asked once
+and not worked around, and the deploy taken the moment credentials returned. The
+live schema was still readable throughout, because `/debug/*` needs no
+credentials over the gateway.
+
+**2.3 cost more than thirty minutes and the extra went into two CHECK
+constraints the item does not ask for**, both for the same reason: `checkAccess`
+tests `status = 'active'`, so this is the one column in the schema where a
+silent write failure is an *access-control* failure. A misspelled revocation
+would report success while the caregiver kept reading the records. The second
+constraint couples `revoked_at` to the status in both directions, which is what
+forces a re-activation to clear the revocation rather than leave a live row
+carrying one — and it immediately caught two write paths that would have
+forgotten (`/relationships/request` and `/debug/link`).
+
+**3.2 was the session, and three of its consequences are not in the plan.** The
+item is four bullets; what it did not say is that keeping the row makes
+`/relationships/request` fail forever on the unique key, that a **stale
+handshake code resurrects a revoked relationship** because `/relationships/respond`
+never filtered on status, and that the deny branch would then delete the access
+history 2.3 exists to keep. All three are in §0.6. The middle one is the
+serious one: the caregiver is the party shown that code, so the person who lost
+access is the person able to replay it.
+
+**The stale-alarm question the directive flagged was answered in three pieces,
+not one.** The suggested `push_outbox` row is necessary and not sufficient: filed
+under the dependent it reaches every device *except* the revoked caregiver's, so
+it is filed under the caregiver instead with its own reason and its own recipient
+query. But the push is explicitly an optimisation (§8), so the durable half is
+device-side — `cancelAlarmsForOtherOwners` reads the owner back out of the
+identifiers in the OS queue, which after a revocation is the only surviving
+record of what is scheduled. And the 4.3 cache is evicted with the alarms,
+because that is where the patient's medication name and dosage actually live.
+
+**3.3's premise turned out to be false** — nothing ever restored the persisted
+scope, and the function that would have saved it was never wired up — so the fix
+was both halves rather than the validation alone. **3.4 fitted after all**, and
+was worth doing properly: the hardcoded `'Family'` was being written to the
+database *and* displayed straight back, so letting a user choose would have baked
+their language into a row every other device reads.
+
+Two pre-existing test bugs were repaired in passing, both the same mistake, one
+of them guarding 3.1's security fix — see the vacuous-`pool.calls` finding.
+
+Deployed all four Lambdas, applied migration 007, and exercised revocation end to
+end against the live stack rather than stopping at green tests: revoke, the 403
+that follows for free, the idempotent second revoke, the `access-revoked` push
+draining to the caregiver's own device, and the re-link that clears the
+revocation columns. The fixture was restored afterwards. Did not commit.
 
 ### 0.6 — Findings that amend the plan
 
@@ -1729,6 +1881,167 @@ were wrong in two ways; see §0.6.
   sequence in comments or strip comments before extracting; the current code does
   the former and says so at the site.
 
+- **⚠ "Apply the migration before deploying the code that reads it" is
+  impossible for a *new* migration, because the runner is itself deployed.**
+  §0.6 records the rule above, and it cost a live regression on three routes the
+  one time it was violated. It cannot be followed here: `migrate.mjs` reads
+  `migrations/*.sql` **from its own zip at runtime** (§0.4), so `007` does not
+  exist as far as `tish-migrate` is concerned until the zip carrying it has been
+  uploaded. `status` before the deploy reported `pending: []` — not "007 is
+  waiting", but "there is no such migration".
+
+  So the order is forced the other way: **deploy, then migrate, immediately.**
+  Exactly the shape session 5 hit with the reset, where `/reset-db` executes
+  `SCHEMA_SQL` *from the deployed code* and the table therefore could not be
+  created before the Lambda defining it shipped. The general form is worth
+  stating once: **anything that changes the database is delivered by the same
+  artifact as the code that reads it, so there is always a window.**
+
+  What the window costs is specific and worth measuring rather than fearing. For
+  007 it was two routes — `/relationships/request` and `/debug/link`, both of
+  which now write `revoked_at = NULL` and would have failed on a column that did
+  not exist yet. Not the revoke route, which nothing could call yet, and not any
+  read path. Measured at roughly forty seconds. The mitigation is to run the two
+  commands back to back and to know in advance which routes are in the window,
+  not to pretend the ordering rule still applies.
+- **⚠ Keeping the revoked row turns `/relationships/request` into a permanent
+  failure, and 3.2 does not mention it.** The item says "sets `status =
+  'revoked'`" and 2.3 says keep the row so access history survives. Both are
+  right and together they collide with `UNIQUE(caregiver_id, dependent_id)`,
+  which has been on the table since it was created: a bare `INSERT` for a pair
+  that has ever been linked now fails on the duplicate key, forever. **Revoking
+  once would have permanently barred that caregiver from ever asking again** —
+  and the symptom is a raw Postgres error, not a message anyone could act on.
+
+  Revocation has to be reversible by the dependent's own consent; a one-way door
+  is a different feature and not the one the plan describes. Fixed by making the
+  route an upsert that reactivates to `pending` with a fresh code and clears the
+  revocation columns, guarded on `status <> 'active'` so re-requesting access
+  you already hold cannot silently knock a live relationship back to pending.
+- **⚠ A stale handshake code resurrected a revoked relationship, and this is the
+  worst thing 3.2 introduced.** `/relationships/respond` had no status filter,
+  which was harmless for as long as a row could only be `pending` or `active` —
+  approving an active one was merely redundant. A revoked row survives in the
+  table **carrying its old `verification_code`**, so replaying that code
+  re-granted access the dependent had deliberately ended. The caregiver is the
+  party shown the code when they request access (§3.1), so they are exactly the
+  person able to replay it.
+
+  Both branches are now scoped to `status = 'pending'`. The deny branch needed
+  it for a different reason: it `DELETE`s, and a revoked row is the access
+  history 2.3 exists to keep — declining a request that was never granted
+  destroys nothing, deleting a revoked one destroys the record that access was
+  ever held.
+
+  Worth generalising, because it is the second time in this plan that adding a
+  state to a column broke code that was correct when the column had two:
+  **every query that filtered on the absence of a state is now wrong.** The
+  other one was 5.1's `confirmed_at IS NULL`.
+- **⚠ `pool.calls` after `_setPoolForTests(makePool([...]))` reads a pool the
+  handler never touched, and two assertions had been passing vacuously since
+  session 2.** `beforeEach` builds a pool into the outer `pool` binding and
+  installs it; a test that then installs a *different* scripted pool leaves
+  `pool` pointing at the unused one, whose call list is empty forever. Every
+  assertion of the form "no such query was issued" therefore passed
+  unconditionally — including **the security assertion in the 3.1 block**
+  ("knowing the code must not be enough: no UPDATE may have been attempted").
+
+  Found only because a new test written to the same pattern used `.find(...)`
+  and crashed on `undefined` instead of quietly passing. The correct shape is
+  the one most of the file already uses: `const scripted = makePool([...]);
+  _setPoolForTests(scripted);`. Fixed at all six sites.
+
+  The lesson is narrower than "check your tests" and worth stating precisely:
+  **an assertion that something did *not* happen cannot fail against an empty
+  collection, so it needs an independent reason to believe the collection is the
+  right one.** The `.find()` form is self-checking by accident; `.filter().length
+  === 0` is not.
+- **⚠ 3.3's premise is wrong: `activeDependent` was never restored from
+  AsyncStorage at all.** The item says it "is restored from AsyncStorage
+  (`AuthContext.tsx:54`) without checking the relationship still exists". Half
+  of that machinery does not exist. `updateActiveDependent` writes the key and
+  **nothing calls it** — the context exposes the bare `setActiveDependent` state
+  setter instead — and nothing anywhere reads the key back. So the persistence
+  was dead in both directions, and validating a scope that never loads would
+  have been a no-op that looked like a fix.
+
+  Shipped as both halves: the persistence made real, and the validation the item
+  actually wanted. The underlying defect the item describes *is* real, just
+  through a different door — the scope lives in React state and nothing
+  rechecked it, so a caregiver whose access was revoked mid-session kept the
+  dependent's name in the header until some request happened to 403.
+
+  Same class as the stale entries this section exists for, and the same remedy:
+  a claim about a line number is worth exactly as much as opening the file.
+- **⚠ The launch reconcile passes only the owners it has not yet synced, so an
+  "everything I have access to" sweep cannot use that list.** `_layout.tsx`
+  tracks `syncedOwners` and computes `owners` as the *difference*, because
+  `dependents` arrives a moment after `user` does and the effect is designed to
+  run more than once per sign-in. On the second run that list holds the
+  dependents **alone**. A revocation sweep told that list was authoritative
+  would have read "the two dependents I just learned about" as "everyone I have
+  access to" and cancelled the signed-in user's own alarms — on every sign-in,
+  not merely after a revocation.
+
+  Hence `knownOwnerIds` as a separate argument rather than a boolean flag on the
+  existing one. The effect's early return also had to change: it returned when
+  there was nothing new to sync, which is precisely the state a caregiver is in
+  after their last dependent is revoked — nothing to schedule, and a queue full
+  of somebody else's alarms. It now compares the whole owner set against the
+  last one swept, so a set that *shrinks* is distinguishable from one that has
+  not changed.
+- **The revoked caregiver's stale alarms: decided, not left to "they just stay
+  there".** The directive asked for this deliberately, and it needed three
+  pieces rather than the one it suggests.
+
+  The situation 5.9 created: a caregiver's phone holds escalation copies of
+  every escalation-enabled reminder their dependent has (4.2 item 4), up to a
+  week of them since 5.6, and those alarms resolve the medication name and
+  dosage from the device's **local cache** (4.3). Revocation stops the server
+  cold — `checkAccess` and the outbox recipient query both filter `status =
+  'active'` — and does nothing whatever about what is already on the device. Left
+  alone, a revoked caregiver's phone goes on announcing the patient's
+  prescription for the length of the horizon.
+
+  1. **The outbox row is filed under the caregiver, not the patient.** The
+     obvious enqueue is useless here: the drain resolves recipients through
+     `user_relationships ... status = 'active'`, so a row naming the dependent
+     correctly reaches every device *except* the one that needs it. A new reason,
+     `access-revoked`, is grouped separately by the drain and resolved through a
+     second query that returns **that user's own devices only** — running it
+     through the caregiver fan-out would wake an unrelated third party to tell
+     them nothing that concerns them.
+  2. **The device sweep is the durable half**, and it is what makes the push
+     optional. `cancelAlarmsForOtherOwners` reads the owner segment back out of
+     each scheduled identifier and cancels anything belonging to somebody not in
+     the current access list — because after a revocation the app knows the
+     *opposite* of what every other cancel path starts from: the owner has
+     vanished from `/my-dependents`, their reminders can no longer be fetched,
+     and the OS notification queue is the only surviving record of what is
+     scheduled. The tray is cleared too, for 4.7c's reason.
+  3. **The 4.3 cache is evicted with them.** Cancelling the alarms without
+     `forgetOwners` would leave the patient's medication names and dosages
+     sitting in AsyncStorage on a phone that has just been told it may not have
+     them. The alarms are the visible half; this is the half nobody would notice.
+
+  §8 is explicit that the silent-push channel is an optimisation and never a
+  guarantee, so the push is the *prompt* half and the launch sweep is the
+  correctness. An undelivered push costs latency, not a stale alarm.
+- **The sweep must refuse an empty allow-list, and that is not defensiveness.**
+  "Cancel every alarm whose owner is not in this set" with an empty set means
+  "cancel everything". The set is empty exactly when `/my-dependents` failed or
+  nobody is signed in — i.e. when the app knows *least* — so the failure mode of
+  the natural implementation is wiping a patient's own alarms during a network
+  blip. Refused outright; the next pass with a real answer repairs it.
+- **An identifier with no owner segment must be left alone by the sweep, and the
+  wrong answer here is a plausible-looking one.** `med-12-0800` is the
+  pre-4.2 shape and carries no owner — but position 1 *does* hold a number, so a
+  parser that reads it without checking the segment count returns the **reminder
+  id** as an owner. Reminder 12 read as owner 12, matched against an allow-list
+  of user ids, is a coin flip on whether a patient's own alarms survive an
+  upgrade. `ownerOfIdentifier` returns `null` for anything under four segments,
+  and there is a test named for it.
+
 ### 0.7 — Blocked on you
 
 1. **✅ RESOLVED, session 3 (2026-07-31) — nothing here is outstanding.** The
@@ -1989,26 +2302,35 @@ CI runs the Lambda tests on push (`.github/workflows/test.yml`).
 - **Backend deploys are manual.** `.github/workflows/deploy-backend.yml` assumes
   a GitHub OIDC role that does not exist in the account (`MIGRATION.md` D0), so
   it fails at the credentials step. Lambda updates are done by hand.
-- **A deploy is one zip and *three* `update-function-code` calls**, since session
-  5. `operation-strix`, `tish-escalate-db` and `tish-escalate-dispatch` all run
-  from the same artifact and differ only by handler. **Updating one and not the
-  others is the failure mode to watch**: the two escalation halves talk to each
-  other over a private `{op}` protocol, and a half-deploy leaves them disagreeing
-  about it with no error until the next scheduled run does the wrong thing.
-  Verify by checking all three report the same `CodeSha256` as the uploaded zip.
+- **A deploy is one zip and *four* `update-function-code` calls**, since session
+  5. `operation-strix`, `tish-escalate-db`, `tish-escalate-dispatch` and
+  `tish-migrate` all run from the same artifact and differ only by handler.
+  **Updating one and not the others is the failure mode to watch**: the two
+  escalation halves talk to each other over a private `{op}` protocol, and a
+  half-deploy leaves them disagreeing about it with no error until the next
+  scheduled run does the wrong thing. Verify by checking all four report the same
+  `CodeSha256` as the uploaded zip.
 
   The build itself, which has bitten more than one session:
 
-  1. Stage `index.mjs`, `escalate.mjs`, `escalation-policy.mjs`, `package.json`
-     and `package-lock.json` into a scratch directory — **resolved to its long
-     path first.** The `SEMAPH~1` 8.3 short form mangles every entry in the zip.
+  1. Stage `index.mjs`, `escalate.mjs`, `escalation-policy.mjs`, `migrate.mjs`,
+     `package.json`, `package-lock.json` **and `migrations/*.sql`** into a scratch
+     directory — **resolved to its long path first.** The `SEMAPH~1` 8.3 short
+     form mangles every entry in the zip; `C:\Users\Semaphore\AppData\Local\Temp\…`
+     spelled out in full is the reliable way to get one.
   2. `npm ci --omit=dev` there. The `--omit=dev` is load-bearing: it keeps
      `@aws-sdk/client-lambda` out of the artifact, which the runtime supplies.
   3. Zip those plus `node_modules` **with forward-slash entry paths**. There is
      no `zip` binary on this machine and PowerShell's `Compress-Archive` writes
      backslashes, which Lambda cannot read — build it with
-     `System.IO.Compression.ZipFile` and set each entry name explicitly.
-  4. `aws lambda update-function-code` for each of the three.
+     `System.IO.Compression.ZipFile` and set each entry name explicitly. Check by
+     listing the non-`node_modules` entries before uploading; ~225KB, ~153 entries.
+  4. `aws lambda update-function-code` for each of the four.
+
+  **The AWS CLI here is the Windows build and does not understand `/tmp`.** A
+  `--payload file:///tmp/event.json` fails with "Unable to load paramfile", which
+  reads like a malformed event rather than a path the CLI cannot see. Stage probe
+  events under a Windows path and pass `file://C:/...`.
 - **The data plane is mid-migration to `ap-east-2`** (`MIGRATION.md` Track C).
   Schema changes made before the RDS snapshot must be re-applied after it.
 - **Build 8 is in TestFlight** (commit `a6fd0c1`). Client changes need a new
@@ -2733,6 +3055,15 @@ non-participant rejected. *(~1h with tests)*
 
 ### 3.2 — Revocation
 
+> **DONE — session 8, 2026-08-01**, and verified end to end against the live
+> stack. See §0.2 for where it landed. **Three things the text below does not
+> anticipate, all in §0.6**: keeping the row makes `/relationships/request` fail
+> forever on the unique key unless it becomes an upsert; `/relationships/respond`
+> had to be scoped to `status = 'pending'`, because a revoked row keeps its old
+> verification code and replaying it re-granted access; and the stale escalation
+> alarms on the revoked caregiver's device needed a three-part answer rather than
+> the single outbox row §0.3 suggested. The text below is the original item.
+
 There is no way to withdraw access once granted. The `status` column supports it
 and nothing exercises it.
 
@@ -2748,12 +3079,29 @@ and nothing exercises it.
 
 ### 3.3 — Revalidate persisted scope on launch
 
+> **DONE — session 8, 2026-08-01. ⚠ The premise below is wrong**, and §0.6
+> records it: `activeDependent` was never restored from AsyncStorage at all. The
+> function that would have saved it (`updateActiveDependent`) was written and
+> never wired up — the context exposed the bare state setter — so nothing wrote
+> the key and nothing read it back. Validating a scope that never loads would
+> have been a no-op, so both halves shipped. The defect the item describes is
+> real through a different door: the scope lives in React state and nothing
+> rechecked it.
+
 `activeDependent` is restored from AsyncStorage (`AuthContext.tsx:54`) without
 checking the relationship still exists, so after revocation a caregiver stays in
 a stale scope until some request 403s. Cross-check against `/my-dependents`
 inside `checkUser()` and clear if absent. *(~30m)*
 
 ### 3.4 — Relationship type
+
+> **DONE — session 8, 2026-08-01.** `utils/relationship-types.ts` + a chip row in
+> the request dialog. **One thing the item does not say**: the hardcoded value
+> was written to the database *and* rendered straight back to the user, so
+> offering a choice without separating the stored key from the displayed label
+> would have baked whichever language the caregiver was in into a row every other
+> device reads. Stored as a stable key, rendered through i18n, with a fallback to
+> the raw string so the two spellings already in the column keep rendering.
 
 `relationship_type` is hardcoded `'Family'` client-side
 (`managed-users.tsx:38`). Offer a selection at request time. Note this does not

@@ -211,7 +211,17 @@
     "language": "Language",
     "mealTimesSection": "Meal Times",
     "mealTimesHint": "Used to work out when \"before dinner\" or \"with breakfast\" reminders should go off. Rough times are fine — you can change these any time.",
-    "mealTimeSaveFailed": "Couldn't save that meal time. Please try again."
+    "mealTimeSaveFailed": "Couldn't save that meal time. Please try again.",
+    "accessSection": "Who can see my records",
+    "accessHint": "People you have shared your medication records with, and people who have shared theirs with you. Withdrawing access also stops their reminders on that person’s phone.",
+    "accessCanSeeMine": "Can see your records",
+    "accessICanSee": "You can see their records",
+    "accessPending": "Waiting for a verification code",
+    "revoke": "Withdraw",
+    "revokeConfirmTitle": "Withdraw access?",
+    "revokeConfirmCaregiver": "{{name}} will no longer be able to see your records, and will stop receiving reminders about your missed doses.",
+    "revokeConfirmDependent": "You will no longer be able to see {{name}}’s records, and their reminders will be removed from this phone.",
+    "revokeFailed": "Couldn’t withdraw access. Please try again."
   },
   "managedUsers": {
     "title": "Family Management",
@@ -223,7 +233,9 @@
     "requestDialogInstructions": "Enter the Email, Phone Number, or Username of the dependent's account you wish to manage.",
     "identifierLabel": "Email / Phone# / Username",
     "requestSentMessage": "Request Sent! Give this code to the dependent to verify:",
-    "sendRequest": "Send Request"
+    "sendRequest": "Send Request",
+    "relationshipTypeLabel": "How are you related?",
+    "relationshipTypeHint": "This is a label only. Whichever you pick, you will be able to see all of their records once they approve."
   },
   "login": {
     "subtitle": "Smart Health Management App",
@@ -362,5 +374,14 @@
     "unknownMedication": "Medication reminder",
     "unresolvedPrompt": "Check your medication list for the dose that is due.",
     "couldNotRefresh": "Showing saved details — could not refresh just now."
+  },
+  "relationshipTypes": {
+    "family": "Family",
+    "spouse": "Spouse / partner",
+    "parent": "Parent",
+    "child": "Child",
+    "sibling": "Sibling",
+    "carer": "Professional carer",
+    "other": "Other"
   }
 }

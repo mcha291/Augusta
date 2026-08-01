@@ -211,7 +211,17 @@
     "language": "語言",
     "mealTimesSection": "用餐時間",
     "mealTimesHint": "用於推算「晚餐前」或「早餐時」等提醒的實際響鈴時間。大致時間即可，隨時都能修改。",
-    "mealTimeSaveFailed": "無法儲存該用餐時間，請再試一次。"
+    "mealTimeSaveFailed": "無法儲存該用餐時間，請再試一次。",
+    "accessSection": "誰可以查看我的紀錄",
+    "accessHint": "您已分享用藥紀錄的對象，以及與您分享紀錄的人。撤銷存取權後，對方手機上的相關提醒也會一併停止。",
+    "accessCanSeeMine": "可查看您的紀錄",
+    "accessICanSee": "您可查看對方的紀錄",
+    "accessPending": "等待輸入驗證碼",
+    "revoke": "撤銷",
+    "revokeConfirmTitle": "要撤銷存取權嗎？",
+    "revokeConfirmCaregiver": "{{name}} 將無法再查看您的紀錄，也不會再收到您漏服藥物的提醒。",
+    "revokeConfirmDependent": "您將無法再查看 {{name}} 的紀錄，對方的提醒也會從這支手機移除。",
+    "revokeFailed": "無法撤銷存取權，請再試一次。"
   },
   "managedUsers": {
     "title": "家庭管理",
@@ -223,7 +233,9 @@
     "requestDialogInstructions": "請輸入您欲代管的受照顧者帳號之電子郵件、電話號碼或使用者名稱。",
     "identifierLabel": "電子郵件 / 電話號碼 / 使用者名稱",
     "requestSentMessage": "請求已送出！請將此驗證碼提供給受照顧者以完成驗證：",
-    "sendRequest": "送出請求"
+    "sendRequest": "送出請求",
+    "relationshipTypeLabel": "您與對方的關係？",
+    "relationshipTypeHint": "此為標示用途。無論選擇哪一項，對方同意後您都能查看其全部紀錄。"
   },
   "login": {
     "subtitle": "智慧健康管理應用程式",
@@ -362,5 +374,14 @@
     "unknownMedication": "服藥提醒",
     "unresolvedPrompt": "請查看藥物清單，確認這次要服用的藥物。",
     "couldNotRefresh": "顯示已儲存的資料 — 目前無法更新。"
+  },
+  "relationshipTypes": {
+    "family": "家人",
+    "spouse": "配偶／伴侶",
+    "parent": "父母",
+    "child": "子女",
+    "sibling": "兄弟姊妹",
+    "carer": "專業照顧者",
+    "other": "其他"
   }
 }

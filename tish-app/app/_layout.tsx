@@ -166,12 +166,15 @@ export default function RootLayout() {
   );
 }
 function AuthProtection({ alarmData, setAlarmData }: any) {
-  const { user, isLoading, dependents } = useAuth();
+  const { user, isLoading, dependents, loadDependents } = useAuth();
   const segments = useSegments();
   const router = useRouter();
   const { syncFor, syncOwners } = useNotificationSync();
   const hasSyncedFor = React.useRef<number | null>(null);
   const syncedOwners = React.useRef<Set<number>>(new Set());
+  // 3.2 — the last owner set this device swept against, so a *shrinking* set is
+  // distinguishable from "nothing new to do".
+  const knownOwnersSignature = React.useRef<string | null>(null);
   const registeredFor = React.useRef<number | null>(null);
 
   // 4.1 — reconcile local notifications against backend state at launch.
@@ -197,11 +200,13 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
     if (!user || user.id === 0) {
       hasSyncedFor.current = null; // signed out; re-sync on the next sign-in
       syncedOwners.current = new Set();
+      knownOwnersSignature.current = null;
       return;
     }
     if (hasSyncedFor.current !== user.id) {
       hasSyncedFor.current = user.id;
       syncedOwners.current = new Set();
+      knownOwnersSignature.current = null;
     }
 
     // `dependents` populates a moment after `user` does — `loadDependents` is
@@ -209,15 +214,34 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
     // more than once per sign-in by design. Tracking owners individually rather
     // than a single "have we synced" flag is what lets the second run pick up
     // the dependents without redoing the user's own set.
-    const owners = [user.id, ...dependents.map((d) => Number(d.id))]
-      .filter((id) => Number.isFinite(id) && !syncedOwners.current.has(id));
-    if (owners.length === 0) return;
+    //
+    // **3.2 — `knownOwnerIds` is everyone; `owners` is everyone not already
+    // done, and the difference is load-bearing.** The revocation sweep needs the
+    // complete set, because on this effect's *second* run `owners` holds the
+    // dependents alone — and a sweep told that list was authoritative would
+    // cancel the signed-in user's own alarms.
+    const knownOwnerIds = [user.id, ...dependents.map((d) => Number(d.id))].filter((id) => Number.isFinite(id));
+    const signature = [...knownOwnerIds].sort((a, b) => a - b).join(',');
 
+    const owners = knownOwnerIds.filter((id) => !syncedOwners.current.has(id));
+
+    // **Runs when the set *shrinks* as well as when it grows, which the old
+    // "nothing new to sync" guard could not express.** A caregiver whose last
+    // dependent has just been revoked arrives here with nothing new to schedule
+    // and a queue full of alarms for someone they no longer have access to —
+    // exactly the pass that must not be skipped.
+    if (owners.length === 0 && knownOwnersSignature.current === signature) return;
+    knownOwnersSignature.current = signature;
+
+    // Pruned to the set that still exists, so a relationship that is revoked and
+    // later re-granted syncs again rather than being remembered as already done.
+    syncedOwners.current = new Set(knownOwnerIds.filter((id) => syncedOwners.current.has(id)));
     owners.forEach((id) => syncedOwners.current.add(id));
+
     // Own id passed explicitly rather than left undefined: it is what lets the
     // reminder cache evict a set that comes back empty, so deleting a last
     // reminder no longer leaves its details cached indefinitely.
-    syncOwners(owners, user.id);
+    syncOwners(owners, user.id, { knownOwnerIds });
   }, [user, isLoading, dependents, syncOwners]);
 
   // 5.9 — the server has news: re-reconcile the schedule it names.
@@ -248,13 +272,32 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
 
     const subscription = Notifications.addNotificationReceivedListener((notification) => {
       const data = notification.request.content.data as any;
-      if (data?.kind !== 'schedule-changed') return;
+      const kind = data?.kind;
+      if (kind !== 'schedule-changed' && kind !== 'access-revoked') return;
 
       const ownerUserId = Number(data.ownerUserId);
       if (!Number.isFinite(ownerUserId)) return;
       // No signed-in user means no session to fetch with. Dropping it costs
       // nothing: signing in re-syncs everything anyway.
       if (!user || user.id === 0) return;
+
+      // 3.2 — this device has lost access to somebody, and it does not yet know
+      // who. Unlike a schedule change there is no owner to re-read: the answer
+      // is "re-read the access list itself", so this reloads `/my-dependents`
+      // and lets the effect above run its sweep against the new set.
+      //
+      // **The push is the prompt half and never the reliable one.** §8 is
+      // explicit that this channel is an optimisation — iOS rate-limits silent
+      // pushes and Android defers them under Doze — so the launch sweep stays
+      // the guarantee and this only shortens the window. Everything it triggers
+      // is idempotent, which is what makes a duplicate push free.
+      if (kind === 'access-revoked') {
+        console.info('[push] access changed for viewer', ownerUserId, '— reloading dependents');
+        loadDependents().catch((e) =>
+          console.warn('[push] could not reload dependents after a revocation', e)
+        );
+        return;
+      }
 
       console.info('[push] schedule changed for owner', ownerUserId, '— re-syncing');
       syncFor(ownerUserId, user.id).catch((e) =>
@@ -263,7 +306,7 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
     });
 
     return () => subscription.remove();
-  }, [user, syncFor]);
+  }, [user, syncFor, loadDependents]);
 
   // 5.8 — register this device for push (D-5).
   //

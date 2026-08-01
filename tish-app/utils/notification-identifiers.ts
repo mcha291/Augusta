@@ -130,6 +130,34 @@ export function isSnoozeIdentifier(identifier: string): boolean {
 }
 
 /**
+ * 3.2 — whose alarm is this, read back out of the identifier.
+ *
+ * **The only way a device can find alarms belonging to someone it no longer has
+ * access to.** Every other cancel in this module starts from a reminder the
+ * caller already knows about; after a revocation the caregiver's app knows the
+ * opposite — the owner has vanished from `/my-dependents` and their reminders
+ * can no longer be fetched, so there is no list to reconcile against. The OS
+ * notification queue is the only remaining record of what is scheduled, and this
+ * is what makes it readable.
+ *
+ * Returns `null` for the un-namespaced three-segment form rather than guessing.
+ * That shape predates 4.2 and carries no owner at all, so a caller sweeping
+ * "everyone except these owners" must leave it alone: cancelling an alarm whose
+ * owner cannot be established would delete the patient's *own* alarms on a
+ * device that has not re-synced since the upgrade. Those are cleared by the
+ * ordinary reconciliation pass instead, which knows their reminder ids.
+ *
+ * Also `null` for anything that is not one of ours, so a sweep can never reach
+ * a notification some other part of the app scheduled.
+ */
+export function ownerOfIdentifier(identifier: string): number | null {
+  const parts = String(identifier).split('-');
+  if (parts[0] !== 'med' || parts.length < 4) return null;
+  const owner = Number(parts[1]);
+  return Number.isInteger(owner) && owner > 0 ? owner : null;
+}
+
+/**
  * The four-character slot an identifier's time segment reduces to.
  *
  * Compared with `slice(0, 4)` on both sides rather than by equality, because

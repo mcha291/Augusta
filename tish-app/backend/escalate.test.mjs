@@ -550,6 +550,106 @@ test('the recipients include the owner active caregivers, not just the owner', a
     assert.match(q.text, /status = 'active'/);
 });
 
+// --- 3.2 — the access-revoked reason -----------------------------------------
+
+test('THE REVOCATION PUSH GOES TO THAT USER OWN DEVICES, not through the caregiver fan-out', async () => {
+    // The whole reason 3.2 needed a second recipient query. An `access-revoked`
+    // row names the caregiver whose access just ended, and the fan-out above
+    // resolves through `user_relationships ... status = 'active'` — which the
+    // relationship no longer is. Run through that query it would reach everybody
+    // except the one device still holding the dependent's alarms.
+    const pool = makePool([
+        { match: /FROM push_outbox/, result: { rows: [{ id: 1, user_id: 3, reason: 'access-revoked' }] } },
+        { match: /owner_user_id/, result: { rows: [{ owner_user_id: 3, tokens: ['tok-a'] }] } },
+    ]);
+    _setPoolForTests(pool);
+
+    const out = await dbHandler({ op: 'drain-outbox' });
+    assert.deepEqual(out.batches[0].tokens, ['tok-a']);
+    assert.equal(out.batches[0].reason, 'access-revoked');
+
+    const q = pool.calls.find((c) => /owner_user_id/.test(c.text));
+    assert.doesNotMatch(q.text, /user_relationships/, 'the revocation push must not fan out to relationships');
+    assert.match(q.text, /LEFT JOIN push_tokens p ON p\.user_id = u\.id/);
+});
+
+test('two reasons for one user stay two batches rather than coalescing', async () => {
+    // Coalescing is right for two edits — both mean "re-read this schedule".
+    // These two mean different things: one says re-read an owner's reminders,
+    // the other says re-read who you still have access to and drop the rest.
+    // Merging them would silently drop whichever lost, and the loser is the
+    // rarer one, which is the revocation.
+    _setPoolForTests(makePool([
+        { match: /FROM push_outbox/, result: { rows: [
+            { id: 1, user_id: 3, reason: 'schedule-changed' },
+            { id: 2, user_id: 3, reason: 'access-revoked' },
+        ] } },
+        { match: /owner_user_id/, result: { rows: [{ owner_user_id: 3, tokens: ['tok-a'] }] } },
+    ]));
+
+    const out = await dbHandler({ op: 'drain-outbox' });
+    assert.equal(out.batches.length, 2);
+    assert.deepEqual(out.batches.map((b) => b.reason).sort(), ['access-revoked', 'schedule-changed']);
+});
+
+test('an unrecognised reason is treated as schedule-changed rather than sent verbatim', async () => {
+    // `reason` is a free-text column with a default, so a value nobody has
+    // taught the client to handle can reach here. Falling back to the reason
+    // every client already understands degrades to a redundant re-sync; passing
+    // it through would produce a push the device silently ignores.
+    _setPoolForTests(makePool([
+        { match: /FROM push_outbox/, result: { rows: [{ id: 1, user_id: 3, reason: 'something-new' }] } },
+        { match: /owner_user_id/, result: { rows: [{ owner_user_id: 3, tokens: ['tok-a'] }] } },
+    ]));
+    const out = await dbHandler({ op: 'drain-outbox' });
+    assert.equal(out.batches[0].reason, 'schedule-changed');
+});
+
+test('the common all-schedule-changed drain still costs exactly one recipient query', async () => {
+    const pool = makePool([
+        { match: /FROM push_outbox/, result: { rows: [
+            { id: 1, user_id: 7, reason: 'schedule-changed' },
+            { id: 2, user_id: 9, reason: 'schedule-changed' },
+        ] } },
+        { match: /owner_user_id/, result: { rows: [] } },
+    ]);
+    _setPoolForTests(pool);
+    await dbHandler({ op: 'drain-outbox' });
+    assert.equal(pool.calls.filter((c) => /owner_user_id/.test(c.text)).length, 1);
+});
+
+test('an access-revoked batch sends its own kind, and the payload names the viewer', async () => {
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 3, reason: 'access-revoked', outboxIds: [1], tokens: ['tok'] }] },
+    }));
+    let body;
+    _setFetchForTests(async (_url, opts) => { body = JSON.parse(opts.body); return expoOk(1); });
+
+    await dispatchHandler();
+    assert.equal(body[0].data.kind, 'access-revoked');
+    // For this kind `ownerUserId` is the *viewer* whose access set changed, not
+    // an owner whose reminders to re-read.
+    assert.equal(body[0].data.ownerUserId, 3);
+    // Still silent: a revocation must not put a notification on the caregiver's
+    // lock screen announcing that somebody cut them off.
+    assert.equal(body[0].title, undefined);
+    assert.equal(body[0]._contentAvailable, true);
+});
+
+test('a batch with no reason still sends as schedule-changed', async () => {
+    // Defensive rather than hypothetical: an outbox row enqueued by the deployed
+    // build before this change carries a reason the drain read but never
+    // returned, so the first run after a deploy can see batches with none.
+    _setInvokerForTests(invoker({
+        'drain-outbox': { batches: [{ ownerUserId: 7, outboxIds: [1], tokens: ['tok'] }] },
+    }));
+    let body;
+    _setFetchForTests(async (_url, opts) => { body = JSON.parse(opts.body); return expoOk(1); });
+
+    await dispatchHandler();
+    assert.equal(body[0].data.kind, 'schedule-changed');
+});
+
 test('outbox-done closes rows and outbox-failed only counts the attempt', async () => {
     const pool = makePool([{ match: /UPDATE push_outbox/, result: { rowCount: 2 } }]);
     _setPoolForTests(pool);

@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { belongsToReminder, identifierFor, isSnoozeIdentifier, occurrenceKeyFor, snoozeIdentifierFor } from './notification-identifiers.ts';
+import { belongsToReminder, identifierFor, isSnoozeIdentifier, occurrenceKeyFor, ownerOfIdentifier, snoozeIdentifierFor } from './notification-identifiers.ts';
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -318,4 +318,63 @@ test('everything identifierFor builds with an occurrence, belongsToReminder find
       }
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// 3.2 — reading the owner back out, for the revocation sweep
+// ---------------------------------------------------------------------------
+
+test('ownerOfIdentifier reads the owner segment of every namespaced shape', () => {
+  assert.equal(ownerOfIdentifier(identifierFor(12, '08:00', 7)), 7);
+  assert.equal(ownerOfIdentifier(identifierFor(12, '08:00', 7, 2)), 7);
+  assert.equal(ownerOfIdentifier(identifierFor(12, '08:00', 7, 2, KEY_TODAY)), 7);
+  assert.equal(ownerOfIdentifier(snoozeIdentifierFor(12, '08:00', 7)), 7);
+});
+
+test('THE UN-NAMESPACED FORM HAS NO OWNER, and must not be guessed at', () => {
+  // `med-12-0800` is three segments and carries no owner — it predates 4.2 and
+  // may still be sitting in a device's queue after an upgrade. The sweep cancels
+  // "everyone except these owners", so returning anything here would delete the
+  // patient's *own* alarms on exactly the devices that have not re-synced yet.
+  // Reading position 1 as an owner would in fact read the *reminder id*, so the
+  // wrong answer here is also a plausible-looking one.
+  assert.equal(ownerOfIdentifier(identifierFor(12, '08:00')), null);
+  assert.equal(ownerOfIdentifier('med-12-0800'), null);
+});
+
+test('ownerOfIdentifier ignores anything that is not one of ours', () => {
+  // A sweep driven by this must never reach a notification scheduled elsewhere
+  // in the app, or by another library.
+  for (const id of ['', 'expo-push-1', 'appointment-3-7-0800', 'med', 'med-7']) {
+    assert.equal(ownerOfIdentifier(id), null, id);
+  }
+});
+
+test('a non-numeric or non-positive owner segment is rejected rather than coerced', () => {
+  // `Number('')` is 0 and passes Number.isInteger — the same quiet coercion
+  // §0.6 records against `Number(null)` on the server and `Math.max(NaN, 1)` in
+  // date.ts. A zero owner would match nothing in the allow-list and so would be
+  // swept, which is the destructive direction.
+  assert.equal(ownerOfIdentifier('med--12-0800'), null);
+  assert.equal(ownerOfIdentifier('med-0-12-0800'), null);
+  assert.equal(ownerOfIdentifier('med-abc-12-0800'), null);
+});
+
+test('THE SWEEP KEEPS EVERY OWNER IT IS TOLD ABOUT and drops the rest', () => {
+  // The property the revocation sweep rests on, stated over the identifier
+  // shapes a real device holds at once: the viewer's own alarms, an active
+  // dependent's escalation copies, and a revoked dependent's leftovers.
+  const allowed = new Set([7, 9]);
+  const keep = [
+    identifierFor(12, '08:00', 7, 0, KEY_TODAY),
+    identifierFor(12, '20:00', 7, 2, KEY_TOMORROW),
+    snoozeIdentifierFor(30, '08:00', 9),
+  ];
+  const drop = [
+    identifierFor(44, '08:00', 5, 0, KEY_TODAY),
+    identifierFor(44, '20:00', 5, 1, KEY_TOMORROW),
+  ];
+
+  for (const id of keep) assert.equal(allowed.has(ownerOfIdentifier(id)!), true, id);
+  for (const id of drop) assert.equal(allowed.has(ownerOfIdentifier(id)!), false, id);
 });

@@ -8,7 +8,7 @@ import type { AlarmPlan } from './alarm-schedule';
 import { confirmedDoseKeys } from './doses';
 import type { DoseRow } from './doses';
 import type { BudgetPlan } from './notification-budget';
-import { belongsToReminder, isSnoozeIdentifier, snoozeIdentifierFor } from './notification-identifiers';
+import { belongsToReminder, isSnoozeIdentifier, ownerOfIdentifier, snoozeIdentifierFor } from './notification-identifiers';
 
 /**
  * 5.3 — how loudly iOS is allowed to interrupt.
@@ -512,6 +512,85 @@ export async function cancelAlarmBurst(
   }
 
   await dismissPresentedAlarms(id, owner, timeStr);
+}
+
+/**
+ * 3.2 — drop every alarm belonging to an owner this device no longer holds a
+ * relationship with.
+ *
+ * **The durable half of revocation on the device side, and the one that does not
+ * depend on a push arriving.** Under 4.2 item 2 a caregiver's phone carries an
+ * escalation copy of every escalation-enabled reminder their dependent has, and
+ * since 5.6 it carries up to a week of them. When the relationship ends, the
+ * dependent simply disappears from `/my-dependents` — so the reconciliation pass
+ * stops *writing* their alarms and, before this, had no mechanism at all to
+ * remove the ones already written. They would go on firing for the length of the
+ * horizon, resolving the patient's medication name out of the local cache, on a
+ * device that has just been told it may not have it.
+ *
+ * **Framed as "everyone except these" rather than "this owner", deliberately.**
+ * The caller knows who it still has access to; it does not, and cannot, know who
+ * it used to. A revocation that happened while the app was closed leaves no
+ * client-side record of the person it removed — the only surviving evidence is
+ * the identifiers in the OS queue.
+ *
+ * Alarms with no owner segment are left alone. See `ownerOfIdentifier`: those
+ * predate 4.2, cancelling them would take the device's own alarms with them, and
+ * the ordinary per-reminder reconcile clears them anyway.
+ *
+ * Returns the owners it actually found and cancelled, so the caller can evict
+ * their cached reminders too — the alarms are the visible half of what a revoked
+ * caregiver's phone is holding, and 4.3's cache is the other.
+ */
+export async function cancelAlarmsForOtherOwners(allowedOwnerIds: Iterable<number>): Promise<number[]> {
+  if (Platform.OS === 'web') return [];
+
+  const allowed = new Set<number>();
+  for (const id of allowedOwnerIds) {
+    if (Number.isInteger(Number(id))) allowed.add(Number(id));
+  }
+  // An empty allow-list means the caller could not establish who it has access
+  // to — a failed `/my-dependents`, or a signed-out state. Sweeping on that
+  // would cancel *every* alarm on the device, so it is refused. The revocation
+  // is repaired on the next pass that has a real answer.
+  if (allowed.size === 0) return [];
+
+  const removed = new Set<number>();
+  try {
+    const scheduled = await Notifications.getAllScheduledNotificationsAsync();
+    for (const notification of scheduled) {
+      const owner = ownerOfIdentifier(notification.identifier);
+      if (owner == null || allowed.has(owner)) continue;
+      try {
+        await Notifications.cancelScheduledNotificationAsync(notification.identifier);
+        removed.add(owner);
+      } catch (e) {
+        console.warn('[notifications] could not cancel a revoked owner alarm', notification.identifier, e);
+      }
+    }
+  } catch (e) {
+    console.warn('[notifications] could not read the scheduled queue', e);
+    return [];
+  }
+
+  // The tray as well, for the same reason 4.7c has two halves: an escalation
+  // that fired an hour ago is still sitting there naming the patient's
+  // medication, and no scheduled-queue cancel reaches it.
+  if (removed.size > 0) {
+    try {
+      const presented = await Notifications.getPresentedNotificationsAsync();
+      for (const notification of presented) {
+        const owner = ownerOfIdentifier(notification.request.identifier);
+        if (owner == null || allowed.has(owner)) continue;
+        await Notifications.dismissNotificationAsync(notification.request.identifier).catch(() => {});
+      }
+    } catch (e) {
+      console.warn('[notifications] could not clear the tray for a revoked owner', e);
+    }
+    console.info('[notifications] dropped alarms for', removed.size, 'owner(s) no longer accessible');
+  }
+
+  return [...removed];
 }
 
 /**

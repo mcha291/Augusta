@@ -3,12 +3,18 @@ import { goBackOrHome } from '@/utils/navigation';
 import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
-import { Appbar, Avatar, Button, Dialog, IconButton, Portal, Surface, Text, TextInput } from 'react-native-paper';
+import { Appbar, Avatar, Button, Chip, Dialog, IconButton, Portal, Surface, Text, TextInput } from 'react-native-paper';
 import ActiveProfileBadge from '../components/active-profile-badge';
 import { COLORS, SHADOWS } from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
 import { GlobalStyles } from '../styles/globalstyles';
 import { apiRequest } from '../utils/api';
+import {
+  DEFAULT_RELATIONSHIP_TYPE,
+  RELATIONSHIP_TYPES,
+  relationshipTypeLabelKey,
+  type RelationshipType,
+} from '../utils/relationship-types';
 
 export default function ManagedUsersScreen() {
   const { user, setActiveDependent, activeDependent } = useAuth();
@@ -21,6 +27,14 @@ export default function ManagedUsersScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [requestDialog, setRequestDialog] = useState(false);
   const [handshakeCode, setHandshakeCode] = useState<string | null>(null);
+  // 3.4 — was hardcoded 'Family' on the request below.
+  const [relationshipType, setRelationshipType] = useState<RelationshipType>(DEFAULT_RELATIONSHIP_TYPE);
+
+  /** A stored type as a translated label, falling back to whatever the row holds. */
+  const labelForType = (value: unknown): string => {
+    const key = relationshipTypeLabelKey(value);
+    return key ? t(key) : String(value ?? '');
+  };
 
   const loadData = async () => {
     try {
@@ -35,7 +49,9 @@ export default function ManagedUsersScreen() {
   const handleSendRequest = async () => {
     const res = await apiRequest('/relationships/request', {
       method: 'POST',
-      body: { dependent_email: searchQuery, relationship_type: 'Family' }
+      // The stable key, never the translated label — the value goes into the
+      // database and is read back by a device that may be in the other language.
+      body: { dependent_email: searchQuery, relationship_type: relationshipType }
     });
     const data = await res.json();
     if (res.ok) {
@@ -71,7 +87,7 @@ export default function ManagedUsersScreen() {
               <Avatar.Image size={40} source={{ uri: `https://api.dicebear.com/7.x/initials/svg?seed=${dep.username}` }} />
               <View style={{ flex: 1, marginLeft: 15 }}>
                 <Text style={styles.userName}>{dep.full_name}</Text>
-                <Text style={styles.userSub}>{dep.relationship_type}</Text>
+                <Text style={styles.userSub}>{labelForType(dep.relationship_type)}</Text>
               </View>
               {activeDependent?.id === dep.id && <IconButton icon="check-circle" iconColor={COLORS.primary} />}
             </Surface>
@@ -92,6 +108,30 @@ export default function ManagedUsersScreen() {
               <>
                 <Text style={{ marginBottom: 15 }}>{t('managedUsers.requestDialogInstructions')}</Text>
                 <TextInput label={t('managedUsers.identifierLabel')} mode="outlined" value={searchQuery} onChangeText={setSearchQuery} autoCapitalize="none" />
+
+                {/* 3.4 — how the caregiver describes the relationship.
+                    Chips rather than a dropdown: seven short options, and the
+                    selected one has to stay visible while the identifier field
+                    above it is being filled in. */}
+                <Text style={styles.typeLabel}>{t('managedUsers.relationshipTypeLabel')}</Text>
+                <View style={styles.typeRow}>
+                  {RELATIONSHIP_TYPES.map((type) => (
+                    <Chip
+                      key={type}
+                      selected={relationshipType === type}
+                      showSelectedCheck={false}
+                      onPress={() => setRelationshipType(type)}
+                      style={styles.typeChip}
+                    >
+                      {t(`relationshipTypes.${type}`)}
+                    </Chip>
+                  ))}
+                </View>
+                {/* Stated because this is exactly the field a user would expect
+                    to narrow what the other person can see. It does not — the
+                    model is all-or-nothing, and saying so here is cheaper than
+                    letting somebody infer a limit that is not there. */}
+                <Text style={styles.typeHint}>{t('managedUsers.relationshipTypeHint')}</Text>
               </>
             ) : (
               <View style={{ alignItems: 'center' }}>
@@ -115,5 +155,9 @@ const styles = StyleSheet.create({
   activeCard: { borderColor: COLORS.primary },
   userName: { fontSize: 16, fontWeight: '700', color: COLORS.ink, marginLeft: 15 },
   userSub: { fontSize: 12, color: COLORS.slate },
-  handshakeText: { fontSize: 32, fontWeight: '900', color: COLORS.primary, letterSpacing: 4, marginVertical: 10 }
+  handshakeText: { fontSize: 32, fontWeight: '900', color: COLORS.primary, letterSpacing: 4, marginVertical: 10 },
+  typeLabel: { marginTop: 18, marginBottom: 8, fontWeight: '700', color: COLORS.ink },
+  typeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  typeChip: { marginBottom: 4 },
+  typeHint: { marginTop: 12, fontSize: 12, color: COLORS.slate }
 });

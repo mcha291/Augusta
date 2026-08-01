@@ -828,11 +828,19 @@ test('POST /relationships/respond approves when the responder is the dependent',
 
 test('POST /relationships/respond returns 404 when the responder is not the dependent', async () => {
   let selectParams;
-  _setPoolForTests(makePool([
+  // **Bound to a local, and that is not a style preference.** The outer `pool`
+  // is rebuilt by `beforeEach` and then *replaced* by this call, so the
+  // "no UPDATE was attempted" assertion below used to read the call list of a
+  // pool the handler never touched — always empty, always passing. Found in
+  // session 8 when a new test written to the same pattern crashed on it instead
+  // of quietly passing. This is the only assertion in the 3.1 block that checks
+  // an *absence*, so it is the only one the mistake could hide.
+  const scripted = makePool([
     { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 99 }] } },
     // Scoped by dependent_id, so somebody else's request matches nothing.
     { match: /SELECT verification_code FROM user_relationships/, result: (t, p) => { selectParams = p; return { rows: [] }; } },
-  ]));
+  ]);
+  _setPoolForTests(scripted);
   const res = await handler(restEvent({
     method: 'POST', path: '/relationships/respond', sub: 'sub-caregiver',
     body: { request_id: 5, action: 'active', provided_code: 'TISH-123' },
@@ -840,7 +848,7 @@ test('POST /relationships/respond returns 404 when the responder is not the depe
   assert.equal(res.statusCode, 404);
   assert.deepEqual(selectParams, [5, 99]);
   // Knowing the code must not be enough: no UPDATE may have been attempted.
-  assert.equal(pool.calls.filter((c) => /UPDATE user_relationships/.test(c.text)).length, 0);
+  assert.equal(scripted.calls.filter((c) => /UPDATE user_relationships/.test(c.text)).length, 0);
 });
 
 test('POST /relationships/respond scopes the lookup by dependent_id, not by id alone', async () => {
@@ -899,6 +907,301 @@ test('POST /relationships/respond deny by a non-participant deletes nothing and 
   // The DELETE is allowed to run, but only ever scoped — an unscoped one would
   // have deleted a stranger's relationship before we could report 404.
   assert.match(sql, /dependent_id/);
+});
+
+// ---------------------------------------------------------------------------
+// 3.2 — revocation.
+//
+// The point of the feature is that access *stops*, so the assertions below are
+// mostly about the scoping of the write and about what the row looks like
+// afterwards. `checkAccess` already filters on `status = 'active'`, which is why
+// there is no enforcement code to test: the last test in this block pins that
+// dependency, because the day somebody "simplifies" that filter away is the day
+// revocation silently stops working with every test here still green.
+// ---------------------------------------------------------------------------
+
+test('POST /relationships/revoke lets the dependent withdraw access', async () => {
+  let updateParams;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    {
+      match: /UPDATE user_relationships\s+SET status = 'revoked'/,
+      result: (t, p) => { updateParams = p; return { rows: [{ caregiver_id: 3, dependent_id: 7 }], rowCount: 1 }; },
+    },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-dependent',
+    body: { relationship_id: 5 },
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).message, 'Access revoked.');
+  assert.deepEqual(updateParams, [5, 7]);
+});
+
+test('POST /relationships/revoke lets the caregiver step back too', async () => {
+  // Wider than /relationships/respond's dependent-only rule, deliberately: a
+  // caregiver who no longer wants the responsibility must not need the other
+  // person to act. Same row, same route, caller is the caregiver this time.
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 3 }] } },
+    {
+      match: /UPDATE user_relationships\s+SET status = 'revoked'/,
+      result: { rows: [{ caregiver_id: 3, dependent_id: 7 }], rowCount: 1 },
+    },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-caregiver',
+    body: { relationship_id: 5 },
+  }));
+  assert.equal(res.statusCode, 200);
+});
+
+test('THE REVOKE IS SCOPED TO A PARTICIPANT, in the WHERE clause rather than a prior check', async () => {
+  // 3.1's shape: ownership in the UPDATE itself, so there is no window between
+  // checking and writing and two racing revokes cannot both pass a check. A
+  // status-only test would be satisfied by an unscoped UPDATE that returned 404
+  // *after* revoking a stranger's relationship.
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 99 }] } },
+    { match: /UPDATE user_relationships\s+SET status = 'revoked'/, result: (t) => { sql = t; return { rows: [], rowCount: 0 }; } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-stranger',
+    body: { relationship_id: 5 },
+  }));
+  assert.equal(res.statusCode, 404);
+  assert.match(sql, /caregiver_id = \$2 OR dependent_id = \$2/);
+});
+
+test('a non-participant gets 404 rather than 403, because ids are guessable', async () => {
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 99 }] } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-stranger',
+    body: { relationship_id: 5 },
+  }));
+  assert.equal(res.statusCode, 404);
+  assert.equal(parse(res).error, 'Relationship not found');
+});
+
+test('revoking twice is a 200, not a 404 — the same idempotency 5.1 needed', async () => {
+  // Two devices, or one impatient double-tap. Reporting "not found" for a
+  // revocation that has already succeeded reads to the user as "it did not
+  // work", which is exactly the non-idempotent lookup §0.6 records against 5.1's
+  // second confirm.
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /UPDATE user_relationships\s+SET status = 'revoked'/, result: { rows: [], rowCount: 0 } },
+    { match: /SELECT 1 FROM user_relationships/, result: { rows: [{ '?column?': 1 }], rowCount: 1 } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-dependent',
+    body: { relationship_id: 5 },
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).message, 'Access already revoked.');
+});
+
+test('the already-revoked lookup is scoped too, so it cannot confirm a stranger\'s relationship', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /UPDATE user_relationships\s+SET status = 'revoked'/, result: { rows: [], rowCount: 0 } },
+    { match: /SELECT 1 FROM user_relationships/, result: (t) => { sql = t; return { rows: [], rowCount: 0 }; } },
+  ]));
+  await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-dependent',
+    body: { relationship_id: 5 },
+  }));
+  assert.match(sql, /caregiver_id = \$2 OR dependent_id = \$2/);
+});
+
+test('a missing relationship_id is a 400 and touches no relationship row', async () => {
+  const scripted = makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+  ]);
+  _setPoolForTests(scripted);
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-dependent', body: {},
+  }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(
+    scripted.calls.filter((c) => /user_relationships/.test(c.text)).length,
+    0,
+    'a malformed request must not reach the table at all'
+  );
+});
+
+test('revoking enqueues an access-revoked push for THE CAREGIVER, not the dependent', async () => {
+  // The whole reason the row is filed under the caregiver. The drain resolves
+  // `schedule-changed` recipients through `user_relationships ... status =
+  // 'active'`, so a row filed under the dependent reaches every device except
+  // the one still holding their alarms.
+  let outboxParams;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    {
+      match: /UPDATE user_relationships\s+SET status = 'revoked'/,
+      result: { rows: [{ caregiver_id: 3, dependent_id: 7 }], rowCount: 1 },
+    },
+    { match: /INSERT INTO push_outbox/, result: (t, p) => { outboxParams = p; return { rows: [{ id: 1 }] }; } },
+  ]));
+  await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-dependent',
+    body: { relationship_id: 5 },
+  }));
+  assert.deepEqual(outboxParams, [3, 'access-revoked', null]);
+});
+
+test('a failed revocation enqueues nothing', async () => {
+  const scripted = makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 99 }] } },
+    { match: /UPDATE user_relationships\s+SET status = 'revoked'/, result: { rows: [], rowCount: 0 } },
+  ]);
+  _setPoolForTests(scripted);
+  await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-stranger',
+    body: { relationship_id: 5 },
+  }));
+  assert.equal(scripted.calls.filter((c) => /INSERT INTO push_outbox/.test(c.text)).length, 0);
+});
+
+test('ENFORCEMENT IS checkAccess FILTERING ON active, which is the whole of it', async () => {
+  // Revocation ships no enforcement code of its own — it relies entirely on
+  // every scoped route already resolving access through a query that requires
+  // `status = 'active'`. This test exists so that dependency is written down
+  // somewhere executable: remove the filter and revocation silently stops
+  // working while every other test in this block stays green.
+  let accessSql;
+  const scripted = makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 3 }] } },
+    {
+      match: /SELECT 1 FROM user_relationships WHERE caregiver_id/,
+      result: (t) => { accessSql = t; return { rows: [] }; },
+    },
+  ]);
+  _setPoolForTests(scripted);
+  const res = await handler(restEvent({
+    path: '/medication-reminders', sub: 'sub-caregiver', query: { user_id: '7' },
+  }));
+  assert.match(accessSql, /status = \$3/);
+  assert.equal(scripted.calls.find((c) => /SELECT 1 FROM user_relationships/.test(c.text)).params[2], 'active');
+  // And the route really does refuse once the relationship stops matching.
+  assert.equal(parse(res).error, 'Access Denied');
+});
+
+test('GET /relationships/granted reports both directions with the other party named', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    {
+      match: /FROM user_relationships r\s+JOIN users other/,
+      result: (t) => {
+        sql = t;
+        return { rows: [{ id: 5, status: 'active', role: 'caregiver', other_user_id: 3, other_username: 'ann' }] };
+      },
+    },
+  ]));
+  const res = await handler(restEvent({ path: '/relationships/granted', sub: 'sub-dependent' }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res)[0].role, 'caregiver');
+  // Both directions, because either participant may revoke.
+  assert.match(sql, /r\.caregiver_id = \$1 OR r\.dependent_id = \$1/);
+  // Revoked rows are history, not access — they must not appear in a list whose
+  // whole purpose is "who can see my records right now".
+  assert.match(sql, /r\.status IN \('pending', 'active'\)/);
+});
+
+test('re-requesting a revoked pair reactivates the row instead of failing on the unique key', async () => {
+  // The consequence of keeping the row rather than deleting it:
+  // UNIQUE(caregiver_id, dependent_id) makes a bare INSERT fail forever after
+  // the first revocation, which would make revocation a one-way door.
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 3 }] } },
+    { match: /SELECT id FROM users WHERE email/, result: { rows: [{ id: 7 }] } },
+    { match: /INSERT INTO user_relationships/, result: (t) => { sql = t; return { rows: [{ id: 5 }], rowCount: 1 }; } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/request', sub: 'sub-caregiver',
+    body: { dependent_email: 'pat@example.com', relationship_type: 'family' },
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.match(parse(res).handshakeCode, /^TISH-\d{3}$/);
+  assert.match(sql, /ON CONFLICT \(caregiver_id, dependent_id\) DO UPDATE/);
+  // Cleared, or migration 007's CHECK rejects the write — a live relationship
+  // must not carry a revoked_at.
+  assert.match(sql, /revoked_at = NULL/);
+  assert.match(sql, /revoked_by = NULL/);
+});
+
+test('re-requesting access that is ALREADY ACTIVE is refused rather than downgraded', async () => {
+  // The DO UPDATE is guarded on `status <> 'active'`, so an accidental
+  // re-request cannot knock a live relationship back to pending and demand a
+  // fresh code from the dependent. Returning a handshake code nobody will be
+  // asked for is the silent-failure shape Phase 1 exists to remove.
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 3 }] } },
+    { match: /SELECT id FROM users WHERE email/, result: { rows: [{ id: 7 }] } },
+    { match: /INSERT INTO user_relationships/, result: (t) => { sql = t; return { rows: [], rowCount: 0 }; } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/request', sub: 'sub-caregiver',
+    body: { dependent_email: 'pat@example.com', relationship_type: 'family' },
+  }));
+  assert.equal(res.statusCode, 409);
+  assert.equal(parse(res).handshakeCode, undefined);
+  assert.match(sql, /WHERE user_relationships\.status <> 'active'/);
+});
+
+test('A STALE HANDSHAKE CODE CANNOT RESURRECT A REVOKED RELATIONSHIP', async () => {
+  // Before revocation existed, a row was only ever pending or active, so
+  // `/relationships/respond` had no reason to filter on status. Now the revoked
+  // row survives in the table carrying its old verification_code — and without
+  // this filter, replaying that code re-grants access the dependent has
+  // deliberately ended.
+  let sql;
+  const scripted = makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /SELECT verification_code FROM user_relationships/, result: (t) => { sql = t; return { rows: [] }; } },
+  ]);
+  _setPoolForTests(scripted);
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/respond', sub: 'sub-dependent',
+    body: { request_id: 5, action: 'active', provided_code: 'TISH-123' },
+  }));
+  assert.equal(res.statusCode, 404);
+  assert.match(sql, /status = 'pending'/);
+  assert.equal(scripted.calls.filter((c) => /UPDATE user_relationships/.test(c.text)).length, 0);
+});
+
+test('the deny branch cannot delete a revoked row, because that is the access history', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /DELETE FROM user_relationships/, result: (t) => { sql = t; return { rows: [], rowCount: 0 }; } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/respond', sub: 'sub-dependent',
+    body: { request_id: 5, action: 'denied' },
+  }));
+  assert.equal(res.statusCode, 404);
+  assert.match(sql, /status = 'pending'/);
+});
+
+test('/debug/link clears the revocation columns when it re-links a revoked pair', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE id = ANY/, result: { rows: [{ id: 1 }, { id: 2 }] } },
+    { match: /INSERT INTO user_relationships/, result: (t) => { sql = t; return { rows: [{ id: 5 }], rowCount: 1 }; } },
+  ]));
+  const res = await handler(restEvent({ path: '/debug/link', query: { caregiver: '1', dependent: '2' } }));
+  assert.equal(res.statusCode, 200);
+  assert.match(sql, /revoked_at = NULL/);
+  assert.match(sql, /revoked_by = NULL/);
 });
 
 // ---------------------------------------------------------------------------
@@ -1014,11 +1317,16 @@ test('GET /admin/stats returns counts as numbers', async () => {
 });
 
 test('GET /admin/stats casts in SQL rather than in JS', async () => {
-  _setPoolForTests(makePool([
+  // The pool is bound to a local rather than left to the `beforeEach` one: this
+  // asserts over `calls`, and the outer `pool` is a *different*, unused pool
+  // whose call list is always empty. See the note on the 3.1 deny test.
+  const scripted = makePool([
     { match: /COUNT/, result: { rows: [{ count: 1 }] } },
-  ]));
+  ]);
+  _setPoolForTests(scripted);
   await handler(restEvent({ path: '/admin/stats', sub: 'sub-1' }));
-  for (const call of pool.calls ?? []) assert.match(call.text, /::int/);
+  assert.ok(scripted.calls.length > 0, 'the route must have queried something');
+  for (const call of scripted.calls) assert.match(call.text, /::int/);
 });
 
 // ---------------------------------------------------------------------------

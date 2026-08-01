@@ -6,8 +6,8 @@ import { flushDoseQueue } from '@/utils/dose-queue';
 import type { DoseRow } from '@/utils/doses';
 import { planNotificationBudget, reminderCostFor } from '@/utils/notification-budget';
 import type { BudgetPlan, ReminderCost } from '@/utils/notification-budget';
-import { rememberBudgetPlan, scheduleMedicationNotifications } from '@/utils/notification-helper';
-import { cacheReminders } from '@/utils/reminder-store';
+import { cancelAlarmsForOtherOwners, rememberBudgetPlan, scheduleMedicationNotifications } from '@/utils/notification-helper';
+import { cacheReminders, forgetOwners } from '@/utils/reminder-store';
 
 /**
  * How far back the dose window reaches. A caregiver's escalation copy is only
@@ -93,7 +93,11 @@ export function useNotificationSync() {
    * `AuthContext` here so this hook stays callable from anywhere, including the
    * medications screen, which already knows both ids.
    */
-  const syncOwners = useCallback(async (ownerIds: (number | undefined)[], viewerUserId?: number) => {
+  const syncOwners = useCallback(async (
+    ownerIds: (number | undefined)[],
+    viewerUserId?: number,
+    options: { knownOwnerIds?: (number | undefined)[] } = {}
+  ) => {
     const run = async () => {
       // 4.4 — "the next sync" the retry queue waits for. Deliberately first, and
       // deliberately not gated on the reminder fetch succeeding: a confirmation
@@ -134,7 +138,40 @@ export function useNotificationSync() {
       // notifications on web, but the 4.3 cache above is app state rather than a
       // notification concern, and keeping it populated on web is what makes the
       // alarm overlay's resolve-and-degrade behaviour exercisable in a web build.
-      if (Platform.OS === 'web' || fetched.length === 0) return;
+      if (Platform.OS === 'web') return;
+
+      // --- 3.2: drop anyone this device no longer has access to --------------
+      //
+      // **`knownOwnerIds` is the complete set this device may hold alarms for,
+      // and it is deliberately a separate argument rather than `ownerIds`.**
+      // Only the launch pass knows that set, and even there it is not the list
+      // being scheduled: `_layout.tsx` tracks which owners it has already synced
+      // and passes only the *new* ones, so the second run of that effect — the
+      // one that picks up dependents after they arrive — carries the dependents
+      // alone. Sweeping against the scheduling list would then read "the two
+      // dependents I just learned about" as "everyone I have access to" and
+      // cancel the signed-in user's own alarms. Same trap one step further out
+      // for `syncFor`, which is called with a single owner by the medications
+      // screen on every focus.
+      //
+      // Omitted means no sweep. That is the safe default for a mechanism whose
+      // failure mode is deleting alarms.
+      //
+      // Runs before the budget rather than after, so the slots it frees are
+      // available to the horizon this pass lays out. And it runs even when
+      // nothing was fetched — a caregiver whose only dependent was just revoked
+      // has nothing to schedule and everything to clean up, which is exactly the
+      // case an early return would skip.
+      if (options.knownOwnerIds) {
+        const allowed = options.knownOwnerIds.filter((id): id is number => Number.isInteger(Number(id)));
+        const dropped = await cancelAlarmsForOtherOwners(allowed);
+        // 4.3's cache is the other half of what the device is holding: the
+        // payload carries no medication name, so the name and dosage an alarm
+        // displays live in storage until something evicts them.
+        if (dropped.length > 0) await forgetOwners(dropped);
+      }
+
+      if (fetched.length === 0) return;
 
       // --- Phase 2: one budget for the whole device ------------------------
       const now = new Date();

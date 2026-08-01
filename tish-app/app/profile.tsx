@@ -27,6 +27,22 @@ interface PendingRequest {
   full_name: string;
   username: string;
 }
+
+/**
+ * 3.2 — one live relationship, seen from the caller's end.
+ *
+ * `role` describes the *other* party: `caregiver` means they can see my
+ * records, `dependent` means I can see theirs. The server computes it so no
+ * screen has to compare ids to work out which name it is showing.
+ */
+interface GrantedAccess {
+  id: number;
+  status: 'pending' | 'active';
+  role: 'caregiver' | 'dependent';
+  other_user_id: number;
+  other_username: string | null;
+  other_full_name: string | null;
+}
 interface Gender {
   id: number;
   name: string;
@@ -45,7 +61,7 @@ const MEAL_ROWS: { key: MealKey; column: keyof MealTimes; icon: string }[] = [
 ];
 
 export default function ProfileScreen() {
-  const { user, logout, activeDependent } = useAuth();
+  const { user, logout, activeDependent, loadDependents } = useAuth();
   const theme = useTheme();
   const router = useRouter();
   const { t, i18n } = useTranslation();
@@ -53,6 +69,9 @@ export default function ProfileScreen() {
   // Data States
   const [handshakeInput, setHandshakeInput] = useState('');
   const [pendingRequests, setPendingRequests] = useState<PendingRequest[]>([]);
+  // 3.2 — "who can see my records", and the revoke action next to each one.
+  const [granted, setGranted] = useState<GrantedAccess[]>([]);
+  const [revoking, setRevoking] = useState<number | null>(null);
   const [genderList, setGenderList] = useState<Gender[]>([]);
   const [conditionList, setConditionList] = useState<Condition[]>([]);
   const [loadingLookups, setLoadingLookups] = useState(true);
@@ -81,11 +100,15 @@ export default function ProfileScreen() {
   // 1. Fetch Lookup Tables (Genders/Conditions) and Pending Requests
   const loadProfileData = async () => {
     try {
-      const [gRes, cRes, pRes, mRes] = await Promise.all([
+      const [gRes, cRes, pRes, mRes, aRes] = await Promise.all([
         apiRequest('/genders'),
         apiRequest('/conditions'),
         apiRequest('/relationships/pending'),
-        apiRequest('/meal-times', {}, activeDependent?.id)
+        apiRequest('/meal-times', {}, activeDependent?.id),
+        // 3.2. Deliberately *not* scoped to `activeDependent`: this is about the
+        // signed-in account's own consents, and viewing a dependent's records
+        // does not make you the person who may withdraw theirs.
+        apiRequest('/relationships/granted'),
       ]);
 
       const gData = await gRes.json();
@@ -95,6 +118,11 @@ export default function ProfileScreen() {
       setGenderList(Array.isArray(gData) ? gData : []);
       setConditionList(Array.isArray(cData) ? cData : []);
       setPendingRequests(Array.isArray(pData) ? pData : []);
+
+      if (aRes.ok) {
+        const aData = await aRes.json();
+        setGranted(Array.isArray(aData) ? aData : []);
+      }
 
       if (mRes.ok) setMealTimes({ ...DEFAULT_MEAL_TIMES, ...(await mRes.json()) });
     } catch (e) {
@@ -195,6 +223,61 @@ export default function ProfileScreen() {
     }
   };
 
+  const nameFor = (row: GrantedAccess) => row.other_full_name || row.other_username || `#${row.other_user_id}`;
+
+  /**
+   * 3.2 — withdraw access, after an explicit confirmation.
+   *
+   * **Confirmed rather than immediate**, unlike the decline button above it. A
+   * declined request has cost nobody anything; revoking is the action that
+   * silences a caregiver's alarms for a patient who may be relying on them
+   * (D-1), and it is one tap away from a list of names.
+   *
+   * `loadDependents()` afterwards is what makes the *device* act on it: the
+   * launch reconcile sweeps alarms belonging to anyone no longer in that list,
+   * so refreshing it here is how a caregiver revoking their own access sees
+   * their copies disappear without waiting for a relaunch. On the dependent's
+   * device it is a no-op, which is why it is not conditional — the caregiver's
+   * own devices are reached by the server's `access-revoked` push instead.
+   */
+  const revokeAccess = (row: GrantedAccess) => {
+    const name = nameFor(row);
+    const confirmTitle = t('profile.revokeConfirmTitle');
+    const confirmBody = row.role === 'caregiver'
+      ? t('profile.revokeConfirmCaregiver', { name })
+      : t('profile.revokeConfirmDependent', { name });
+
+    const run = async () => {
+      setRevoking(row.id);
+      try {
+        const res = await apiRequest('/relationships/revoke', {
+          method: 'POST',
+          body: { relationship_id: row.id },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Dropped locally rather than waiting for the refetch, so the row does
+        // not sit there looking un-revoked while the list reloads.
+        setGranted((rows) => rows.filter((r) => r.id !== row.id));
+        await loadDependents();
+        loadProfileData();
+      } catch (e) {
+        console.error('Revoke failed:', e);
+        notifyUser(t('common.error'), t('profile.revokeFailed'));
+      } finally {
+        setRevoking(null);
+      }
+    };
+
+    if (Platform.OS === 'web') {
+      if (window.confirm(`${confirmTitle}\n\n${confirmBody}`)) run();
+      return;
+    }
+    Alert.alert(confirmTitle, confirmBody, [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('profile.revoke'), style: 'destructive', onPress: run },
+    ]);
+  };
+
   if (!user) return null;
 
   return (
@@ -235,6 +318,52 @@ export default function ProfileScreen() {
             </View>
           </Surface>
         ))}
+
+        {/* 3.2 — who can see my records, and who I can see.
+            Hidden entirely when empty rather than shown as an empty state: for a
+            user with no caregivers this is a question they have never had to
+            think about, and a permanent "nobody has access" panel invites them
+            to. */}
+        {granted.length > 0 && (
+          <Surface style={styles.surface} elevation={1}>
+            <List.Subheader style={styles.sectionSubheader}>{t('profile.accessSection')}</List.Subheader>
+            <Text style={styles.sectionHint}>{t('profile.accessHint')}</Text>
+
+            {granted.map((row, i) => (
+              <React.Fragment key={row.id}>
+                {i > 0 && <Divider />}
+                <List.Item
+                  title={nameFor(row)}
+                  description={
+                    row.status === 'pending'
+                      ? t('profile.accessPending')
+                      : row.role === 'caregiver'
+                        ? t('profile.accessCanSeeMine')
+                        : t('profile.accessICanSee')
+                  }
+                  left={p => (
+                    <List.Icon
+                      {...p}
+                      icon={row.role === 'caregiver' ? 'shield-account-outline' : 'account-heart-outline'}
+                      color={COLORS.primary}
+                    />
+                  )}
+                  right={() => (
+                    <Button
+                      compact
+                      textColor="red"
+                      disabled={revoking != null}
+                      loading={revoking === row.id}
+                      onPress={() => revokeAccess(row)}
+                    >
+                      {t('profile.revoke')}
+                    </Button>
+                  )}
+                />
+              </React.Fragment>
+            ))}
+          </Surface>
+        )}
 
         {/* Meal Times — what makes meal-relative reminders schedulable (2.7).
             Presented as an estimate the user adjusts, not a fact we know. */}
