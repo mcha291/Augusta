@@ -200,7 +200,10 @@ file:
 ## ▶ DIRECTIVE FOR SESSION 10 — device verification
 
 **This session cannot start until Robin has triggered a native rebuild and
-installed it on a physical phone.** Everything below needs an alarm to actually
+installed it on a physical phone.** `REBUILD.md` at the repo root is the guide
+for that — what is native-only and why, the version bump that has to happen
+first, the build commands, and a three-step smoke test that says whether the
+build is worth verifying at all. Everything below needs an alarm to actually
 ring, and none of it is reachable on web, in a simulator, or from build 8 — the
 build in TestFlight predates every native change in this plan. **Do not open this
 session speculatively.** If there is no new build on a real device, there is no
