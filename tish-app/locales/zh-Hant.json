@@ -383,5 +383,38 @@
     "sibling": "兄弟姊妹",
     "carer": "專業照顧者",
     "other": "其他"
+  },
+  "errors": {
+    "authRequired": "請重新登入後再繼續。",
+    "accessDenied": "您沒有查看這些紀錄的權限。",
+    "forbidden": "您沒有執行這項操作的權限。",
+    "verificationCodeMismatch": "驗證碼不符，請確認後再試一次。",
+    "profileNotFound": "您的個人資料尚未完成，請先完成註冊。",
+    "userNotFound": "找不到該帳號。",
+    "reminderNotFound": "此提醒已不存在，可能已在其他裝置上變更。",
+    "appointmentNotFound": "此預約已不存在。",
+    "testResultNotFound": "此檢驗結果已不存在。",
+    "doseNotFound": "找不到對應的服藥時段。",
+    "relationshipNotFound": "此存取紀錄已不存在。",
+    "relationshipRequestNotFound": "此請求已不再等待回覆。",
+    "relationshipTargetNotFound": "找不到符合該電子郵件或使用者名稱的帳號。",
+    "relationshipAlreadyActive": "對方已擁有您紀錄的存取權。",
+    "doseAlreadyConfirmed": "此劑量已標記為已服用。",
+    "validationFailed": "部分欄位需要修正。",
+    "internal": "系統發生問題，請再試一次。",
+    "badRequest": "無法完成此請求，請確認輸入內容後再試一次。",
+    "notFound": "找不到您要的資料。",
+    "conflict": "此操作已完成。",
+    "server": "服務目前發生問題，請稍後再試。",
+    "network": "無法連線至伺服器，請檢查網路連線後再試一次。",
+    "unexpected": "發生問題，請再試一次。",
+    "field": {
+      "required": "請填寫所有必填欄位。",
+      "emailOrPhoneRequired": "請輸入電子郵件或電話號碼。",
+      "escalationDelayRange": "通報延遲時間必須介於 5 至 240 分鐘之間。",
+      "alarmRepeatCountRange": "鬧鈴重複次數必須介於 1 至 6 次之間。",
+      "escalationOrderInvalid": "通報順序無效。",
+      "timeFormatInvalid": "請以 HH:mm 格式輸入時間，例如 08:00。"
+    }
   }
 }

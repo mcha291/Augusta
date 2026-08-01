@@ -1,6 +1,7 @@
 import { COLORS } from '@/constants/theme';
 import { changeLanguage, LANGUAGE_LABELS, SUPPORTED_LANGUAGES, SupportedLanguage } from '@/i18n';
 import { apiRequest } from '@/utils/api';
+import { apiErrorMessage, describeApiFailure } from '@/utils/api-errors';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useCallback, useState } from 'react';
@@ -219,7 +220,12 @@ export default function ProfileScreen() {
       setHandshakeInput('');
       Alert.alert(t('profile.authorizedTitle'), t('profile.authorizedMessage'));
     } else {
-      Alert.alert(t('profile.accessDeniedTitle'), t('profile.accessDeniedMessage'));
+      // 6.2 — every failure here reported "Handshake code incorrect", because
+      // that was the only thing this screen could guess. It is now the only one
+      // that says so: a wrong code is a 403 with its own code, while a request
+      // that has since been withdrawn or answered on another device is a 404
+      // that says *that* instead of blaming the user for typing correctly.
+      Alert.alert(t('profile.accessDeniedTitle'), apiErrorMessage(await describeApiFailure(res), t));
     }
   };
 
@@ -254,7 +260,14 @@ export default function ProfileScreen() {
           method: 'POST',
           body: { relationship_id: row.id },
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          // 6.2 — carries the failure rather than only its status, so the
+          // catch below can say which failure it was. An already-revoked
+          // relationship is a 200 (3.2 made it idempotent), so anything
+          // arriving here is genuinely worth reporting.
+          notifyUser(t('common.error'), apiErrorMessage(await describeApiFailure(res), t));
+          return;
+        }
         // Dropped locally rather than waiting for the refetch, so the row does
         // not sit there looking un-revoked while the list reloads.
         setGranted((rows) => rows.filter((r) => r.id !== row.id));

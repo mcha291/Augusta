@@ -16,6 +16,7 @@ import {
 import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
+import { apiErrorMessage, describeApiFailure } from '@/utils/api-errors';
 
 interface AppointmentStatus { id: number; label: string; color: string; }
 
@@ -117,8 +118,7 @@ export default function AppointmentFormScreen() {
         if (Platform.OS === 'web') window.alert(t('appointmentForm.successAlert'));
         goBackOrHome(router);
       } else {
-        const detail = await response.json().catch(() => ({}));
-        notifyUser(t('common.error'), detail.error || t('appointmentForm.saveFailed'));
+        notifyUser(t('common.error'), apiErrorMessage(await describeApiFailure(response), t));
       }
     } catch (e) {
       console.error('Appointment save failed:', e);

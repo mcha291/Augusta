@@ -33,6 +33,7 @@ import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
 import { GlobalStyles } from '../styles/globalstyles';
 import { apiRequest } from '../utils/api';
+import { apiErrorMessage, describeApiFailure } from '../utils/api-errors';
 
 // Mirrors AuthDeliveryMedium from aws-amplify/auth.
 type DeliveryMedium = 'EMAIL' | 'SMS' | 'PHONE' | 'UNKNOWN';
@@ -263,10 +264,11 @@ export default function SignupScreen() {
         }
       });
 
-      const data = await regres.json().catch(() => ({}));
-
       if (!regres.ok) {
-        throw new Error(data.message || data.error || t('signup.profileCreationFailed'));
+        // 6.2 — `data.error` was the server's English. The message still
+        // travels as a thrown Error because the catch below renders it, but it
+        // is a translated sentence by the time it is thrown.
+        throw new Error(apiErrorMessage(await describeApiFailure(regres), t));
       }
 
       // Must refresh auth state before navigating: _layout only registers the
@@ -356,8 +358,7 @@ export default function SignupScreen() {
       });
 
       if (!regres.ok) {
-        const errBody = await regres.json().catch(() => ({}));
-        throw new Error(errBody.error || t('signup.profileCreationFailed'));
+        throw new Error(apiErrorMessage(await describeApiFailure(regres), t));
       }
 
       await checkUser(); // pulls the new RDS profile in, sets user.id !== 0

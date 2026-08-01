@@ -18,6 +18,7 @@ import PlatformDatePicker from '../components/platform-date-picker';
 import { COLORS, RADIUS, SHADOWS } from '../constants/theme';
 import { GlobalStyles } from '../styles/globalstyles';
 import { toLocalDateString } from '../utils/date';
+import { apiErrorMessage, describeApiFailure } from '@/utils/api-errors';
 
 
 
@@ -125,8 +126,7 @@ export default function ResultsFormScreen() {
       } else {
         // Previously fell through silently on a non-2xx, so the form just sat
         // there looking like nothing had happened.
-        const detail = await res.json().catch(() => ({}));
-        notifyUser(t('common.error'), detail.error || t('resultsForm.saveFailed'));
+        notifyUser(t('common.error'), apiErrorMessage(await describeApiFailure(res), t));
       }
     } catch (e) {
       notifyUser(t('common.error'), t('resultsForm.saveFailed'));

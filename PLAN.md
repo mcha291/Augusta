@@ -83,28 +83,35 @@ Last updated **2026-08-01**, session 8.
 | 5.6 — schedule N occurrences ahead | `done` | Policy half session 5 (`utils/notification-budget.ts`, 22 tests): audibility before horizon, floor of 2 days, then burst, then drop dependents' copies furthest-dose-first, every degradation reported. **Wiring session 6.** `utils/alarm-schedule.ts` (new, 25 tests) lays the horizon out; `notification-budget.ts` gained the cost model both halves read (`reminderHold`, `plannedBurstCount`, `reminderCostFor`, 16 tests) so the budget cannot cost a set the scheduler would not write. `notification-identifiers.ts` gained an **occurrence segment** — the trap §0.3 named, see §0.6. `use-notification-sync.ts` is now fetch-all → one budget → schedule-all. `rescheduleNextOccurrence` became a horizon top-up. Client tests 122 → 183. |
 | 5.9 — silent push on schedule change | `done` | Session 7. **Not sent on the write, and that is forced rather than chosen**: `index.mjs` is VPC-attached and this account has no NAT and no interface endpoints, so it can reach neither Expo nor the Lambda API. Verified 2026-07-31 — `describe-vpc-endpoints` and `describe-nat-gateways` are both empty. So a reminder write enqueues into `push_outbox` (migration `006`) and the non-VPC dispatcher drains it. **EventBridge tightened to `rate(1 minute)`** so the queue costs ≤1 min rather than ≤5. Recipients are the owner's devices *and* their active caregivers' — one step wider than §8, see §0.6. Client handler in `_layout.tsx`; `UIBackgroundModes` added to `app.json`, so background delivery on iOS needs the owed native rebuild. 23 tests. **Session 8 added a second reason, `access-revoked`** (3.2), which is the one case the recipient fan-out gets wrong by design — the row is filed under the revoked *caregiver* and resolved through a second query returning that user's own devices only. The drain now keys batches on `(user_id, reason)`, because the two reasons ask the device to do different things and coalescing them would drop the rarer one. 6 more tests. |
 | 5.5 — SMS escalation | `—`, **externally blocked** | **The last item in Phase 5.** Gated on Track B: SNS is still sandboxed in `ap-east-2` (B0 filed, B1 spend limit still $1, zero numbers registered). Until it lands every SMS rung substitutes to push, which is D-8's intended fallback but means the ladder is effectively one rung twice. |
-| 6.1, 6.2 — error contract | `—` | Lowest urgency. |
+| 6.1 — typed errors | `done`, **live** | Session 9. `ERRORS` (20 codes, each paired with the status it is *always* sent with), `PROBLEM_CODES`, `ApiError` and `errorBody` in `backend/index.mjs`; 36 error sites converted, `fail(code)` at each. **The status lives in the registry rather than at the call site**, which is what stops a later edit emitting `RELATIONSHIP_NOT_FOUND` with a 403 and silently reversing §3.1's disclosure decision. Two routes changed status deliberately — `Agent not found` 500 → 404, `Security Mismatch` 500 → 403 — and **the catch-all stopped echoing `err.message`**, which was handing raw Postgres prose to clients (§0.6). 11 backend tests, 3 of them mutation-checked. 15 live probes, all matching. |
+| 6.2 — codes to i18n keys | `done` | Session 9. `utils/api-errors.ts` (new, dependency-free, 15 tests) + 7 screens: `managed-users`, `profile` (respond *and* revoke), the three forms, `signup` ×2. 29 keys in both locale files, 344 → **373**. **The unmapped-code fallback is keyed on the HTTP status, never on the code** — see §0.6; that is what makes it safe to meet a code this build has never heard of, which the next backend deploy after any client build guarantees. **Not verified in a running app**: same standing limitation as 4.6's presets — these render in alerts behind a signed-in session. |
 
 ### 0.3 — In progress right now
 
 **Nothing is half-edited, there is no decision outstanding and no deploy owed.**
 All four Lambdas are deployed and verified on
-`m9Ru8ESiAP+b8GGg8Sv2/T39Ojiui95KvcAvFbf24jE=`, all **seven** migrations are
-applied, and every suite is green: **255 backend, 194 client**.
+`g5qONOYbU4ugh+tztI+nkjknEDhhjaK1P0lADoeIWUk=`, all **seven** migrations are
+applied, and every suite is green: **266 backend, 209 client**.
 
-**Everything is committed and nothing is pushed.** Session 8 landed as `da11341`
-on `main` — 20 files, migration `007` included — plus this correction. The only
-thing in the working tree is `opus 5 vs 4.8.txt`, an unrelated scratch file
-deliberately left out of every commit since session 5. The commit was made on the
-owner's explicit instruction at the end of the session, not on the session's own
-initiative; the standing rule in §1 still holds.
+**Session 9's work is not committed.** The standing rule in §1 holds and nothing
+asked for a commit, so Phase 6 sits in the working tree alongside
+`opus 5 vs 4.8.txt`, the unrelated scratch file deliberately left out of every
+commit since session 5. `main` is still 8 ahead of `origin/main` at `40c82c0`
+— verified with `git rev-list --count origin/main..main` rather than read off
+this document, which §0.6 records getting it wrong three times.
 
-**Phase 3 is finished.** Session 8 landed 2.3, 3.2, 3.3 and 3.4 — the consent
-model now has revocation with an access history, enforcement that follows for
-free from `checkAccess`, a client that stops trusting a stale scope, and a
-relationship label that is stored as a key rather than as English. Phase 5 was
-already finished except 5.5. **Together that leaves Phase 6 as the only
-unblocked feature work in this document**, which is what session 9 is for.
+**Phase 6 is finished, and with it every unblocked item in this document.**
+Session 9 landed 6.1 and 6.2 together, as the directive required: the API now
+answers a failure with `{ error, code, problems? }` and the app renders that
+`code` through both locale files instead of showing whatever English the server
+happened to throw. **What remains here is blocked rather than unstarted** — 5.5
+waits on SNS leaving the sandbox in `ap-east-2`, and everything else waits on a
+native rebuild, which is what session 10 is for.
+
+**Landed in session 9, 2026-08-01: the error contract**, a deploy of all four
+Lambdas, and 17 live probes covering every code a user can cause. No migration —
+6.1 and 6.2 touch no schema, so the deploy-then-migrate ordering trap did not
+apply. Backend tests 255 → 266, client 194 → 209, locale keys 344 → 373.
 
 **Landed in session 8, 2026-08-01: the Phase 3 consent batch**, migration `007`,
 a deploy of all four Lambdas, and revocation exercised end to end against the
@@ -132,10 +139,10 @@ device now holds up to seven days of alarms instead of one. Client tests 122 →
 > `push_tickets` or the reminder escalation columns. Kill switch:
 > `aws events disable-rule --name tish-escalation-schedule --region ap-east-2`.
 
-**The next item is Phase 6 — the error contract.** See the session 9 directive at
-the end of this section. It is now the only unblocked feature work left here:
-5.5 waits on SNS leaving the sandbox, and everything else on the list waits on a
-native rebuild.
+**There is no next item that can be started on demand.** See the session 10
+directive at the end of this section: it is device verification, and it cannot
+begin until Robin triggers a native rebuild. 5.5 is the only other thing left
+and it waits on SNS leaving the sandbox.
 
 **A new thing on the device that deletes alarms, worth knowing before touching
 `use-notification-sync.ts`.** 3.2 added `cancelAlarmsForOtherOwners`, which
@@ -190,88 +197,122 @@ file:
 
 ---
 
-## ▶ DIRECTIVE FOR SESSION 9 — Phase 6, the error contract
+## ▶ DIRECTIVE FOR SESSION 10 — device verification
 
-**Do 6.1 and 6.2, together, and nothing else.** They are one item split across
-two ends of the wire: 6.1 gives every route a typed error shape, 6.2 turns those
-codes into text a user reads. Doing 6.1 alone ships a contract nobody consumes;
-doing 6.2 first is impossible. Estimated ~5h (3 + 2).
+**This session cannot start until Robin has triggered a native rebuild and
+installed it on a physical phone.** Everything below needs an alarm to actually
+ring, and none of it is reachable on web, in a simulator, or from build 8 — the
+build in TestFlight predates every native change in this plan. **Do not open this
+session speculatively.** If there is no new build on a real device, there is no
+work here: stop, say so, and pick up 5.5 only if Track B has moved (SNS out of
+the `ap-east-2` sandbox), which is the one other thing left in this document.
 
-**Give the session nothing else, and that is a scope instruction rather than an
-estimate.** 6.1 touches *every route in `index.mjs`* — it is the widest single
-change left in this plan, and the file is now well past two thousand lines with
-four Lambdas deploying from it. A session that also carries an unrelated item
-will either leave the contract half-applied across the route chain, which is
-worse than not starting it, or drop the other item anyway.
+**A prompt for that session, when the build exists:**
 
-1. **6.1 — typed errors** *(~3h)*. Mirror `dashboard/server/index.mjs`'s
-   `{ error, code, problems? }` shape, which §1 already names as the reference
-   for this. Read that file before designing anything; the point is to converge
-   on a shape that exists, not to invent a second one.
+> Read PLAN.md, starting with §0. §0.3 has a block headed "▶ DIRECTIVE FOR
+> SESSION 10" — that is your work. §0.6 is the list of places the plan turned
+> out to be wrong; it is long now and worth reading before trusting anything
+> below §2, and §1's guardrails exist because sessions were repeatedly too
+> cautious with things the owner had already priced. Act freely against the live
+> stack.
+>
+> Everything is deployed and green as of session 9: all four Lambdas on
+> `g5qONOYbU4ugh+tztI+nkjknEDhhjaK1P0lADoeIWUk=`, seven migrations applied, 266
+> backend tests and 209 client tests passing, 373 locale keys. Session 9's work
+> (Phase 6, the error contract) is **uncommitted** in the working tree along
+> with `opus 5 vs 4.8.txt`, a scratch file excluded from every commit on
+> purpose; `main` is 8 ahead of `origin/main` at `40c82c0`. Do not commit or
+> push unless asked. Verify the repo with `git rev-list --count
+> origin/main..main` rather than believing that number, and the database with
+> `tish-migrate {"command":"status"}` rather than believing this paragraph.
+>
+> I have installed build N on a physical phone. Your job is to find out what
+> actually happens on it. There is a lot of machinery in this project that has
+> never been handed to an operating system, including a mechanism whose job is
+> to *delete* alarms. Work down §0.3's list, and when something disagrees with
+> the plan, write it into §0.6 rather than working around it.
+>
+> ⚠ EventBridge `tish-escalation-schedule` invokes `tish-escalate-dispatch`
+> every minute and sends notifications to real people. Kill switch:
+> `aws events disable-rule --name tish-escalation-schedule --region ap-east-2`.
+> Before touching AWS: `aws sts get-caller-identity`, and ask me to re-login
+> rather than working around a lapsed session.
 
-   Three things this codebase will make you decide, all of them recorded in §0.6
-   as existing behaviour that must survive:
-
-   - **404-not-403 is deliberate in three places** — `/relationships/respond`,
-     `/relationships/revoke`, and the reminder `PUT`s from 1.14. Ids are
-     sequential SERIALs and a 403 confirms a row exists. Whatever `code` those
-     get must not undo that by being more specific than the status.
-   - **`/me` and `/my-id` return 404 rather than 401** when a Cognito user has no
-     RDS row, because 401 invites the client to sign them out. A code that maps
-     to "session expired" would reintroduce exactly that.
-   - **4.6's validation already returns named-field 400s** and they are verified
-     live (§0.4). Those are `problems?` in the new shape — start there rather
-     than rewriting them.
-
-   The suite is the safety net worth using here: 255 backend tests assert status
-   codes and, in the places that matter, the parameters of the write. If the
-   contract change is done as a mechanical pass, they should stay green except
-   where the *body* shape is asserted, and each of those is a deliberate edit.
-
-2. **6.2 — codes to i18n keys** *(~2h)*. Client-side mapping, keys in **both**
-   locale files (`validate-translations` is at 344 keys and is CI-enforced).
-   Every message currently produced by comparing an error *string* becomes a
-   lookup on `code`. Grep for the places that read `data.error` and show it
-   directly — `managed-users.tsx`'s request dialog and `profile.tsx`'s
-   respond/revoke paths both do, and the second of those is new in session 8.
-
-   The unmapped-code path needs a decision rather than a default: a code the
-   client has never heard of must produce a real sentence, not a blank alert or
-   a raw identifier. That case is reachable on the *next* backend deploy after
-   any client build, permanently, because the two ship independently — build 8
-   is in TestFlight and client changes need a new build (§1).
-
-**Before you start:** `aws sts get-caller-identity`, and ask Robin to re-login if
-it has lapsed rather than working around it — it had lapsed at the start of
-session 8 and the answer took one message. **Before you believe anything in this
-document about the database:** `tish-migrate {"command":"status"}`; it should say
-seven applied, none pending. And note §0.6's ordering finding: for a *new*
-migration the runner has to be deployed before it can see the file, so the order
-is deploy-then-migrate, not the reverse.
-
-Fold in the three carried fixes listed above if there is room, but only if 6.1
-and 6.2 are both finished. They have waited five sessions and will wait another.
-
-**End session 9 by writing the session 10 directive**, in this same place and
-this same shape, replacing this block. Session 10 is **device verification**, and
-it **cannot start until Robin triggers a native rebuild** — so the directive
-should say so in its first line and should not be written as though the session
-can begin on demand.
-
-It is the session that finally exercises everything now waiting on one build:
-the three sounds (4.7a), the burst (4.7b), the Android channel (4.7e), exact
-alarms (5.2), the iOS interruption level (5.3), snooze firing (4.4), tray
+**What the session is for.** It finally exercises everything waiting on one
+build: the three sounds (4.7a), the burst (4.7b), the Android channel (4.7e),
+exact alarms (5.2), the iOS interruption level (5.3), snooze firing (4.4), tray
 dismissal (4.7c), token registration (5.8), 5.4's and 5.9's last hop to a real
 phone, 5.8's receipts poll reading an actual receipt, and **5.6's entire
-horizon** — which is the largest single unverified thing in the project, since no
-alarm written under the six-segment identifier scheme has ever been handed to an
-OS. Session 8 adds one more: `cancelAlarmsForOtherOwners` has never run against a
-real notification queue, and it is a mechanism whose job is to *delete* alarms.
+horizon** — the largest single unverified thing in the project, since no alarm
+written under the six-segment identifier scheme has ever been handed to an OS.
+
+**Do these three first, in this order, because each unblocks the next and
+because the third can destroy evidence.**
+
+1. **Register a real token** (5.8). `getExpoPushTokenAsync` cannot run on web or
+   a simulator, so *every* token this project has ever tested with was synthetic
+   and Expo answered all of them `DeviceNotRegistered`. That is why the reaping
+   path is well exercised and the delivery path is not exercised at all. Sign
+   in, then check `/debug/push_tokens` for a token that does **not** start with
+   the synthetic shape. Until this exists, nothing in 5.4, 5.9 or 5.8's receipts
+   can be verified.
+
+2. **Let one dose go unconfirmed** (5.4, 5.8, 5.9). §0.5 records the technique
+   and it is the only one that works: create a reminder timed a few minutes
+   ahead with the 5-minute minimum delay, then wait `delay + 2` minutes. The
+   phone should buzz. Then read `/debug/push_tickets` — **this is the first
+   chance in the project's history to see an `ok` ticket**, and an `ok` ticket
+   is the only thing that produces a receipt, which is the only thing that
+   exercises 5.8's delayed-failure path. Delete the fixture afterwards or it
+   escalates to a caregiver at the same time every day.
+
+3. **`cancelAlarmsForOtherOwners`** (3.2), and treat this one carefully. It runs
+   on the launch reconcile and it *deletes* alarms. It has never run against a
+   real notification queue. It is guarded twice — an empty allow-list is refused
+   outright, and an identifier with no owner segment is left alone — and §0.6
+   says why each guard is there. Verify the guards before verifying the feature:
+   sign in with no network (empty `/my-dependents`) and confirm the patient's
+   **own** alarms survive. The failure mode is wiping them, and on a real phone
+   the evidence is gone the moment it happens.
+
+**Then 5.6's horizon, which is the one worth budgeting real time for.** Schedule
+a reminder, background the app for two days without opening it, and see whether
+the alarm rings on day two. What a device settles that no test can: that
+`scheduleNotificationAsync` accepts a six-segment identifier at all, that iOS
+really keeps the ~60 pending alerts the budget projects rather than silently
+fewer, and that a burst member's cancel finds the day it fired rather than the
+whole week. If the identifier is rejected, **every alarm in the project stops
+working** and it will look like a scheduling bug rather than a string-length one
+— check that first if nothing rings.
+
+**Two screens that have never been seen by anybody**, and both are cheap once a
+signed-in session exists on a device: `profile.tsx`'s "who can see my records"
+section (3.2) and `managed-users.tsx`'s relationship-type chips (3.4). 4.2's
+attribution line and 4.6's delay presets are in the same position and have been
+for six sessions. **Session 9 adds one more**: 6.2's translated error messages
+render in alerts that only appear for a signed-in user, so no probe could see
+them. The cheapest check is the one the contract was built for — request access
+from an address that does not exist, and confirm the alert says so in the
+device's language rather than showing English or a blank box.
 
 Budget it as **at least** one session. Every time this project has verified
 something live rather than stopping at green tests, it has found a bug the suite
-could not see — 5.1's non-idempotent lookup, 5.4's Expo casing, and the two
-vacuous test assertions session 8 found while writing a third one.
+could not see — 5.1's non-idempotent lookup, 5.4's Expo casing, the two vacuous
+test assertions session 8 found while writing a third one, and session 9's
+catch-all quietly handing Postgres constraint messages to clients.
+
+**Three carried fixes are still carried**, and session 9 deliberately did not
+fold them in despite the previous directive's "if there is room". The room was
+not the constraint; the scope instruction was, and the anchor-date one needs a
+migration and a deploy, which is precisely the unrelated work that directive
+warned against carrying alongside a change touching every route. They are the
+snooze/escalation disagreement (decided, staying), `missedDoses`' cap of 20, and
+the anchor-date column for non-daily materialisation. Sixth session for the
+first two. **They are not device work and should not be smuggled into this
+session either** — they want a session of their own, or a genuinely idle hour.
+
+**End session 10 by writing the session 11 directive**, in this same place and
+this same shape, replacing this block.
 
 ---
 
@@ -395,6 +436,13 @@ Did not commit and did not deploy.
 
 ### 0.4 — State of the tree
 
+- **Session 9's work is uncommitted.** Phase 6 — `backend/index.mjs`,
+  `backend/index.test.mjs`, `utils/api-errors.ts` (new),
+  `utils/api-errors.test.ts` (new), both locale files and seven screens — sits
+  in the working tree. Nothing asked for a commit and §1's rule is standing, so
+  it was not made. `main` is unchanged at `40c82c0`, **8 ahead of
+  `origin/main`**, confirmed by `git rev-list --count origin/main..main` rather
+  than by reading this line.
 - **Sessions 1–8 are committed on `main` and nothing has been pushed.**
   `e7c3cf1` (phases 1–5, the migration mechanism, server escalation), `a1454c8`
   (5.6's policy half plus the session-5 handoff), `97d8d5b` (5.6's wiring, 5.9,
@@ -415,7 +463,7 @@ Did not commit and did not deploy.
   Worth knowing before a commit appears to hang: it is running 255 tests, not
   stuck.
 - **⚠ There is now a scheduled job running unattended.** EventBridge rule
-  `tish-escalation-schedule`, `rate(5 minutes)`, ENABLED, targeting
+  `tish-escalation-schedule`, `rate(1 minute)`, ENABLED, targeting
   `tish-escalate-dispatch`. This is the first thing in the project that acts
   without anyone triggering it, and it is the thing that sends notifications to
   people. Disable with
@@ -508,6 +556,45 @@ through the gateway (§0.6):
 The probe reminder and the synthetic token were both removed afterwards.
 `/debug/medication_reminders` is back to one row: session 3's fixture, reminder 1,
 200mg at 08:00 and 20:00, escalation enabled. **Leave it.**
+
+**Session 9 probes, 2026-08-01**, all by direct `aws lambda invoke`. The whole
+point of 6.1 is a contract, so it was probed as one: **every code a user can
+cause, checked against the status the registry pairs it with.**
+
+| Probe | Result |
+|---|---|
+| deploy of all four Lambdas | all `g5qONOYbU4ugh+tztI+nkjknEDhhjaK1P0lADoeIWUk=`, matching the uploaded zip |
+| no auth | **401** `AUTH_REQUIRED` |
+| unknown route | **404** `ROUTE_NOT_FOUND`, still naming the path |
+| `/debug/secrets` | **400** `DEBUG_TABLE_NOT_ALLOWED` |
+| `/me` and `/my-id`, authenticated sub with no RDS row | **404** `PROFILE_NOT_FOUND` on both — **not 401**, which is the decision §0.6 records |
+| `GET /push-tokens` | **405** `METHOD_NOT_ALLOWED` |
+| user 2 reading user 1 with no grant | **403** `ACCESS_DENIED`, message unchanged |
+| `PUT` a nonexistent reminder id | **404** `REMINDER_NOT_FOUND` |
+| `PUT` with three bad escalation fields | **400** `VALIDATION_FAILED`, `problems` naming all three: `escalation_delay_minutes`, `alarm_repeat_count`, `escalation_order` — 4.6's live validation, now carrying codes |
+| `PUT /meal-times` with two bad times | **400**, one problem per column (`breakfast_time`, `dinner_time`), not one sentence listing them |
+| `POST /medication-doses` with no `reminder_id` | **400**, `problems: [reminder_id:FIELD_REQUIRED]` |
+| request access from an address nobody has | **404** `RELATIONSHIP_TARGET_NOT_FOUND` — **was a 500 carrying `Agent not found`** |
+| request access already held (the live fixture) | **409** `RELATIONSHIP_ALREADY_ACTIVE`, and the row is untouched — the upsert's `status <> 'active'` guard makes this a safe probe |
+| revoke an id that is not the caller's | **404** `RELATIONSHIP_NOT_FOUND` |
+| respond to a request that is not pending | **404** `RELATIONSHIP_REQUEST_NOT_FOUND` |
+| **wrong handshake code on a real pending row** | **403** `VERIFICATION_CODE_MISMATCH`, `"That verification code does not match."` — **was a 500 carrying `Security Mismatch`** |
+| **`PUT` with `frequency_days: "not-a-number"`** | **500** `{"error":"Internal error","code":"INTERNAL_ERROR"}` — Postgres answered `invalid input syntax for type integer`, and **none of it reached the response** |
+| `tish-migrate {"command":"status"}` | none pending, none orphaned; `/debug/schema_migrations` reports **seven** |
+| dispatcher, after the deploy | **200**, `errors: []` — the two escalation halves still agree about their private protocol |
+
+**The last two error probes are the ones worth reading.** The wrong-code case
+needed a *pending* row, which the live fixture does not contain, so one was
+built in the opposite direction (user 2 requesting access to user 1), used, and
+unlinked again — the existing caregiver 1 → dependent 2 relationship was never
+touched. And the `frequency_days` probe is the only way to see the leak fix from
+outside: it is a genuine unexpected fault, and before 6.1 the driver's message
+was the response body.
+
+**The fixture is exactly as it was**: one relationship, caregiver 1 → dependent
+2, `active`, `revoked_at` null; reminder 1 with its doses (17 now rather than
+session 8's 15 — the rolling window has topped up across a day, which is
+materialisation working). **Leave them.**
 
 **Session 8 probes, 2026-08-01.** `/debug/*` over the public gateway needs no
 credentials, which is how the live schema was read *before* `aws login` had been
@@ -687,6 +774,32 @@ user-facing copy by design, because it is silent.
 through `npx expo config --type introspect` alongside the `audio` mode that was
 already there. **It has no effect until the native rebuild.**
 
+**End of session 9**: **266/266 backend tests** (255 → 266: 11 for the error
+contract — the registry's own shape, the two guard tests named below, 4.6's
+problems array, `/meal-times`' per-column problems, the sweep across seven
+routes, and `errorBody` omitting an empty `problems`; **one existing assertion
+was deliberately changed** — the wrong-handshake-code test, which asserted the
+500 and the literal string `Security Mismatch` that 6.1 exists to remove),
+**209/209 client** (194 → 209, all for `utils/api-errors.ts`), `npx tsc
+--noEmit` clean, `npx eslint .` 0 errors / **40** warnings — the same 40 as
+session 8, none new — and `npm run validate-translations` at **373 keys**
+(344 + 6.2's 29). The app exports for web with no resolution error.
+
+Three new tests were mutation-checked rather than trusted, and the third is the
+one that mattered. Flipping `RELATIONSHIP_REQUEST_NOT_FOUND` to a 403 fails
+**5** tests, four of them pre-existing 3.1/3.2 security assertions — the
+disclosure decision was already better defended than expected. Pointing `/me`
+at `AUTH_REQUIRED` fails **4**, including `THE PROFILE ROUTES`. But restoring
+the old `err.message` echo in the catch-all fails **exactly one**: the new
+`THE LEAK`. Nothing in 255 tests had ever defended against the server handing
+its driver's prose to a client, because the suite asserted status codes and the
+body only where a route's own message was the point.
+
+A fourth mutation was checked against `tsc` rather than the suite, because it is
+where 6.2's real guarantee lives: changing one key in `api-errors.ts` to a name
+absent from both locale files **is a compile error** — see §0.6 for where it
+surfaces, which is not where you would look.
+
 **End of session 8**: **255/255 backend tests** (227 → 255: 6 for migration
 007's columns and both CHECK constraints, 19 for 3.2's routes and the drain's new
 reason; no existing assertion renumbered, and **two pre-existing ones were
@@ -853,6 +966,76 @@ Phase 1 (all 18, not the 12 in the original table — 1.13–1.18 were added by 
 second review pass), 2.1, 4.8, then 4.1+4.5 from §11. Corrected `MIGRATION.md`
 D6, three of whose four entries were stale. Ended at a clean boundary with the
 Phase 4 foundation in place. Did not commit, deploy, or migrate.
+
+**Session 9 — 2026-08-01.** One item in two halves: **6.1 and 6.2**, the error
+contract, exactly as the directive scoped it and nothing else.
+
+**The reference the plan names does not have the shape the plan attributes to
+it**, which was the first thing to settle and is in §0.6. §9 and the directive
+both say to mirror `dashboard/server/index.mjs`'s `{ error, code, problems? }`
+and to "converge on a shape that exists rather than invent a second one". That
+file returns `{ error }`, and on exactly one route `{ error, problems }` — there
+is no `code` anywhere in it, and its `problems` are English sentences. Both
+gaps are the same gap: a shape with no code cannot be translated, and neither
+can an English sentence, so converging exactly would have shipped 6.1 without
+the one thing 6.2 consumes. Followed where it leads and diverged where it does
+not, with the reasons written at the site.
+
+6.1 itself went as a mechanical pass should: 36 error sites, one `fail(code)`
+line each, and **255 tests stayed green except one**, which is the number the
+directive predicted. The single failure was the wrong-handshake-code assertion,
+which pinned the 500 and the string `Security Mismatch` that the item exists to
+remove.
+
+**The status lives in the registry rather than at the call site, and that was
+the one real design decision.** The directive's warning is that a code must not
+be "more specific than the status" and undo §3.1's 404-not-403 choice. Scattering
+`statusCode = 404` next to each code would have left the pairing implicit at
+twenty sites; one table pairs them once, with the three disclosure decisions
+written together above it, and a mutation confirms the suite notices when the
+pairing is broken.
+
+**And the pass found something nobody had listed.** The old catch-all was
+`body = { error: err.message }` for anything that was not the literal string
+"Access Denied" — so an unexpected fault handed the client whatever prose had
+been thrown, *including a raw Postgres constraint message*. 255 tests could not
+see it because they assert status codes; the 500 was correct and the body was
+never checked. There is now a test named `THE LEAK`, it is the only one of the
+266 that catches the regression, and the fix is what
+`dashboard/server/index.mjs` has always done: detail to CloudWatch, a code to
+the client. Confirmed live with a non-numeric `frequency_days`.
+
+6.2's only genuine decision was the one the directive flagged: what to do with a
+code the client has never heard of. **Keyed on the HTTP status, never on the
+code** — the client always has a status, so an unknown code still produces a
+real sentence, and a 404 can never be routed to session-expired copy no matter
+what future code arrives on it. That is what keeps `/me`'s recovery decision
+intact against a backend that ships independently, which it does and always
+will. §0.6 has the ladder.
+
+Kept the mapping dependency-free for the reason sessions 3, 4 and 8 did, and it
+paid the same way: 15 tests over rules that all fail *silently* — a wrong answer
+here is a user reading nothing, or reading English. It also turned out to be
+compile-time-checked against both locale files, which was not the plan but is
+better than it; §0.6 records where that error surfaces, because it is not where
+anyone would look for it.
+
+Deployed all four Lambdas, then probed every code a user can cause — seventeen
+of them, all matching, including the two that changed status and the leak. Did
+not commit, did not migrate (Phase 6 touches no schema), and deliberately left
+the three carried fixes carried: the directive allowed them "if there is room",
+and the room was never the constraint — the anchor-date one needs a migration
+and a deploy, which is the unrelated work the same directive warned against
+carrying alongside a change touching every route.
+
+Corrected two stale facts in this document along the way, both checked against
+the thing itself rather than against another paragraph: §0.4 still described the
+EventBridge rule as `rate(5 minutes)` three sessions after session 7 tightened
+it — `describe-rule` says `rate(1 minute)`, ENABLED, and §0.3 had it right, so
+the two sections had been contradicting each other about the one mechanism here
+that notifies people unattended. And the session 9 directive's claim that
+`index.mjs` is "well past two thousand lines" was off by four hundred; §0.6 has
+why that is worth filing even though it changed no decision.
 
 **Session 5 — 2026-07-31.** Cleared §0.7 item 2, then built **5.4** with 5.8's
 send half inside it.
@@ -2054,6 +2237,100 @@ revocation columns. The fixture was restored afterwards. Did not commit.
   of user ids, is a coin flip on whether a patient's own alarms survive an
   upgrade. `ownerOfIdentifier` returns `null` for anything under four segments,
   and there is a test named for it.
+
+- **⚠ The error shape §9 tells you to mirror does not exist in the file it names.**
+  Both §9 and the session 9 directive say to mirror `dashboard/server/index.mjs`'s
+  `{ error, code, problems? }`, and the directive adds "the point is to converge
+  on a shape that exists, not to invent a second one". That file returns
+  `{ error }` on every failure and `{ error, problems }` on exactly one route.
+  **There is no `code` in it anywhere**, and its `problems` are English
+  sentences (`Missing in zh-Hant: "foo"`).
+
+  Both absences matter for the same reason and it is the reason 6.2 exists: a
+  body with no code cannot be translated, because there is nothing to key a
+  lookup off — which is the sentence §9 itself uses to justify the whole phase.
+  Converging exactly would have shipped 6.1 without the one thing 6.2 consumes.
+
+  So 6.1 adds `code`, and makes `problems` entries `{ field, code, message }`
+  rather than sentences. The `message` is kept as the English default because a
+  probe, a log line and the admin dashboard all read the response directly and
+  none of them have locale files. **The reference is still the reference** for
+  everything it does have — numeric statuses, `problems` as the field-error
+  channel, and detail-to-CloudWatch on a 500, which was the finding below.
+- **⚠ The catch-all put `err.message` in the response body, so an unexpected
+  fault answered with raw Postgres prose — and 255 tests could not see it.**
+  `statusCode = err.message === "Access Denied" ? 403 : 500; body = { error:
+  err.message }`. Anything that was not that one literal string became a 500
+  carrying whatever had been thrown, and the realistic thrower is node-postgres:
+  a bad cast on a write returns `invalid input syntax for type integer: "abc"`,
+  a constraint violation returns the constraint's name. Text nobody wrote, in
+  one language, that no client could translate or act on — the exact defect §9
+  describes, one level deeper than §9 describes it.
+
+  Invisible to the suite for a specific and generalisable reason: **the tests
+  assert status codes, and the 500 was correct.** The body was only ever checked
+  where a route's own message was the point of the test. `THE LEAK` is now the
+  only one of 266 tests that catches it, confirmed by mutation, and confirmed
+  live with `frequency_days: "not-a-number"`.
+- **The status must be a property of the code, not of the call site.** The
+  directive's warning was that a code "must not be more specific than the
+  status" and so undo §3.1's 404-not-403 decision. The obvious implementation —
+  leave `statusCode = 404` where it is and add a code beside it — spreads that
+  pairing across twenty sites where nothing relates them, and the decision is
+  invisible at nineteen of them.
+
+  `ERRORS` pairs them once, with the three disclosure decisions documented
+  together above the table, and `fail(code)` reads the status back out. A
+  mutation flipping `RELATIONSHIP_REQUEST_NOT_FOUND` to 403 fails five tests,
+  **four of which are pre-existing 3.1 and 3.2 security assertions** — the
+  decision was already better defended than the directive implied, and the
+  registry means a future edit meets that defence rather than sidestepping it.
+- **⚠ An unmapped error code must fall back to the *status*, never to the code,
+  and never to nothing.** 6.2's open question, and the directive was right that
+  it needs a decision rather than a default. Meeting an unknown code is not an
+  edge case: the backend and the client ship independently — build 8 is in
+  TestFlight and a client change needs a rebuild — so **the first backend deploy
+  after any client build guarantees it**, permanently.
+
+  A blank alert and a raw identifier are both refused for the obvious reason.
+  What is less obvious is that the fallback cannot be *code*-shaped at all: the
+  natural "unknown code → generic failure" still loses the one piece of
+  information the client always has. The status is that piece. So the ladder is
+  problems → code → **status class** → network, and every rung produces a real
+  sentence.
+
+  **The status-only rung is also what preserves the `/me` decision against a
+  backend nobody has seen yet.** §0.6 records that `/me` answers 404 rather than
+  401 because 401 invites a client to sign a half-registered user out. A 404
+  carrying some future code lands on `errors.notFound` — "we couldn't find what
+  you were looking for" — and there is no path by which any 404 reaches
+  session-expired copy. There is a test named `THE RECOVERY` for exactly that.
+- **The client's code-to-key map is compile-time-checked against both locale
+  files, and the error appears somewhere you would not look.** `ApiErrorKey` is
+  a literal union built from the map's values, and `t` is typed against
+  `typeof en` — so a key that exists in neither locale file is a `tsc` error.
+  But it is **not** reported in `api-errors.ts`: that module never calls `t`, it
+  only returns keys. The error surfaces at the *call sites*, as
+  `Argument of type 'TFunction' is not assignable to parameter of type
+  '(key: ApiErrorKey) => string'` in `appointment-form.tsx` and six others — a
+  message that names the injected translate function and not the typo.
+
+  Verified by mutation rather than assumed. Worth knowing before chasing a
+  bewildering type error in a screen that was not edited: **the typo is in the
+  map, and the screens are only where it is noticed.** The mechanism is the same
+  one §0.6 credits for making a missing key a `tsc` error at all; injecting `t`
+  rather than importing i18next is what keeps the module testable *and* keeps
+  that check.
+- **`backend/index.mjs` was 1629 lines, not "well past two thousand", and the
+  directive used the number as an argument.** The session 9 directive justified
+  its scope instruction partly on the file's size. The 2000-plus figure fits
+  `index.test.mjs` (1927) or the pair of them, not the file the change was
+  about. **The instruction was right anyway and for the better reason it also
+  gave** — the change touches every route in the chain, which is what makes a
+  half-applied contract worse than none — so nothing was decided wrongly. Filed
+  because it is the same family as the ahead-count and the phantom branch: a
+  number carried into an argument without being re-measured. `wc -l` costs
+  nothing.
 
 ### 0.7 — Blocked on you
 

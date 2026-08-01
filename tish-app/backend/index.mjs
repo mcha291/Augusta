@@ -574,6 +574,134 @@ async function clearFutureDoses(reminderId) {
     return res.rowCount;
 }
 
+// --- 6.1 the error contract -------------------------------------------------
+
+/**
+ * Every failure this API can report, as a stable code paired with the status it
+ * is always sent with.
+ *
+ * **What this replaces.** The entire taxonomy used to be one line at the bottom
+ * of the handler — `err.message === "Access Denied" ? 403 : 500` — so a route
+ * that meant "you gave me the wrong verification code" returned a 500 carrying
+ * the English string `Security Mismatch`. The app ships en and zh-Hant, and a
+ * message with no code attached to it cannot be translated: there is nothing to
+ * key a lookup off. That is what 6.2 consumes.
+ *
+ * **The status lives here rather than at the call site, and that is the point.**
+ * Three of these codes are 404s where a 403 would read more naturally, and each
+ * is a deliberate decision that a later mechanical "fix" would undo:
+ *
+ * - `RELATIONSHIP_NOT_FOUND` / `RELATIONSHIP_REQUEST_NOT_FOUND` — ids are
+ *   sequential SERIALs, so answering 403 on someone else's row confirms that
+ *   the row exists. §3.1 chose 404 for that reason and 3.2 followed it.
+ * - `REMINDER_NOT_FOUND` — same reasoning, from 1.14.
+ * - `PROFILE_NOT_FOUND` — a Cognito user with no RDS row is **authenticated**;
+ *   the profile simply is not built yet. 401 would invite the client to sign
+ *   them out, which is the opposite of the intended recovery. It is a separate
+ *   code from `USER_NOT_FOUND` for exactly this reason: that one means *the
+ *   person you asked about* does not exist, and the two want different copy and
+ *   different client behaviour.
+ *
+ * Pairing each code with its status in one table is what stops a future edit
+ * emitting `RELATIONSHIP_NOT_FOUND` with a 403 and quietly reversing the
+ * decision. The `message` is the developer-facing default and is **not** what a
+ * user reads — 6.2 renders `code` through the locale files.
+ */
+export const ERRORS = Object.freeze({
+    // 400 — the caller sent something this API cannot act on. Field-level
+    // detail rides in `problems`, never in prose the client would have to parse.
+    VALIDATION_FAILED: { status: 400, message: 'Some fields need attention.' },
+    DEBUG_TABLE_NOT_ALLOWED: { status: 400, message: 'That table is restricted or does not exist.' },
+
+    // 401 — no verified Cognito subject on the request at all.
+    AUTH_REQUIRED: { status: 401, message: 'Sign-in required.' },
+
+    // 403 — authenticated, and still not allowed.
+    ACCESS_DENIED: { status: 403, message: 'Access Denied' },
+    // 403 rather than 404, and it does not contradict the rule above: the row
+    // was already found *and* scoped to this caller as the dependent, so the
+    // existence of their own pending request is not news to them. The only
+    // thing being refused is a wrong code.
+    VERIFICATION_CODE_MISMATCH: { status: 403, message: 'That verification code does not match.' },
+
+    // 404
+    PROFILE_NOT_FOUND: { status: 404, message: 'User not found' },
+    USER_NOT_FOUND: { status: 404, message: 'User not found' },
+    REMINDER_NOT_FOUND: { status: 404, message: 'Reminder not found' },
+    APPOINTMENT_NOT_FOUND: { status: 404, message: 'Appointment not found' },
+    TEST_RESULT_NOT_FOUND: { status: 404, message: 'Test result not found' },
+    DOSE_NOT_FOUND: { status: 404, message: 'No matching dose to record.' },
+    RELATIONSHIP_NOT_FOUND: { status: 404, message: 'Relationship not found' },
+    RELATIONSHIP_REQUEST_NOT_FOUND: { status: 404, message: 'Relationship request not found' },
+    RELATIONSHIP_TARGET_NOT_FOUND: { status: 404, message: 'No account matches that email or username.' },
+    ROUTE_NOT_FOUND: { status: 404, message: 'Not found' },
+
+    // 405
+    METHOD_NOT_ALLOWED: { status: 405, message: 'That method is not supported on this route.' },
+
+    // 409 — the request was well-formed and the world disagrees with it.
+    RELATIONSHIP_ALREADY_ACTIVE: { status: 409, message: 'Access to this account has already been granted.' },
+    DOSE_ALREADY_CONFIRMED: { status: 409, message: 'That dose has already been confirmed.' },
+
+    // 500
+    INTERNAL_ERROR: { status: 500, message: 'Internal error' },
+});
+
+/**
+ * Codes for a single bad field, carried in `problems[].code`.
+ *
+ * Separate from `ERRORS` because they are not statuses — every one of them
+ * arrives inside a `VALIDATION_FAILED` 400. Each is specific enough that the
+ * translated sentence can state the bounds, which is why there is one per rule
+ * rather than a generic `OUT_OF_RANGE` plus interpolated numbers: keeping the
+ * limits in the locale string means the wire format carries no parameters the
+ * two sides have to agree about.
+ */
+export const PROBLEM_CODES = Object.freeze({
+    FIELD_REQUIRED: 'FIELD_REQUIRED',
+    EMAIL_OR_PHONE_REQUIRED: 'EMAIL_OR_PHONE_REQUIRED',
+    ESCALATION_DELAY_OUT_OF_RANGE: 'ESCALATION_DELAY_OUT_OF_RANGE',
+    ALARM_REPEAT_COUNT_OUT_OF_RANGE: 'ALARM_REPEAT_COUNT_OUT_OF_RANGE',
+    ESCALATION_ORDER_INVALID: 'ESCALATION_ORDER_INVALID',
+    TIME_FORMAT_INVALID: 'TIME_FORMAT_INVALID',
+});
+
+/**
+ * A failure raised from somewhere that cannot assign to the handler's locals —
+ * `checkAccess`, or a lookup nested inside a branch.
+ *
+ * The alternative was to keep throwing bare `Error`s and to keep recognising
+ * them by their message at the bottom, which is the thing 6.1 exists to remove:
+ * `"Access Denied"` as a *string* is a taxonomy that any typo silently widens
+ * to a 500.
+ */
+export class ApiError extends Error {
+    constructor(code, detail = {}) {
+        super(ERRORS[code]?.message ?? code);
+        this.name = 'ApiError';
+        this.code = code;
+        this.detail = detail;
+    }
+}
+
+/**
+ * The response body for a failure: `{ error, code, problems? }`.
+ *
+ * Mirrors `dashboard/server/index.mjs`, which §1 names as the reference for
+ * this — with one addition and one narrowing, both deliberate. The addition is
+ * `code`, which the reference does not have at all (it returns `{ error }` and,
+ * on one route, `{ error, problems }`); a shape with no code cannot be
+ * translated, so converging on it exactly would have shipped 6.1 without the
+ * thing 6.2 needs. The narrowing is that `problems` entries are objects rather
+ * than the reference's English sentences, for the same reason.
+ */
+export function errorBody(code, { message, problems } = {}) {
+    const spec = ERRORS[code] ?? ERRORS.INTERNAL_ERROR;
+    const out = { error: message ?? spec.message, code };
+    if (Array.isArray(problems) && problems.length > 0) out.problems = problems;
+    return out;
+}
+
 export const handler = async (event) => {
 
 
@@ -602,6 +730,16 @@ export const handler = async (event) => {
     // string form, but nothing else in the stack does.
     let statusCode = 200;
 
+    /**
+     * Answer with a typed failure. One line per site, and the status comes from
+     * `ERRORS` rather than from the call site so a code cannot drift away from
+     * the status it was reasoned about with — see the 404-not-403 notes there.
+     */
+    const fail = (code, detail) => {
+        statusCode = (ERRORS[code] ?? ERRORS.INTERNAL_ERROR).status;
+        body = errorBody(code, detail);
+    };
+
     try {
         // --- 1. AUTH EXTRACTION ---
         const claims = event.requestContext?.authorizer?.claims || event.requestContext?.authorizer?.jwt?.claims;
@@ -618,6 +756,11 @@ export const handler = async (event) => {
             if (requesterId === targetUserId) return true;
             const res = await pool.query('SELECT 1 FROM user_relationships WHERE caregiver_id = $1 AND dependent_id = $2 AND status = $3', [requesterId, targetUserId, 'active']);
             return res.rows.length > 0;
+        };
+
+        /** `checkAccess` or stop. Every scoped route opened with this pair. */
+        const requireAccess = async (requesterId, targetUserId) => {
+            if (!(await checkAccess(requesterId, targetUserId))) throw new ApiError('ACCESS_DENIED');
         };
 
         // --- 2. THE ROUTE CHAIN ---
@@ -670,18 +813,25 @@ export const handler = async (event) => {
                 body = { message: `Removed ${removed.rowCount} relationship(s).` };
             }
             else if (!caregiverId || !dependentId) {
-                statusCode = 400;
-                body = {
-                    error: "Pass ?caregiver=<userId>&dependent=<userId>. Both must be positive integers. /debug/unlink also accepts ?all=1.",
-                    hint: "User ids come from /debug/users — they are the RDS `id`, not the Cognito sub.",
-                };
+                // A developer-facing route, so the message stays specific
+                // rather than being reduced to a code the client would translate
+                // — nothing in the app ever calls this.
+                fail('VALIDATION_FAILED', {
+                    message: "Pass ?caregiver=<userId>&dependent=<userId>. Both must be positive integers. /debug/unlink also accepts ?all=1. User ids come from /debug/users — they are the RDS `id`, not the Cognito sub.",
+                    problems: [
+                        { field: 'caregiver', code: PROBLEM_CODES.FIELD_REQUIRED },
+                        { field: 'dependent', code: PROBLEM_CODES.FIELD_REQUIRED },
+                    ],
+                });
             }
             else if (caregiverId === dependentId) {
                 // checkAccess already returns true when requester === target, so
                 // a self-link changes nothing and would only sit in the table
                 // looking like a real relationship.
-                statusCode = 400;
-                body = { error: "A user cannot be their own caregiver." };
+                fail('VALIDATION_FAILED', {
+                    message: "A user cannot be their own caregiver.",
+                    problems: [{ field: 'dependent', code: PROBLEM_CODES.FIELD_REQUIRED }],
+                });
             }
             else if (path === "/debug/unlink") {
                 const removed = await pool.query(
@@ -689,8 +839,7 @@ export const handler = async (event) => {
                     [caregiverId, dependentId]
                 );
                 if (removed.rowCount === 0) {
-                    statusCode = 404;
-                    body = { error: "No such relationship." };
+                    fail('RELATIONSHIP_NOT_FOUND', { message: "No such relationship." });
                 } else {
                     body = { message: "Unlinked.", caregiver_id: caregiverId, dependent_id: dependentId };
                 }
@@ -705,8 +854,7 @@ export const handler = async (event) => {
                 const missing = [caregiverId, dependentId].filter((id) => !ids.includes(id));
 
                 if (missing.length > 0) {
-                    statusCode = 404;
-                    body = { error: `No user with id ${missing.join(' or ')}.` };
+                    fail('USER_NOT_FOUND', { message: `No user with id ${missing.join(' or ')}.` });
                 } else {
                     // Idempotent, and it re-activates rather than failing: a
                     // pending row left over from a real pairing attempt is the
@@ -780,8 +928,7 @@ export const handler = async (event) => {
             ];
 
             if (!allowedTables.includes(tableName)) {
-                statusCode = 400;
-                body = { error: `Table '${tableName}' is restricted or does not exist.` };
+                fail('DEBUG_TABLE_NOT_ALLOWED', { message: `Table '${tableName}' is restricted or does not exist.` });
             } else {
                 // 4. Execution: Since the table name is verified against the whitelist, 
                 // it is now safe to use string interpolation.
@@ -807,16 +954,20 @@ export const handler = async (event) => {
                 const name = typeof payload?.name === 'string' ? payload.name.trim() : '';
                 const dosage = typeof payload?.default_dosage === 'string' ? payload.default_dosage.trim() : '';
                 if (!name || !dosage) {
-                    statusCode = 400;
-                    body = { error: "name and default_dosage are required." };
+                    fail('VALIDATION_FAILED', {
+                        message: "name and default_dosage are required.",
+                        problems: [
+                            ...(name ? [] : [{ field: 'name', code: PROBLEM_CODES.FIELD_REQUIRED }]),
+                            ...(dosage ? [] : [{ field: 'default_dosage', code: PROBLEM_CODES.FIELD_REQUIRED }]),
+                        ],
+                    });
                 } else {
                     const q = `INSERT INTO medication_library (name, default_dosage) VALUES ($1, $2) RETURNING *`;
                     statusCode = 201;
                     body = (await pool.query(q, [name, dosage])).rows[0];
                 }
             } else {
-                statusCode = 405;
-                body = { error: `Method ${method} not allowed on ${path}.` };
+                fail('METHOD_NOT_ALLOWED', { message: `Method ${method} not allowed on ${path}.` });
             }
         }
         else if (path === "/test-config") { body = (await pool.query('SELECT * FROM test_config ORDER BY field_number ASC')).rows; }
@@ -826,8 +977,10 @@ export const handler = async (event) => {
             const phone = queryParams.phone_number ? queryParams.phone_number.trim() : null;
         
             if (!email && !phone) {
-                statusCode = 400;
-                body = { error: "Email or phone number must be provided." };
+                fail('VALIDATION_FAILED', {
+                    message: "Email or phone number must be provided.",
+                    problems: [{ field: 'email', code: PROBLEM_CODES.EMAIL_OR_PHONE_REQUIRED }],
+                });
             } else {
                 // Query to check if either field is already taken
                 const res = await pool.query(
@@ -859,8 +1012,7 @@ export const handler = async (event) => {
             // unguarded turned a tokenless call into a TypeError and a 500,
             // when the honest answer is 401.
             if (!cognitoSub) {
-                statusCode = 401;
-                body = { error: `Cognito: login required (${path})` };
+                fail('AUTH_REQUIRED', { message: `Cognito: login required (${path})` });
             } else {
                 const { username, full_name, birth_date, gender_id, condition_id, phone_number, role } = payload ?? {};
 
@@ -894,7 +1046,7 @@ export const handler = async (event) => {
 
         // --- PROTECTED DATA ---
         else if (!cognitoSub) {
-            statusCode = 401; body = { error: `Cognito: login required (${path})` };
+            fail('AUTH_REQUIRED', { message: `Cognito: login required (${path})` });
         }
 
         else if (path === "/my-id") {
@@ -902,7 +1054,7 @@ export const handler = async (event) => {
             // serialises to an empty body with a 200, the same failure shape
             // as /me below.
             const id = await getUserId(cognitoSub);
-            if (id === undefined) { statusCode = 404; body = { error: "User not found" }; }
+            if (id === undefined) fail('PROFILE_NOT_FOUND');
             else body = { id };
         }
 
@@ -923,8 +1075,7 @@ export const handler = async (event) => {
             // just doesn't exist yet. 401 would invite a client to sign them
             // out, which is the opposite of the recovery we want.
             if (res.rows.length === 0) {
-                statusCode = 404;
-                body = { error: "User not found" };
+                fail('PROFILE_NOT_FOUND');
             } else {
                 body = res.rows[0];
             }
@@ -941,7 +1092,11 @@ export const handler = async (event) => {
         else if (path === "/relationships/request") {
             const userId = await getUserId(cognitoSub);
             const target = await pool.query('SELECT id FROM users WHERE email = $1 OR username = $1', [payload.dependent_email]);
-            if (target.rows.length === 0) throw new Error("Agent not found");
+            // Was a bare throw, so it left here as a **500** carrying the
+            // string "Agent not found" — an internal codename for a condition
+            // the user causes by mistyping an email. 404 is the honest status
+            // and the code is what lets the client say so in either language.
+            if (target.rows.length === 0) throw new ApiError('RELATIONSHIP_TARGET_NOT_FOUND');
             const code = "TISH-" + Math.floor(100 + Math.random() * 899);
 
             // **An upsert since 3.2, and that is a consequence of revocation
@@ -981,8 +1136,7 @@ export const handler = async (event) => {
                 // is already active. Reported rather than swallowed, because
                 // returning a handshake code the dependent will never be asked
                 // for is the silent-failure shape Phase 1 exists to remove.
-                statusCode = 409;
-                body = { error: "Access to this account has already been granted." };
+                fail('RELATIONSHIP_ALREADY_ACTIVE');
             } else {
                 body = { handshakeCode: code };
             }
@@ -1054,8 +1208,10 @@ export const handler = async (event) => {
             const relationshipId = Number(payload?.relationship_id);
 
             if (!Number.isInteger(relationshipId)) {
-                statusCode = 400;
-                body = { error: "relationship_id is required." };
+                fail('VALIDATION_FAILED', {
+                    message: "relationship_id is required.",
+                    problems: [{ field: 'relationship_id', code: PROBLEM_CODES.FIELD_REQUIRED }],
+                });
             } else {
                 const revoked = await pool.query(`
                     UPDATE user_relationships
@@ -1084,8 +1240,7 @@ export const handler = async (event) => {
                     if (existing.rowCount > 0) {
                         body = { message: "Access already revoked." };
                     } else {
-                        statusCode = 404;
-                        body = { error: "Relationship not found" };
+                        fail('RELATIONSHIP_NOT_FOUND');
                     }
                 } else {
                     const { caregiver_id: caregiverId } = revoked.rows[0];
@@ -1166,15 +1321,21 @@ export const handler = async (event) => {
             // revoked one destroys the record that access was ever held.
             if (action === 'active') {
                 const check = await pool.query("SELECT verification_code FROM user_relationships WHERE id = $1 AND dependent_id = $2 AND status = 'pending'", [request_id, userId]);
-                if (check.rows.length === 0) { statusCode = 404; body = { error: "Relationship request not found" }; }
-                else if (check.rows[0].verification_code !== provided_code) throw new Error("Security Mismatch");
+                if (check.rows.length === 0) { fail('RELATIONSHIP_REQUEST_NOT_FOUND'); }
+                // Was a 500 carrying "Security Mismatch". 403 rather than the
+                // 404 above, and the two sit one line apart on purpose: by this
+                // point the row has been found *and* scoped to this caller as
+                // the dependent, so admitting it exists tells them nothing they
+                // did not already know. The 404 above is the disclosure-shaped
+                // case; this one is not.
+                else if (check.rows[0].verification_code !== provided_code) throw new ApiError('VERIFICATION_CODE_MISMATCH');
                 else {
                     await pool.query("UPDATE user_relationships SET status = $1 WHERE id = $2 AND dependent_id = $3 AND status = 'pending'", ['active', request_id, userId]);
                     body = { message: "Granted" };
                 }
             } else {
                 const denied = await pool.query("DELETE FROM user_relationships WHERE id = $1 AND dependent_id = $2 AND status = 'pending' RETURNING id", [request_id, userId]);
-                if (denied.rows.length === 0) { statusCode = 404; body = { error: "Relationship request not found" }; }
+                if (denied.rows.length === 0) { fail('RELATIONSHIP_REQUEST_NOT_FOUND'); }
                 else body = { message: "Denied" };
             }
         }
@@ -1186,14 +1347,14 @@ export const handler = async (event) => {
         else if (path === "/meal-times") {
             const userId = await getUserId(cognitoSub);
             const targetId = queryParams.user_id ? parseInt(queryParams.user_id) : userId;
-            if (!(await checkAccess(userId, targetId))) throw new Error("Access Denied");
+            await requireAccess(userId, targetId);
 
             const MEAL_COLUMNS = ['breakfast_time', 'lunch_time', 'dinner_time', 'bedtime_time'];
             const SELECT_MEALS = `SELECT ${MEAL_COLUMNS.join(', ')} FROM users WHERE id = $1`;
 
             if (method === 'GET') {
                 const res = await pool.query(SELECT_MEALS, [targetId]);
-                if (res.rows.length === 0) { statusCode = 404; body = { error: "User not found" }; }
+                if (res.rows.length === 0) { fail('USER_NOT_FOUND'); }
                 else body = res.rows[0];
             } else if (method === 'PUT') {
                 // Validate here rather than letting Postgres reject it: an
@@ -1203,8 +1364,12 @@ export const handler = async (event) => {
                 const invalid = MEAL_COLUMNS.filter((c) => payload?.[c] !== undefined && payload[c] !== null && !isValidTime(payload[c]));
 
                 if (invalid.length > 0) {
-                    statusCode = 400;
-                    body = { error: `Invalid time value for: ${invalid.join(', ')}. Expected HH:mm.` };
+                    // One problem per bad column rather than one sentence
+                    // listing them, so the form can mark the fields it owns.
+                    fail('VALIDATION_FAILED', {
+                        message: `Invalid time value for: ${invalid.join(', ')}. Expected HH:mm.`,
+                        problems: invalid.map((field) => ({ field, code: PROBLEM_CODES.TIME_FORMAT_INVALID })),
+                    });
                 } else {
                     const q = `UPDATE users SET
                         breakfast_time = COALESCE($1, breakfast_time),
@@ -1220,12 +1385,11 @@ export const handler = async (event) => {
                         payload?.bedtime_time ?? null,
                         targetId,
                     ])).rows[0];
-                    if (!updated) { statusCode = 404; body = { error: "User not found" }; }
+                    if (!updated) { fail('USER_NOT_FOUND'); }
                     else body = updated;
                 }
             } else {
-                statusCode = 405;
-                body = { error: `Method ${method} not allowed on ${path}.` };
+                fail('METHOD_NOT_ALLOWED', { message: `Method ${method} not allowed on ${path}.` });
             }
         }
 
@@ -1235,7 +1399,7 @@ export const handler = async (event) => {
 
             console.log("appointments: userId: " + userId + "/ TargetID: " + targetId);
 
-            if (!(await checkAccess(userId, targetId))) throw new Error("Access Denied");
+            await requireAccess(userId, targetId);
 
             if (method === 'GET') {
                 body = (await pool.query('SELECT a.*, s.label as status_label, s.color as status_color FROM appointments a JOIN appointment_statuses s ON a.status_id = s.id WHERE a.user_id = $1 ORDER BY a.appointment_date ASC', [targetId])).rows;
@@ -1245,7 +1409,7 @@ export const handler = async (event) => {
             } else if (method === 'PUT') {
                 const q = `UPDATE appointments SET status_id=COALESCE($1,status_id), doctor_name=COALESCE($2,doctor_name), appointment_date=COALESCE($3,appointment_date), title=COALESCE($4,title), hospital=COALESCE($5,hospital), department=COALESCE($6,department), room_number=COALESCE($7,room_number), appointment_number=COALESCE($8,appointment_number), details=COALESCE($9,details) WHERE id=$10 AND user_id=$11 RETURNING *`;
                 const updated = (await pool.query(q, [payload.status_id, payload.doctor_name, payload.appointment_date, payload.title, payload.hospital, payload.department, payload.room_number, payload.appointment_number, payload.details, payload.id, targetId])).rows[0];
-                if (!updated) { statusCode = 404; body = { error: "Appointment not found" }; }
+                if (!updated) { fail('APPOINTMENT_NOT_FOUND'); }
                 else body = updated;
             }
         }
@@ -1254,7 +1418,7 @@ export const handler = async (event) => {
             const userId = await getUserId(cognitoSub);
             const targetId = queryParams.user_id ? parseInt(queryParams.user_id) : userId;
             console.log("medication-reminders: userId: " + userId + "/ TargetID: " + targetId);
-            if (!(await checkAccess(userId, targetId))) throw new Error("Access Denied");
+            await requireAccess(userId, targetId);
 
             if (method === 'GET') {
                 body = (await pool.query('SELECT r.*, l.name as med_name FROM medication_reminders r JOIN medication_library l ON r.med_id = l.id WHERE r.user_id = $1 ORDER BY r.status ASC', [targetId])).rows;
@@ -1282,17 +1446,31 @@ export const handler = async (event) => {
                 // violation — which the error contract turns into a 500 carrying
                 // internal English prose (see Phase 6). A 400 naming the field is
                 // the difference between a fixable error and a mystery.
+                // 6.1 — each problem is now `{ field, code, message }` rather
+                // than a sentence. The field is what a form marks, the code is
+                // what 6.2 translates, and the message is the English default
+                // for anything reading the response directly (a probe, a log,
+                // the dashboard). The *rules* are untouched: these are 4.6's
+                // bounds, live and verified since session 2.
                 const escalationProblems = [];
                 if (payload?.escalation_delay_minutes !== undefined && payload.escalation_delay_minutes !== null) {
                     const delay = Number(payload.escalation_delay_minutes);
                     if (!Number.isInteger(delay) || delay < 5 || delay > 240) {
-                        escalationProblems.push("escalation_delay_minutes must be a whole number of minutes between 5 and 240.");
+                        escalationProblems.push({
+                            field: 'escalation_delay_minutes',
+                            code: PROBLEM_CODES.ESCALATION_DELAY_OUT_OF_RANGE,
+                            message: "escalation_delay_minutes must be a whole number of minutes between 5 and 240.",
+                        });
                     }
                 }
                 if (payload?.alarm_repeat_count !== undefined && payload.alarm_repeat_count !== null) {
                     const count = Number(payload.alarm_repeat_count);
                     if (!Number.isInteger(count) || count < 1 || count > 6) {
-                        escalationProblems.push("alarm_repeat_count must be a whole number between 1 and 6.");
+                        escalationProblems.push({
+                            field: 'alarm_repeat_count',
+                            code: PROBLEM_CODES.ALARM_REPEAT_COUNT_OUT_OF_RANGE,
+                            message: "alarm_repeat_count must be a whole number between 1 and 6.",
+                        });
                     }
                 }
                 if (payload?.escalation_order !== undefined && payload.escalation_order !== null) {
@@ -1303,13 +1481,24 @@ export const handler = async (event) => {
                     // send — falling through to the caregiver rather than
                     // silently doing nothing.
                     if (!['caregiver_first', 'sms_first'].includes(payload.escalation_order)) {
-                        escalationProblems.push("escalation_order must be 'caregiver_first' or 'sms_first'.");
+                        escalationProblems.push({
+                            field: 'escalation_order',
+                            code: PROBLEM_CODES.ESCALATION_ORDER_INVALID,
+                            message: "escalation_order must be 'caregiver_first' or 'sms_first'.",
+                        });
                     }
                 }
 
                 if (escalationProblems.length > 0) {
-                    statusCode = 400;
-                    body = { error: escalationProblems.join(' ') };
+                    // 4.6's named-field 400s, which were already live and
+                    // verified (§0.4) — they become the `problems` array rather
+                    // than being rewritten. What changes is that they stop being
+                    // joined into one English sentence the client cannot
+                    // translate: each entry keeps its field and gains a code.
+                    fail('VALIDATION_FAILED', {
+                        message: escalationProblems.map((p) => p.message).join(' '),
+                        problems: escalationProblems,
+                    });
                 } else if (method === 'PUT') {
                     const q = `UPDATE medication_reminders SET
                         status = COALESCE($1, status),
@@ -1336,7 +1525,7 @@ export const handler = async (event) => {
                     // swallowed, and the app went on to schedule notifications
                     // from local state for a reminder the server never updated.
                     const updated = (await pool.query(q, [payload.status, payload.selected_dosage, payload.at_breakfast, payload.breakfast_timing, payload.at_lunch, payload.lunch_timing, payload.at_dinner, payload.dinner_timing, payload.at_bedtime, payload.frequency_days, payload.alarms, payload.alarm_labels, payload.reminder_sound, payload.alarm_sources, payload.escalation_enabled, payload.escalation_delay_minutes, payload.escalation_order, payload.alarm_repeat_count, payload.id, targetId])).rows[0];
-                    if (!updated) { statusCode = 404; body = { error: "Reminder not found" }; }
+                    if (!updated) { fail('REMINDER_NOT_FOUND'); }
                     else {
                         // 5.1 — the schedule may have moved, so future
                         // unconfirmed doses are rebuilt from scratch rather than
@@ -1401,7 +1590,7 @@ export const handler = async (event) => {
         else if (path === "/medication-doses") {
             const userId = await getUserId(cognitoSub);
             const targetId = queryParams.user_id ? parseInt(queryParams.user_id) : userId;
-            if (!(await checkAccess(userId, targetId))) throw new Error("Access Denied");
+            await requireAccess(userId, targetId);
 
             if (method === 'GET') {
                 // Bounded by an explicit window rather than returning everything:
@@ -1424,8 +1613,10 @@ export const handler = async (event) => {
                 const reminderId = parseInt(payload?.reminder_id);
 
                 if (!Number.isInteger(reminderId)) {
-                    statusCode = 400;
-                    body = { error: "reminder_id is required." };
+                    fail('VALIDATION_FAILED', {
+                        message: "reminder_id is required.",
+                        problems: [{ field: 'reminder_id', code: PROBLEM_CODES.FIELD_REQUIRED }],
+                    });
                 } else {
                     // **The client does not send a timestamp, and should not.**
                     // The overlay knows which reminder rang and roughly when;
@@ -1467,8 +1658,7 @@ export const handler = async (event) => {
                         // success either. A dose can legitimately be absent: the
                         // reminder was created before 5.1, or the alarm fired
                         // outside the materialised window.
-                        statusCode = 404;
-                        body = { error: "No matching dose to record." };
+                        fail('DOSE_NOT_FOUND');
                     } else if (action === 'confirm') {
                         // Idempotent by design, not by accident: under D-1 the
                         // patient and their caregiver may both confirm the same
@@ -1491,8 +1681,7 @@ export const handler = async (event) => {
                                 snooze_count = snooze_count + 1
                             WHERE id = $1 AND confirmed_at IS NULL RETURNING *`, [dose.id, minutes]);
                         if (!saved.rows[0]) {
-                            statusCode = 409;
-                            body = { error: "That dose has already been confirmed." };
+                            fail('DOSE_ALREADY_CONFIRMED');
                         } else {
                             body = {
                                 ...saved.rows[0],
@@ -1506,8 +1695,7 @@ export const handler = async (event) => {
                 }
             }
             else {
-                statusCode = 405;
-                body = { error: `${method} not supported on /medication-doses.` };
+                fail('METHOD_NOT_ALLOWED', { message: `${method} not supported on /medication-doses.` });
             }
         }
 
@@ -1529,16 +1717,17 @@ export const handler = async (event) => {
             // pass, which is the hole the `medication_reminders.user_id` finding
             // describes.
             if (!userId) {
-                statusCode = 404;
-                body = { error: "User not found." };
+                fail('PROFILE_NOT_FOUND');
             }
             else if (method === 'POST') {
                 const token = typeof payload?.token === 'string' ? payload.token.trim() : '';
                 const platform = ['ios', 'android', 'web'].includes(payload?.platform) ? payload.platform : null;
 
                 if (!token) {
-                    statusCode = 400;
-                    body = { error: "token is required." };
+                    fail('VALIDATION_FAILED', {
+                        message: "token is required.",
+                        problems: [{ field: 'token', code: PROBLEM_CODES.FIELD_REQUIRED }],
+                    });
                 } else {
                     // **Upsert on the token, and move it if the owner differs.**
                     // Called on every launch, so the common case is a row that
@@ -1568,8 +1757,10 @@ export const handler = async (event) => {
                 // it absent and it is absent.
                 const token = typeof payload?.token === 'string' ? payload.token.trim() : '';
                 if (!token) {
-                    statusCode = 400;
-                    body = { error: "token is required." };
+                    fail('VALIDATION_FAILED', {
+                        message: "token is required.",
+                        problems: [{ field: 'token', code: PROBLEM_CODES.FIELD_REQUIRED }],
+                    });
                 } else {
                     const removed = await pool.query(
                         'DELETE FROM push_tokens WHERE token = $1 AND user_id = $2', [token, userId]);
@@ -1577,15 +1768,14 @@ export const handler = async (event) => {
                 }
             }
             else {
-                statusCode = 405;
-                body = { error: `${method} not supported on /push-tokens.` };
+                fail('METHOD_NOT_ALLOWED', { message: `${method} not supported on /push-tokens.` });
             }
         }
 
         else if (path === "/test-results") {
             const userId = await getUserId(cognitoSub);
             const targetId = queryParams.user_id ? parseInt(queryParams.user_id) : userId;
-            if (!(await checkAccess(userId, targetId))) throw new Error("Access Denied");
+            await requireAccess(userId, targetId);
 
             if (method === 'GET') {
                 body = (await pool.query('SELECT * FROM test_results WHERE user_id = $1 ORDER BY test_date DESC', [targetId])).rows;
@@ -1598,7 +1788,7 @@ export const handler = async (event) => {
                 for (let i = 1; i <= 30; i++) { if (payload[`field_${i}`] !== undefined) addCol(`field_${i}`, payload[`field_${i}`] === "" ? null : payload[`field_${i}`]); }
                 const query = isPut ? `UPDATE test_results SET ${cols.join(', ')} WHERE id = $1 AND user_id = ${targetId} RETURNING *` : `INSERT INTO test_results (${cols.join(',')}) VALUES (${cols.map((_, i) => `$${i + 1}`).join(',')}) RETURNING *`;
                 const saved = (await pool.query(query, vals)).rows[0];
-                if (isPut && !saved) { statusCode = 404; body = { error: "Test result not found" }; }
+                if (isPut && !saved) { fail('TEST_RESULT_NOT_FOUND'); }
                 else body = saved;
             } else if (method === 'DELETE') {
                 await pool.query('DELETE FROM test_results WHERE id = $1 AND user_id = $2', [payload.id, targetId]);
@@ -1618,12 +1808,29 @@ export const handler = async (event) => {
         // there is no second value left to disagree with it. The old message
         // reported both because they could differ — which is exactly the bug
         // `resolveRoutePath` fixes.
-        else { statusCode = 404; body = { error: `Not found: ${path}` }; }
+        else { fail('ROUTE_NOT_FOUND', { message: `Not found: ${path}` }); }
 
     } catch (err) {
-        console.error(err);
-        statusCode = err.message === "Access Denied" ? 403 : 500;
-        body = { error: err.message };
+        // **The whole taxonomy used to be the line below this one**, and an
+        // `err.message` string was both the status and the user-facing text.
+        // Anything that was not the literal "Access Denied" became a 500
+        // carrying whatever prose had been thrown — including, on a bad write,
+        // a raw Postgres constraint message.
+        if (err instanceof ApiError) {
+            // Expected, and logged at a lower level than a fault: these are
+            // routine answers, but a 403 nobody can explain is worth being able
+            // to find in CloudWatch. The code is the searchable part.
+            console.warn('api error', err.code, method, path);
+            fail(err.code, err.detail);
+        } else {
+            // Unexpected. The detail stays in CloudWatch and does not go into
+            // the response, which is what `dashboard/server/index.mjs` already
+            // does — a driver message is not something a client can act on, and
+            // in this codebase it is the one path that reaches a user with text
+            // nobody wrote.
+            console.error(err);
+            fail('INTERNAL_ERROR');
+        }
     }
 
     return { statusCode, body: JSON.stringify(body), headers };

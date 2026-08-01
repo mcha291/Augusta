@@ -4,7 +4,7 @@
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, resolveRoutePath, APP_TIMEZONE } from './index.mjs';
+import { handler, _setPoolForTests, resolveRoutePath, APP_TIMEZONE, ERRORS, PROBLEM_CODES, errorBody } from './index.mjs';
 
 // ---------------------------------------------------------------------------
 // Scripted pool: routes queries by regex against the SQL text, records calls.
@@ -873,8 +873,13 @@ test('POST /relationships/respond still rejects a wrong handshake code', async (
     method: 'POST', path: '/relationships/respond', sub: 'sub-dependent',
     body: { request_id: 5, action: 'active', provided_code: 'TISH-999' },
   }));
-  assert.equal(res.statusCode, 500);
-  assert.equal(parse(res).error, 'Security Mismatch');
+  // **6.1 changed this deliberately, and it is the clearest example of what the
+  // error contract is for.** It was a 500 whose body read `Security Mismatch` —
+  // an internal codename, in English, for the entirely ordinary case of
+  // mistyping a six-character code. 403 is the honest status, and the code is
+  // what lets the client say so in either language.
+  assert.equal(res.statusCode, 403);
+  assert.equal(parse(res).code, 'VERIFICATION_CODE_MISMATCH');
 });
 
 test('POST /relationships/respond denies when the responder is the dependent', async () => {
@@ -1924,4 +1929,214 @@ test('database failure surfaces as 500', async () => {
   ]));
   const res = await handler(restEvent({ path: '/genders' }));
   assert.equal(res.statusCode, 500);
+});
+
+// ---------------------------------------------------------------------------
+// 6.1 — the error contract
+//
+// The taxonomy used to be one line: `err.message === "Access Denied" ? 403 :
+// 500`. These assert the three things that replaced it — that a code always
+// accompanies a failure, that the codes carrying a *decision* still carry it,
+// and that an unexpected fault stops handing its own prose to the client.
+// ---------------------------------------------------------------------------
+
+test('every registered code pairs a 4xx/5xx status with a default message', () => {
+  const codes = Object.keys(ERRORS);
+  assert.ok(codes.length > 0, 'the registry must not be empty — see the vacuous-assertion finding in §0.6');
+  for (const code of codes) {
+    const spec = ERRORS[code];
+    assert.ok(spec.status >= 400 && spec.status < 600, `${code} has a non-error status ${spec.status}`);
+    assert.equal(typeof spec.message, 'string');
+    assert.ok(spec.message.length > 0, `${code} has no default message`);
+  }
+});
+
+test('errorBody omits problems entirely when there are none', () => {
+  assert.equal('problems' in errorBody('REMINDER_NOT_FOUND'), false);
+  assert.deepEqual(
+    errorBody('VALIDATION_FAILED', { problems: [{ field: 'token', code: 'FIELD_REQUIRED' }] }).problems,
+    [{ field: 'token', code: 'FIELD_REQUIRED' }]
+  );
+});
+
+test('403 Access Denied keeps its message and gains a code', async () => {
+  _setPoolForTests(makePool([
+    { match: /FROM users WHERE cognito_id/, result: { rows: [{ id: 1 }] } },
+    { match: /FROM user_relationships WHERE caregiver_id/, result: { rows: [] } },
+  ]));
+  const res = await handler(restEvent({ path: '/appointments', sub: 'sub-1', query: { user_id: '99' } }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(parse(res).code, 'ACCESS_DENIED');
+  assert.equal(parse(res).error, 'Access Denied');
+});
+
+test('a mistyped recipient is 404, not the 500 it used to be', async () => {
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 1 }] } },
+    { match: /SELECT id FROM users WHERE email = \$1 OR username/, result: { rows: [] } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/relationships/request', sub: 'sub-1',
+    body: { dependent_email: 'nobody@example.com', relationship_type: 'family' },
+  }));
+  assert.equal(res.statusCode, 404);
+  assert.equal(parse(res).code, 'RELATIONSHIP_TARGET_NOT_FOUND');
+});
+
+// **THE LEAK.** The old catch-all put `err.message` straight into the response,
+// so a constraint violation reached the client as raw driver prose — text
+// nobody wrote, in one language, that no client could translate or act on.
+test('an unexpected fault reports a code and does not echo the driver message', async () => {
+  _setPoolForTests(makePool([
+    { match: /FROM genders/, throws: new Error('duplicate key value violates unique constraint "users_email_key"') },
+  ]));
+  const res = await handler(restEvent({ path: '/genders' }));
+  assert.equal(res.statusCode, 500);
+  assert.equal(parse(res).code, 'INTERNAL_ERROR');
+  assert.doesNotMatch(parse(res).error, /duplicate key|users_email_key/);
+});
+
+// **THE DECISION.** Three routes answer 404 where 403 would read more
+// naturally, because ids are sequential SERIALs and a 403 confirms the row
+// exists. A code more specific than the status — anything forbidden-shaped —
+// would hand back exactly what the status is withholding.
+test('THE 404-NOT-403 ROUTES keep both the status and a not-found code', async () => {
+  const forbiddenish = /DENIED|FORBIDDEN|NOT_YOURS|NOT_ALLOWED|UNAUTHORI/;
+
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /SELECT verification_code FROM user_relationships/, result: { rows: [] } },
+  ]));
+  const respond = await handler(restEvent({
+    method: 'POST', path: '/relationships/respond', sub: 'sub-1',
+    body: { request_id: 5, action: 'active', provided_code: 'TISH-123' },
+  }));
+
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /UPDATE user_relationships/, result: { rows: [], rowCount: 0 } },
+    { match: /SELECT 1 FROM user_relationships/, result: { rows: [], rowCount: 0 } },
+  ]));
+  const revoke = await handler(restEvent({
+    method: 'POST', path: '/relationships/revoke', sub: 'sub-1', body: { relationship_id: 5 },
+  }));
+
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 7 }] } },
+    { match: /UPDATE medication_reminders/, result: { rows: [], rowCount: 0 } },
+  ]));
+  const reminder = await handler(restEvent({
+    method: 'PUT', path: '/medication-reminders', sub: 'sub-1', body: { id: 5, status: 'active' },
+  }));
+
+  for (const [name, res, code] of [
+    ['respond', respond, 'RELATIONSHIP_REQUEST_NOT_FOUND'],
+    ['revoke', revoke, 'RELATIONSHIP_NOT_FOUND'],
+    ['reminder PUT', reminder, 'REMINDER_NOT_FOUND'],
+  ]) {
+    assert.equal(res.statusCode, 404, `${name} must stay a 404`);
+    assert.equal(parse(res).code, code);
+    assert.doesNotMatch(parse(res).code, forbiddenish, `${name}'s code is more specific than its status`);
+    assert.equal(ERRORS[code].status, 404);
+  }
+});
+
+// **THE RECOVERY.** A Cognito user with no RDS row is authenticated; the
+// profile is simply not built yet. 401 — or a code the client maps to "your
+// session ended" — would sign them out of the account they are in the middle of
+// finishing, which is the opposite of the intended recovery.
+test('THE PROFILE ROUTES answer 404 with a code that is not about the session', async () => {
+  for (const path of ['/me', '/my-id', '/push-tokens']) {
+    _setPoolForTests(makePool([
+      { match: /FROM users/, result: { rows: [], rowCount: 0 } },
+    ]));
+    const res = await handler(restEvent({ method: 'POST', path, sub: 'sub-orphan', body: { token: 'x' } }));
+    assert.equal(res.statusCode, 404, `${path} must not answer 401`);
+    assert.equal(parse(res).code, 'PROFILE_NOT_FOUND', `${path} carries the wrong code`);
+    assert.notEqual(parse(res).code, 'AUTH_REQUIRED');
+  }
+  // And it is a different code from the one meaning "the person you asked
+  // about does not exist", which is a 404 the client must not react to at all.
+  assert.notEqual('PROFILE_NOT_FOUND', 'USER_NOT_FOUND');
+  assert.equal(ERRORS.PROFILE_NOT_FOUND.status, ERRORS.USER_NOT_FOUND.status);
+});
+
+// 4.6's bounds were already live and verified (§0.4). What 6.1 changes is that
+// they stop being joined into one English sentence: the field survives for the
+// form to mark, and the code survives for 6.2 to translate.
+test('4.6 validation becomes problems[] with a field and a code on each', async () => {
+  const scripted = makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 1 }] } },
+  ]);
+  _setPoolForTests(scripted);
+  const res = await handler(restEvent({
+    method: 'PUT', path: '/medication-reminders', sub: 'sub-1',
+    body: { id: 3, escalation_delay_minutes: 3, alarm_repeat_count: 99, escalation_order: 'nope' },
+  }));
+
+  assert.equal(res.statusCode, 400);
+  const parsed = parse(res);
+  assert.equal(parsed.code, 'VALIDATION_FAILED');
+  assert.equal(parsed.problems.length, 3);
+  assert.deepEqual(parsed.problems.map((p) => p.field).sort(), [
+    'alarm_repeat_count', 'escalation_delay_minutes', 'escalation_order',
+  ]);
+  for (const problem of parsed.problems) {
+    assert.ok(PROBLEM_CODES[problem.code], `${problem.code} is not a registered problem code`);
+    assert.ok(problem.message.length > 0);
+  }
+  // Nothing may have reached the database: a rejected write must not be a
+  // partial one. Read off the scripted pool the handler actually used — see
+  // the vacuous-`pool.calls` finding in §0.6.
+  assert.equal(scripted.calls.filter((c) => /UPDATE medication_reminders/.test(c.text)).length, 0);
+  assert.ok(scripted.calls.length > 0, 'the scripted pool saw no queries at all — check the seam');
+});
+
+test('/meal-times reports one problem per bad column, not one sentence listing them', async () => {
+  _setPoolForTests(makePool([
+    { match: /SELECT id FROM users WHERE cognito_id/, result: { rows: [{ id: 1 }] } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'PUT', path: '/meal-times', sub: 'sub-1',
+    body: { breakfast_time: '25:00', dinner_time: 'noon', lunch_time: '12:30' },
+  }));
+  assert.equal(res.statusCode, 400);
+  const parsed = parse(res);
+  assert.deepEqual(parsed.problems.map((p) => p.field), ['breakfast_time', 'dinner_time']);
+  assert.ok(parsed.problems.every((p) => p.code === PROBLEM_CODES.TIME_FORMAT_INVALID));
+});
+
+// The sweep: no route may answer with a failure the client cannot look up.
+test('THE SWEEP — every error response carries a code the registry knows', async () => {
+  const cases = [
+    ['unauthenticated', restEvent({ path: '/appointments' })],
+    ['unknown route', restEvent({ path: '/nope', sub: 'sub-1' })],
+    ['bad method', restEvent({ method: 'PATCH', path: '/push-tokens', sub: 'sub-1' })],
+    ['restricted debug table', restEvent({ path: '/debug/secrets' })],
+    ['missing token', restEvent({ method: 'POST', path: '/push-tokens', sub: 'sub-1', body: {} })],
+    ['missing dose id', restEvent({ method: 'POST', path: '/medication-doses', sub: 'sub-1', body: {} })],
+    ['self-link', restEvent({ path: '/debug/link', query: { caregiver: '4', dependent: '4' } })],
+  ];
+
+  let checked = 0;
+  for (const [name, event] of cases) {
+    _setPoolForTests(makePool([
+      { match: /FROM users WHERE cognito_id|SELECT id FROM users/, result: { rows: [{ id: 1 }] } },
+    ]));
+    const res = await handler(event);
+    assert.ok(res.statusCode >= 400, `${name} was expected to fail, got ${res.statusCode}`);
+    const parsed = parse(res);
+    assert.ok(ERRORS[parsed.code], `${name} answered with an unregistered code: ${parsed.code}`);
+    assert.equal(ERRORS[parsed.code].status, res.statusCode, `${name}: code and status disagree`);
+    assert.ok(typeof parsed.error === 'string' && parsed.error.length > 0, `${name} has no message`);
+    checked++;
+  }
+  assert.equal(checked, cases.length);
+});
+
+test('the route fallthrough still names the path it could not match', async () => {
+  _setPoolForTests(makePool([]));
+  const res = await handler(restEvent({ path: '/nope', sub: 'sub-1' }));
+  assert.equal(parse(res).code, 'ROUTE_NOT_FOUND');
+  assert.match(parse(res).error, /\/nope/);
 });

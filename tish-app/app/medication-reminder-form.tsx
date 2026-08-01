@@ -25,6 +25,7 @@ import { GlobalStyles } from '../styles/globalstyles';
 
 import { SMS_VERIFICATION_ENABLED } from '@/constants/config';
 import { apiRequest } from '@/utils/api';
+import { apiErrorMessage, describeApiFailure } from '@/utils/api-errors';
 import {
     DEFAULT_MEAL_TIMES,
     MEAL_LABEL_KEY,
@@ -324,8 +325,11 @@ export default function MedicationReminderForm() {
             } else {
                 // A non-2xx used to fall straight through to the finally block,
                 // leaving the form looking like nothing had happened.
-                const detail = await res.json().catch(() => ({}));
-                notifyUser(t('common.error'), detail.error || t('medicationReminderForm.saveFailed'));
+                // 6.2 — `detail.error` was the server's English, shown as-is.
+                // This is also the form 4.6's field validation answers, so the
+                // `problems` rung earns its keep here: a delay outside 5–240
+                // now names the delay rather than reporting a generic failure.
+                notifyUser(t('common.error'), apiErrorMessage(await describeApiFailure(res), t));
             }
         } catch (e) {
             console.error('Reminder save failed:', e);

@@ -9,6 +9,7 @@ import { COLORS, SHADOWS } from '../constants/theme';
 import { useAuth } from '../context/AuthContext';
 import { GlobalStyles } from '../styles/globalstyles';
 import { apiRequest } from '../utils/api';
+import { apiErrorMessage, describeApiFailure } from '../utils/api-errors';
 import {
   DEFAULT_RELATIONSHIP_TYPE,
   RELATIONSHIP_TYPES,
@@ -53,11 +54,17 @@ export default function ManagedUsersScreen() {
       // database and is read back by a device that may be in the other language.
       body: { dependent_email: searchQuery, relationship_type: relationshipType }
     });
-    const data = await res.json();
     if (res.ok) {
+      const data = await res.json();
       setHandshakeCode(data.handshakeCode);
     } else {
-      Alert.alert(t('common.error'), data.error);
+      // 6.2 — this line used to be `Alert.alert(t('common.error'), data.error)`,
+      // i.e. the server's English shown verbatim to a zh-Hant user. It is also
+      // the site that made the contract worth building: the two things that
+      // realistically go wrong here — a mistyped address and asking someone who
+      // already granted access — were a 500 and a 409 carrying prose, and are
+      // now two codes with two sentences in both languages.
+      Alert.alert(t('common.error'), apiErrorMessage(await describeApiFailure(res), t));
     }
   };
 

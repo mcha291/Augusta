@@ -383,5 +383,38 @@
     "sibling": "Sibling",
     "carer": "Professional carer",
     "other": "Other"
+  },
+  "errors": {
+    "authRequired": "Please sign in again to continue.",
+    "accessDenied": "You don't have access to those records.",
+    "forbidden": "You don't have permission to do that.",
+    "verificationCodeMismatch": "That code doesn't match. Check it and try again.",
+    "profileNotFound": "Your profile isn’t finished yet. Complete sign-up to continue.",
+    "userNotFound": "We couldn’t find that account.",
+    "reminderNotFound": "That reminder no longer exists. It may have been changed on another device.",
+    "appointmentNotFound": "That appointment no longer exists.",
+    "testResultNotFound": "That result no longer exists.",
+    "doseNotFound": "We couldn’t match that to a scheduled dose.",
+    "relationshipNotFound": "That access record no longer exists.",
+    "relationshipRequestNotFound": "That request is no longer waiting for an answer.",
+    "relationshipTargetNotFound": "No account matches that email or username.",
+    "relationshipAlreadyActive": "That person already has access to your records.",
+    "doseAlreadyConfirmed": "That dose has already been marked as taken.",
+    "validationFailed": "Some details need fixing.",
+    "internal": "Something went wrong at our end. Please try again.",
+    "badRequest": "That request couldn’t be completed. Check the details and try again.",
+    "notFound": "We couldn’t find what you were looking for.",
+    "conflict": "That has already been done.",
+    "server": "The service is having trouble. Please try again shortly.",
+    "network": "We couldn’t reach the server. Check your connection and try again.",
+    "unexpected": "Something went wrong. Please try again.",
+    "field": {
+      "required": "Please fill in every required field.",
+      "emailOrPhoneRequired": "Enter an email address or a phone number.",
+      "escalationDelayRange": "The escalation delay must be between 5 and 240 minutes.",
+      "alarmRepeatCountRange": "The alarm must repeat between 1 and 6 times.",
+      "escalationOrderInvalid": "That escalation order isn’t valid.",
+      "timeFormatInvalid": "Enter a time as HH:mm — for example 08:00."
+    }
   }
 }
