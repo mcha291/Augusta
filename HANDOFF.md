@@ -10,8 +10,9 @@ Read PLAN.md, starting with §0 (Progress) — it is the ledger and the only par
 that tracks what is actually done. Read the guardrails in §1 before deciding
 anything is too risky to try.
 
-**Two things are waiting: a failed TestFlight build that needs an Apple portal
-action, and whether to merge the open PR.**
+**Two things are waiting, both cost or credential decisions the owner has to
+make: a failed TestFlight build needing an Apple portal action, and a CI setup
+that stopped being free when the repository went private.**
 
 ## ⚠ TestFlight build 10 failed — provisioning profile is stale
 
@@ -55,15 +56,44 @@ that **user registration had been broken for everyone** and fixed it. Both E2E
 flows are green on iPhone 17 Pro / iOS 26.4. A TestFlight build (number 10) was
 submitted at the end of the session.
 
-## ⚠ Not merged
+## Merged
 
-Seven commits sit on **`e2e-maestro-ios`**, pushed, with an open PR whose CI is
-green. `main` is at `ec25847` and **does not have the registration fix**. If you
-start from `main` you will be working on a tree where signup is still broken.
-Merging is the owner's call — ask.
+Session 11's nine commits were rebased onto **`main`** (`ec25847..8db80fb`), so
+`main` has the registration fix. The `e2e-maestro-ios` branch still exists and
+now points at pre-rebase SHAs; it is safe to delete.
 
 `opus 5 vs 4.8.txt` at the repo root is deliberately untracked; it is a scratch
 file from an unrelated project.
+
+## ⚠ The repository went private, and that breaks the CI plan
+
+It was public for most of session 11 and is now private. This matters more than
+it sounds, because **the choice to run E2E on GitHub Actions was made *because*
+the repo was public**: standard runners are free and unmetered for public repos,
+which made GitHub's macOS runners a free alternative to EAS's `maestro` job,
+which needs a paid plan.
+
+On a private repo that is no longer true. Minutes come out of the plan allowance
+and **macOS bills at 10× wall-clock**, so one ~25-minute iOS E2E run consumes
+roughly 250 minutes of allowance. A free plan's 2,000 minutes/month is about
+eight runs, and session 11 alone used more than that.
+
+Runs after the switch fail in 3–11 seconds with **no failed step**, on ubuntu as
+well as macOS — the signature of an exhausted allowance or a spending limit
+rather than anything in the code. The last run on real runners was green.
+
+Three ways out; the owner has to pick, and it is a cost decision, not a technical
+one:
+
+1. **Make the repo public again** — restores free unmetered runners, changes
+   nothing else.
+2. **Pay for GitHub Actions minutes**, budgeting for the 10× macOS multiplier.
+3. **Pay for EAS and un-park `tish-app/.eas/workflows/e2e-test-ios.yml`** — it is
+   written, and its `maestro` job handles simulator provisioning, sharding,
+   retries and video capture that the GitHub Actions version spells out by hand.
+
+Until one is chosen, **iOS E2E cannot run in CI**. The flows themselves are
+unaffected and `npm run e2e:check` still validates them locally in a second.
 
 ## What changed
 
@@ -92,10 +122,10 @@ file from an unrelated project.
 
 - **Tests: 266 backend, 209 client.** `tsc` clean, eslint 0 errors (36 warnings,
   none new), translations 383 keys across both locales.
-- **iOS E2E green.** `.github/workflows/e2e-ios.yml` on a GitHub `macos-26`
-  runner. Not EAS: `maestro` jobs there need a paid plan, and this repo is public
-  so GitHub's macOS runners are free. `tish-app/.eas/workflows/` holds the EAS
-  equivalents, parked, for if the project ever goes paid.
+- **iOS E2E was green** on `.github/workflows/e2e-ios.yml`, a GitHub `macos-26`
+  runner — both flows passing on iPhone 17 Pro / iOS 26.4. It **cannot currently
+  run**; see the private-repo section above. `tish-app/.eas/workflows/` holds the
+  EAS equivalents, parked.
 - **Test account `maestro`** exists in the pool, confirmed, email verified, with a
   matching RDS row (`id: 4`). Its credentials are GitHub repo secrets
   `MAESTRO_USERNAME` / `MAESTRO_PASSWORD`. The flows sign in against the **live**
