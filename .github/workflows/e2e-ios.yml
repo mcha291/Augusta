@@ -35,7 +35,13 @@ concurrency:
 
 jobs:
   ios-e2e:
-    runs-on: macos-15
+    # macos-26, not macos-15. Expo SDK 55 exists because of Apple's April 2026
+    # Xcode 26 requirement, and `expo-modules-core` is written against Swift 6.2
+    # — `extension UIView: @MainActor AnyArgument` is syntax an older compiler
+    # does not recognise. On macos-15 the build died with 23 errors, led by
+    # "unknown attribute 'MainActor'", none of them in this app's code.
+    # See expo/expo#42525.
+    runs-on: macos-26
     timeout-minutes: 60
     defaults:
       run:
@@ -43,6 +49,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # Logged so the next toolchain drift is one glance to diagnose rather
+      # than a wall of Swift errors that look like application bugs.
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
 
       - uses: actions/setup-node@v4
         with:
