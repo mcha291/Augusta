@@ -41,7 +41,15 @@ appId: ${MAESTRO_APP_ID}
 # Sign-in is two round trips, not one: Cognito authenticates, then AuthContext
 # calls checkUser() against RDS before it will navigate. 30s covers a cold
 # Lambda on top of both.
+#
+# The landing signal is the tab bar, not the Home screen's root view. Both are
+# testIDs, but only one is reliably in the hierarchy Maestro searches: on iOS,
+# XCUITest builds its tree from the accessibility hierarchy, and a plain
+# container `View` that is not itself an accessibility element can be collapsed
+# out of it. The tab button is a touchable, so it is always an element in its
+# own right. That distinction is exactly what the first run showed — every
+# interactive selector resolved, and only the container did not.
 - extendedWaitUntil:
     visible:
-      id: 'screen-home'
+      id: 'tab-index'
     timeout: 30000

@@ -12,7 +12,18 @@ tags:
 ---
 - runFlow: subflows/sign-in.yml
 
-# Reaching Home is asserted inside the subflow. Assert the tab bar too, so a
-# render that mounts the route but crashes the navigator still fails.
+# The subflow already waits for the tab bar. Assert the rest of it too, so a
+# navigator that mounts one button but fails to render the bar still fails.
 - assertVisible:
-    id: 'tab-index'
+    id: 'tab-medications'
+
+# Deliberately optional, and here to answer one question rather than to guard
+# anything: can Maestro see a testID on a plain container `View` on iOS at all?
+# `screen-home` sits on the Home screen's root view. If this warns while every
+# assertion above passes, container testIDs are invisible to XCUITest and the
+# per-screen assertions in 02-tab-navigation need to move onto elements that
+# are accessibility elements in their own right. If it passes, they are fine as
+# they are. Either way the suite's verdict does not hinge on it.
+- assertVisible:
+    id: 'screen-home'
+    optional: true
