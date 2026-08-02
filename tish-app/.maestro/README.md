@@ -7,11 +7,11 @@ first `expo-*` or `react-native` import.
 
 ## What these cover, and what they deliberately do not
 
-Two flows today, both smoke-level:
+Two flows today, both smoke-level, both green on iPhone 17 Pro / iOS 26.4:
 
 | Flow | What breaks it |
 |---|---|
-| `01-sign-in.yml` | Amplify misconfiguration, a Cognito pool change, `/users/me` returning 500, `AuthContext` failing to populate |
+| `01-sign-in.yml` | Amplify misconfiguration, a Cognito pool change, `/me` returning 500, `AuthContext` failing to populate |
 | `02-tab-navigation.yml` | Any of the four tab screens throwing on mount |
 
 **Not covered: whether an alarm actually fires.** That is the app's highest-risk
@@ -101,23 +101,46 @@ Note the flows sign in against the **live** backend — `API_BASE_URL` in
 `constants/config.ts` is a hardcoded production API Gateway URL, so the test
 account's data goes to the same place as everyone else's.
 
-## Two iOS-specific hazards, already worked around
+## What actually bit on iOS, and what didn't
 
-Both are upstream bugs that would otherwise look like flaky tests:
+Both flows pass on iPhone 17 Pro / iOS 26.4. Two things caused real failures,
+and neither was one of the upstream bugs anticipated up front.
 
-- **`hideKeyboard` is unreliable on iOS** — there is no native dismissal API, so
-  Maestro documents it as best-effort. `sign-in.yml` uses `scrollUntilVisible`
-  on the submit button instead, which does not depend on the keyboard at all.
-- **The XCUITest driver drops between flows in directory batch mode**
-  ([maestro#3318](https://github.com/mobile-dev-inc/maestro/issues/3318)) —
-  flow #2 onward die with a connection error. The workflow runs one flow per
-  `maestro test` invocation rather than pointing it at `.maestro/`.
+**1. The keyboard covered the submit button.** With the keyboard up,
+`login-submit` occupies y=531..587 while the keyboard starts at y=539, so the
+button's centre is underneath it. Maestro still reports `tapOn` as COMPLETED —
+the element it targeted is present and on screen, merely occluded — and the tap
+lands on the keyboard. `handleLogin` never ran, so there was no network call, no
+error alert, and no navigation, which made it look like a selector or
+credentials problem for three runs.
 
-Still unmitigated: [expo/eas-cli#3153](https://github.com/expo/eas-cli/issues/3153),
-an open report of the iOS simulator hanging on `inputText` under Expo's new
-architecture. If sign-in hangs for ~90s and dies on a port-7001 connection
-error, that is this bug and not the app. The fallback is to stop typing
-credentials altogether — seed a session through a test-only launch argument.
+`sign-in.yml` presses Return to blur the last field rather than calling
+`hideKeyboard`, which Maestro documents as unreliable on iOS.
+`scrollUntilVisible` alone is *not* enough: scrolling does not dismiss a
+keyboard.
+
+**2. iOS offers to save the password.** A system dialog appears a second or two
+after a successful credential submission and covers the app. It is dismissed in
+the subflow, optionally and with a wait before the tap, because it does not
+appear every time — notably not on a fresh simulator's first sign-in, which is
+why it failed the second flow of a run but not the first. Suppressing it at the
+simulator level was not attempted: recent iOS is reported to show it even with
+password AutoFill disabled.
+
+**Anticipated and never observed**, so do not design around them without
+evidence:
+
+- [expo/eas-cli#3153](https://github.com/expo/eas-cli/issues/3153) — the
+  `inputText` hang under the new architecture. Both fields type cleanly.
+- [maestro#3318](https://github.com/mobile-dev-inc/maestro/issues/3318) — the
+  XCUITest driver dropping between flows. The workflow still runs one flow per
+  invocation, which is cheap insurance, but the batch failure never appeared.
+
+**testIDs on plain container `View`s do resolve on iOS.** `screen-home` and the
+three other screen roots assert fine. An earlier version of these flows assumed
+the opposite — that XCUITest drops containers because they are not accessibility
+elements — and that assumption was wrong; the dialog above was the real cause of
+the one result that seemed to support it.
 
 ## Running locally (Android only, parked)
 

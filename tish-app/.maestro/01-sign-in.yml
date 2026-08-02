@@ -17,19 +17,13 @@ tags:
 - assertVisible:
     id: 'tab-medications'
 
-# Deliberately optional, and here to answer one question rather than to guard
-# anything: can Maestro see a testID on a plain container `View` on iOS at all?
-# `screen-home` sits on the Home screen's root view. If it warns while every
-# assertion above passes, container testIDs are invisible to XCUITest and the
-# per-screen assertions in 02-tab-navigation need to move onto elements that
-# are accessibility elements in their own right.
+# Landing on Home specifically, not merely on something with a tab bar.
 #
-# It warned once already, but that result proved nothing: it ran 22 seconds
-# after sign-in, by which point iOS's "Save Password?" dialog was covering the
-# screen — the assertions that passed above it had run within 3 seconds, before
-# the dialog appeared. Now that the subflow dismisses that dialog, this is a
-# clean test for the first time. Either way the suite's verdict does not hinge
-# on it.
+# This was optional for a while, as a probe: `screen-home` sits on a plain
+# container `View`, and the theory was that XCUITest cannot see testIDs on
+# containers because they are not accessibility elements in their own right.
+# The theory was wrong — it resolves fine, here and on all four screens in
+# 02-tab-navigation. What made it look otherwise was iOS's "Save Password?"
+# dialog covering the screen during the one run where it warned.
 - assertVisible:
     id: 'screen-home'
-    optional: true
