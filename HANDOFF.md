@@ -10,8 +10,42 @@ Read PLAN.md, starting with §0 (Progress) — it is the ledger and the only par
 that tracks what is actually done. Read the guardrails in §1 before deciding
 anything is too risky to try.
 
-**There is one decision waiting for you: whether to merge the open PR.** Nothing
-else is owed.
+**Two things are waiting: a failed TestFlight build that needs an Apple portal
+action, and whether to merge the open PR.**
+
+## ⚠ TestFlight build 10 failed — provisioning profile is stale
+
+`eas build --platform ios --profile production --auto-submit` failed in fastlane:
+
+```
+Provisioning profile "*[expo] com.ti-smarthealth.app AppStore 2026-07-15..."
+  doesn't include the Time Sensitive Notifications capability
+  doesn't include the com.apple.developer.usernotifications.time-sensitive entitlement
+```
+
+**Not a regression.** `app.json` gained that entitlement in `e7c3cf1` on
+2026-07-31 at 14:39; the last successful production build (number 9) started the
+same day at 02:34, twelve hours earlier, and the provisioning profile dates from
+2026-07-15. Build 10 is simply the first production build to exercise it, and the
+profile predates it by two weeks.
+
+The fix needs an Apple login, so it is the owner's:
+
+1. Try regenerating the profile first — EAS syncs capabilities from the
+   entitlements when it creates a *new* profile, so this may be sufficient on its
+   own:
+   ```
+   cd tish-app && npx eas-cli credentials
+   ```
+   iOS → production → Build Credentials → regenerate the provisioning profile.
+2. If it still fails, the capability is not enabled on the App ID. Apple Developer
+   portal → Identifiers → `com.ti-smarthealth.app` → enable **Time Sensitive
+   Notifications**, then repeat step 1.
+3. Then rebuild: `npx eas-cli build --platform ios --profile production --auto-submit`
+
+Worth knowing why it matters beyond the build: the entitlement is what makes
+5.3's `interruptionLevel: 'timeSensitive'` work, which is how a medication alarm
+breaks through Focus modes. A build without it degrades silently.
 
 ## State in one paragraph
 
@@ -66,8 +100,8 @@ file from an unrelated project.
   matching RDS row (`id: 4`). Its credentials are GitHub repo secrets
   `MAESTRO_USERNAME` / `MAESTRO_PASSWORD`. The flows sign in against the **live**
   backend — `API_BASE_URL` is a hardcoded production URL.
-- **TestFlight build 10** was built and auto-submitted at the end of the session.
-  Confirm it actually reached App Store Connect rather than trusting this line.
+- **TestFlight build 10 FAILED, and this is the one thing owed.** See the section
+  below — it needs an Apple Developer portal action that only the owner can take.
 
 ## Tooling on this machine
 
