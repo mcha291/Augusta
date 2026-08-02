@@ -19,21 +19,35 @@ export const API_BASE_URL = 'https://u91xzojfja.execute-api.ap-east-2.amazonaws.
 // --- Verification delivery -------------------------------------------------
 
 /**
- * Whether users may choose SMS for their signup confirmation code.
+ * Whether the signup screen offers SMS as a delivery choice for the
+ * confirmation code.
  *
  * Keep this false while the account's SNS SMS sandbox is active: in the
  * sandbox, texts only reach manually verified numbers, so an SMS signup
- * silently delivers nothing and strands the account unconfirmed.
+ * silently delivers nothing and strands the account unconfirmed. That is not
+ * hypothetical — it is what beta testers actually hit, and the pool still
+ * reports `SmsConfigurationFailure: SNSSandbox`.
  *
- * This is not hypothetical — it is what beta testers actually hit. Cognito
- * prefers SMS whenever phone_number is in the signUp() payload, and the app
- * always sent it, so signup codes were texted into the sandbox and vanished.
- * Testers only ever saw email from the *resend* action. Leaving this false
- * omits phone_number and forces the working email route.
+ * **This flag no longer controls delivery, only whether the choice is
+ * offered.** It used to do both, by deciding whether `phone_number` was part
+ * of the `signUp()` payload — but that never worked on this pool, which marks
+ * `phone_number` as a *required* attribute. Omitting it did not route around
+ * SMS; it failed registration outright for every user with
+ * "Attributes did not conform to the schema". A required attribute cannot be
+ * omitted, and `Required` cannot be changed after a pool is created.
  *
- * Checked on 2026-07-24: sandbox ON in both ap-east-2 and ap-southeast-2,
- * with zero verified destination numbers. Flip this to true once production
- * SMS access is granted (SNS console -> Text messaging -> Exit sandbox).
+ * Delivery is now decided pool-side: `phone_number` was removed from the
+ * pool's `AutoVerifiedAttributes`, leaving `email` alone there, so Cognito
+ * emails the code even though a number is supplied. The number is stored
+ * unverified, which is what the profile screen's verify action exists to fix
+ * for `email`; a phone equivalent would need `phone_number` auto-verified
+ * again.
+ *
+ * Re-enabling SMS is therefore two changes, not one: exit the SNS sandbox,
+ * *and* put `phone_number` back into `AutoVerifiedAttributes` — at which point
+ * Cognito prefers SMS for everyone, since the number is now always sent.
+ *
+ * Checked on 2026-08-02: sandbox still ON. Verify before flipping:
  *
  *   aws sns get-sms-sandbox-account-status --region ap-east-2
  */
