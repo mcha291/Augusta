@@ -49,6 +49,35 @@ appId: ${MAESTRO_APP_ID}
 - tapOn:
     id: 'login-submit'
 
+# Dismiss iOS's "Save Password?" prompt.
+#
+# It is a *system* dialog, not the app's: iOS offers to store credentials after
+# it sees a successful login submission. It slides in a second or two later and
+# covers whatever the app is showing, which is exactly what failed the tab-bar
+# assertion in the previous run — the app had signed in correctly and rendered
+# Home behind it.
+#
+# Both steps are optional because it does not appear every time; the first
+# sign-in on a fresh simulator went straight through without it. The wait comes
+# before the tap so a dialog that is still animating in is not missed, which is
+# the race that made the previous run fail on the second flow but not the
+# first.
+#
+# Matching on system text is a deliberate exception to the "testIDs, never
+# text" rule elsewhere in these flows: this dialog belongs to iOS, not the app,
+# so it is not covered by the app's i18n, and the CI simulator's locale is
+# fixed. Dismissed rather than suppressed at the simulator level — recent iOS
+# is reported to keep showing it even with password AutoFill disabled.
+- extendedWaitUntil:
+    visible:
+      text: 'Not Now'
+    timeout: 15000
+    optional: true
+
+- tapOn:
+    text: 'Not Now'
+    optional: true
+
 # Sign-in is two round trips, not one: Cognito authenticates, then AuthContext
 # calls checkUser() against RDS before it will navigate. 30s covers a cold
 # Lambda on top of both.
