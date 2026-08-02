@@ -2,12 +2,13 @@ import { COLORS } from '@/constants/theme';
 import { changeLanguage, LANGUAGE_LABELS, SUPPORTED_LANGUAGES, SupportedLanguage } from '@/i18n';
 import { apiRequest } from '@/utils/api';
 import { apiErrorMessage, describeApiFailure } from '@/utils/api-errors';
+import { confirmUserAttribute, fetchUserAttributes, sendUserAttributeVerificationCode } from 'aws-amplify/auth';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { goBackOrHome } from '@/utils/navigation';
 import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Alert, Platform, ScrollView, StyleSheet, View } from 'react-native';
-import { Appbar, Avatar, Button, Divider, List, Menu, Surface, Text, TextInput, useTheme } from 'react-native-paper';
+import { Appbar, Avatar, Button, Dialog, Divider, List, Menu, Portal, Surface, Text, TextInput, useTheme } from 'react-native-paper';
 import ActiveProfileBadge from '../components/active-profile-badge';
 import PlatformDatePicker from '../components/platform-date-picker';
 import { useAuth } from '../context/AuthContext';
@@ -85,6 +86,17 @@ export default function ProfileScreen() {
   const [editingMeal, setEditingMeal] = useState<MealKey | null>(null);
   const [savingMealTimes, setSavingMealTimes] = useState(false);
 
+  // Email verification. `null` means "not looked up yet" and is deliberately
+  // distinct from `false`: an unreachable Cognito must not render the account
+  // as unverified, because the fix it offers — send me a code — would fail for
+  // the same reason and the user would be told their email is bad when it is
+  // the network that is bad.
+  const [emailVerified, setEmailVerified] = useState<boolean | null>(null);
+  const [verifyDialogVisible, setVerifyDialogVisible] = useState(false);
+  const [verifyCode, setVerifyCode] = useState('');
+  const [sendingCode, setSendingCode] = useState(false);
+  const [confirmingCode, setConfirmingCode] = useState(false);
+
   const notifyUser = (title: string, message: string) => {
     if (Platform.OS === 'web') window.alert(`${title}: ${message}`);
     else Alert.alert(title, message);
@@ -134,6 +146,76 @@ export default function ProfileScreen() {
   };
 
   useFocusEffect(useCallback(() => { loadProfileData(); }, [activeDependent?.id]));
+
+  /**
+   * Whether Cognito considers this account's email address verified.
+   *
+   * **Why this screen needs to ask at all.** The pool marks `phone_number`
+   * required but only auto-verifies `email`, so registration emails the code
+   * and a completed signup arrives here already verified. Three routes do not:
+   * an account created administratively (`admin-create-user`), one whose
+   * confirmation was completed against a different attribute, and — once the
+   * address is editable — any future change to it, since `email` is the sole
+   * entry in the pool's `AttributesRequireVerificationBeforeUpdate`.
+   *
+   * Unverified is not cosmetic. `AccountRecoverySetting` lists
+   * `verified_email` first, so an account with an unverified address has no
+   * working password-reset route.
+   *
+   * Read from Cognito rather than from the RDS profile on purpose: RDS stores
+   * the address, but only Cognito knows whether it has been proven.
+   */
+  const loadEmailVerified = useCallback(async () => {
+    try {
+      const attrs = await fetchUserAttributes();
+      setEmailVerified(attrs.email_verified === 'true');
+    } catch (e) {
+      // Leave the previous answer standing — see the `null` note on the state.
+      console.warn('[profile] could not read email verification state', e);
+    }
+  }, []);
+
+  useFocusEffect(useCallback(() => { loadEmailVerified(); }, [loadEmailVerified]));
+
+  const startEmailVerification = async () => {
+    setSendingCode(true);
+    try {
+      const { destination, deliveryMedium } = await sendUserAttributeVerificationCode({
+        userAttributeKey: 'email',
+      });
+      // Logged for the same reason signup logs it: when someone says "no code
+      // arrived", this is the line that says where it actually went.
+      console.log('[profile] email verification code sent via', deliveryMedium, 'to', destination);
+      setVerifyCode('');
+      setVerifyDialogVisible(true);
+    } catch (e: any) {
+      console.error('[profile] could not send email verification code', e);
+      notifyUser(t('common.error'), e?.message || t('profile.emailVerifySendFailed'));
+    } finally {
+      setSendingCode(false);
+    }
+  };
+
+  const submitEmailVerification = async () => {
+    const code = verifyCode.trim();
+    if (!code) return;
+
+    setConfirmingCode(true);
+    try {
+      await confirmUserAttribute({ userAttributeKey: 'email', confirmationCode: code });
+      setVerifyDialogVisible(false);
+      setVerifyCode('');
+      setEmailVerified(true);
+      notifyUser(t('profile.emailVerifiedTitle'), t('profile.emailVerifiedMessage'));
+    } catch (e: any) {
+      // The dialog stays open: a mistyped code is the common case and closing
+      // it would mean sending a whole new code to fix a typo.
+      console.error('[profile] email verification failed', e);
+      notifyUser(t('common.error'), e?.message || t('profile.emailVerifyFailed'));
+    } finally {
+      setConfirmingCode(false);
+    }
+  };
 
   /**
    * Save one meal time, then regenerate every reminder whose alarms were
@@ -409,11 +491,68 @@ export default function ProfileScreen() {
           />
         )}
 
+        <Portal>
+          <Dialog visible={verifyDialogVisible} onDismiss={() => setVerifyDialogVisible(false)}>
+            <Dialog.Title>{t('profile.emailVerifyDialogTitle')}</Dialog.Title>
+            <Dialog.Content>
+              <Text variant="bodyMedium" style={{ marginBottom: 14 }}>
+                {t('profile.emailVerifyDialogBody', { email: user.email })}
+              </Text>
+              <TextInput
+                testID="profile-verify-email-code"
+                mode="outlined"
+                label={t('profile.emailVerifyCodeLabel')}
+                value={verifyCode}
+                onChangeText={setVerifyCode}
+                keyboardType="number-pad"
+                autoCapitalize="none"
+                autoComplete="one-time-code"
+              />
+            </Dialog.Content>
+            <Dialog.Actions>
+              <Button onPress={() => setVerifyDialogVisible(false)} disabled={confirmingCode}>
+                {t('common.cancel')}
+              </Button>
+              <Button
+                testID="profile-verify-email-submit"
+                onPress={submitEmailVerification}
+                loading={confirmingCode}
+                disabled={confirmingCode || !verifyCode.trim()}
+              >
+                {t('profile.emailVerifyConfirm')}
+              </Button>
+            </Dialog.Actions>
+          </Dialog>
+        </Portal>
+
         {/* Personal Details Surface */}
         <Surface style={styles.surface} elevation={1}>
           <List.Item title={t('profile.fullName')} description={user.full_name || t('common.notProvided')} left={p => <List.Icon {...p} icon="account" />} />
           <Divider />
-          <List.Item title={t('profile.email')} description={user.email} left={p => <List.Icon {...p} icon="email" />} />
+          <List.Item
+            title={t('profile.email')}
+            description={emailVerified === false
+              ? t('profile.emailNotVerified', { email: user.email })
+              : user.email}
+            left={p => <List.Icon {...p} icon="email" />}
+            // `emailVerified === null` renders neither control: until Cognito
+            // has answered, the account is neither confirmed good nor offered a
+            // fix it might not need.
+            right={p => emailVerified === false ? (
+              <Button
+                testID="profile-verify-email"
+                mode="text"
+                compact
+                loading={sendingCode}
+                disabled={sendingCode}
+                onPress={startEmailVerification}
+              >
+                {t('profile.emailVerifyAction')}
+              </Button>
+            ) : emailVerified ? (
+              <List.Icon {...p} icon="check-decagram" color={COLORS.primary} />
+            ) : null}
+          />
           <Divider />
           <List.Item
             title={t('profile.phoneNumber')}

@@ -185,17 +185,33 @@ export default function SignupScreen() {
     }
 
     try {
-      // Cognito decides the delivery medium from the pool's auto-verified
-      // attributes, and prefers SMS whenever a phone_number is supplied. There
-      // is no API parameter to override that, so the only lever we have is
-      // whether phone_number is part of the signup payload at all. Omitting it
-      // is what forces the email route.
+      // `phone_number` is **always** sent, because the pool marks it
+      // `Required: true` — omitting it fails the call outright with
+      // "Attributes did not conform to the schema", which is what registration
+      // did for every user until this was fixed.
       //
-      // Trade-off when the user picks email: the number is still saved to RDS
-      // by /register-profile, but Cognito never learns it, so it won't work as
-      // a sign-in alias for that account until it's added and verified later.
-      const useSms = SMS_VERIFICATION_ENABLED && verifyVia === 'sms' && !!cleanPhone;
-
+      // This used to be conditional. The reasoning was that Cognito picks the
+      // delivery medium from the pool's auto-verified attributes and prefers
+      // SMS whenever a phone_number is present, so leaving it out was treated
+      // as the only available lever for forcing the email route. That lever
+      // does not exist on this pool: a required attribute cannot be omitted,
+      // and `Required` cannot be changed after a pool is created.
+      //
+      // **The real lever is pool-side, not payload-side.** `phone_number` was
+      // removed from the pool's `AutoVerifiedAttributes`, which leaves `email`
+      // as the only auto-verified attribute — so Cognito emails the code even
+      // though a phone number is supplied. Unlike `Required`, that field *can*
+      // be updated after creation.
+      //
+      // Consequence worth knowing: `verifyVia` can no longer influence
+      // delivery from here. If SMS is ever wanted again, `phone_number` has to
+      // go back into `AutoVerifiedAttributes` — at which point Cognito will
+      // prefer SMS for *everyone*, because the number is now always present.
+      // Per-user choice would then need a different mechanism entirely.
+      //
+      // The number reaches RDS through /register-profile either way. What
+      // changes is that Cognito now stores it too, unverified — so it will not
+      // work as a sign-in alias until it is verified.
       const { nextStep } = await signUp({
         username: cleanUser,
         password: cleanPass,
@@ -203,7 +219,7 @@ export default function SignupScreen() {
           userAttributes: {
             email: cleanEmail,
             name: form.full_name,
-            ...(useSms ? { phone_number: cleanPhone } : {}),
+            phone_number: cleanPhone,
           }
         }
       });

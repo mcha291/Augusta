@@ -221,7 +221,17 @@
     "revokeConfirmTitle": "要撤銷存取權嗎？",
     "revokeConfirmCaregiver": "{{name}} 將無法再查看您的紀錄，也不會再收到您漏服藥物的提醒。",
     "revokeConfirmDependent": "您將無法再查看 {{name}} 的紀錄，對方的提醒也會從這支手機移除。",
-    "revokeFailed": "無法撤銷存取權，請再試一次。"
+    "revokeFailed": "無法撤銷存取權，請再試一次。",
+    "emailNotVerified": "{{email}} — 尚未驗證",
+    "emailVerifyAction": "驗證",
+    "emailVerifyDialogTitle": "驗證您的電子郵件",
+    "emailVerifyDialogBody": "請輸入我們寄送至 {{email}} 的驗證碼。",
+    "emailVerifyCodeLabel": "驗證碼",
+    "emailVerifyConfirm": "驗證",
+    "emailVerifySendFailed": "無法傳送驗證碼，請再試一次。",
+    "emailVerifyFailed": "驗證碼不正確，請確認後再試一次。",
+    "emailVerifiedTitle": "電子郵件已驗證",
+    "emailVerifiedMessage": "您的電子郵件地址已完成驗證。"
   },
   "managedUsers": {
     "title": "家庭管理",

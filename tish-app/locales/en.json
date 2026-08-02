@@ -221,7 +221,17 @@
     "revokeConfirmTitle": "Withdraw access?",
     "revokeConfirmCaregiver": "{{name}} will no longer be able to see your records, and will stop receiving reminders about your missed doses.",
     "revokeConfirmDependent": "You will no longer be able to see {{name}}’s records, and their reminders will be removed from this phone.",
-    "revokeFailed": "Couldn’t withdraw access. Please try again."
+    "revokeFailed": "Couldn’t withdraw access. Please try again.",
+    "emailNotVerified": "{{email}} — not verified",
+    "emailVerifyAction": "Verify",
+    "emailVerifyDialogTitle": "Verify your email",
+    "emailVerifyDialogBody": "Enter the code we sent to {{email}}.",
+    "emailVerifyCodeLabel": "Verification code",
+    "emailVerifyConfirm": "Verify",
+    "emailVerifySendFailed": "Couldn't send the verification code. Please try again.",
+    "emailVerifyFailed": "That code wasn't accepted. Check it and try again.",
+    "emailVerifiedTitle": "Email verified",
+    "emailVerifiedMessage": "Your email address is now verified."
   },
   "managedUsers": {
     "title": "Family Management",
