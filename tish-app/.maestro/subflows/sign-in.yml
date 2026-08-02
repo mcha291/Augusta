@@ -25,11 +25,22 @@ appId: ${MAESTRO_APP_ID}
     id: 'login-password'
 - inputText: ${MAESTRO_PASSWORD}
 
-# The submit button sits below the password field, and on shorter viewports the
-# keyboard covers it. `hideKeyboard` is the obvious fix but Maestro documents it
-# as unreliable on iOS, which has no native keyboard-dismissal API — and iOS is
-# the release target. Scrolling the button into view does not depend on the
-# keyboard going away at all, and is a no-op when it is already visible.
+# Dismiss the keyboard before going near the submit button. This is the whole
+# ballgame, not a tidy-up: with the keyboard up, `login-submit` occupies
+# y=531..587 while the keyboard occupies y=539 downward, so the button's centre
+# is *underneath* it. Maestro still reports `tapOn` as COMPLETED — the element
+# it targeted is present and on-screen, merely covered — and the tap lands on
+# the keyboard. Every symptom followed from that: handleLogin never ran, so
+# there was no network call, no error alert, and no navigation.
+#
+# `pressKey: Enter` rather than `hideKeyboard`, which Maestro documents as
+# unreliable on iOS (there is no native dismissal API). The password field is
+# the last input and has no `onSubmitEditing`, so Return just blurs it, which
+# is both deterministic and what a real user does.
+- pressKey: Enter
+
+# Kept as a safety net for shorter viewports, where the button can sit below
+# the fold even with the keyboard gone. A no-op when it is already visible.
 - scrollUntilVisible:
     element:
       id: 'login-submit'
@@ -42,13 +53,17 @@ appId: ${MAESTRO_APP_ID}
 # calls checkUser() against RDS before it will navigate. 30s covers a cold
 # Lambda on top of both.
 #
-# The landing signal is the tab bar, not the Home screen's root view. Both are
-# testIDs, but only one is reliably in the hierarchy Maestro searches: on iOS,
-# XCUITest builds its tree from the accessibility hierarchy, and a plain
-# container `View` that is not itself an accessibility element can be collapsed
-# out of it. The tab button is a touchable, so it is always an element in its
-# own right. That distinction is exactly what the first run showed — every
-# interactive selector resolved, and only the container did not.
+# The landing signal is the tab bar rather than the Home screen's root view,
+# because a tab button is a touchable and therefore unambiguously an element in
+# its own right.
+#
+# An earlier version of this comment claimed the Home root was *invisible* to
+# XCUITest because plain container views get collapsed out of the accessibility
+# hierarchy. That was a guess, and it was wrong: `tab-index` failed identically,
+# and the captured hierarchy showed the run never left the login screen at all.
+# Whether a testID on a container view resolves on iOS is still an open
+# question — the optional `screen-home` assertion in 01-sign-in.yml is what
+# answers it.
 - extendedWaitUntil:
     visible:
       id: 'tab-index'
