@@ -1,6 +1,6 @@
-# The dashboard is its own git repository (deployed separately via Amplify
-# Hosting) — never track it from this repo.
-dashboard/
+# The dashboard lives here too, under dashboard/ — it has its own .gitignore
+# for build output. It used to be a separate repository; its history was
+# imported as a subtree on 2026-08-08.
 
 # Claude Code local config
 .claude/
