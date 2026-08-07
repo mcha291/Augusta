@@ -1,0 +1,53 @@
+name: Deploy admin API Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+
+# OIDC role assumption — no long-lived AWS keys in GitHub. The role setup is
+# documented in the app repo at tish-app/backend/DEPLOY.md (one role covers
+# both this Lambda and the app backend Lambda).
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev
+
+      - name: Run functional tests
+        # Deploy gate — a failing handler never ships. Tests use node's
+        # built-in runner and stubbed I/O, so no extra deps or services needed.
+        run: npm test
+
+      - name: Package function
+        run: zip -r function.zip index.mjs package.json node_modules
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Update Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name "${{ vars.ADMIN_FUNCTION_NAME }}" \
+            --zip-file fileb://function.zip \
+            --publish
