@@ -1,0 +1,58 @@
+name: Dashboard tests
+
+# The dashboard's own tests: the admin Lambda's functional suite, and a
+# typecheck+build of the SPA.
+#
+# Kept separate from `test.yml` (which covers the app) purely so the path
+# filters can be tight. The repository is private, so runner minutes are
+# metered — a change under tish-app/ must not pay for a dashboard build, and
+# vice versa. This filter is the whole reason the file exists; when this
+# workflow lived in the standalone dashboard repo it had no `paths:` at all,
+# which in a monorepo would mean running on every single commit.
+on:
+  push:
+    paths:
+      - 'dashboard/**'
+      - '.github/workflows/dashboard-tests.yml'
+  pull_request:
+    paths:
+      - 'dashboard/**'
+
+jobs:
+  admin-lambda:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard/server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/server/package-lock.json
+
+      - run: npm ci --omit=dev
+
+      - run: npm test
+
+  spa-typecheck-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
