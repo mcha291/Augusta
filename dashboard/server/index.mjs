@@ -1,4 +1,10 @@
-// Tish admin API — single-file Lambda handler (API Gateway HTTP API, payload v2).
+// Tish admin API — single-file Lambda handler (API Gateway, Lambda proxy).
+//
+// Accepts both proxy payload shapes. ap-east-2 has no HTTP APIs, so the
+// deployed gateway is a REST API sending payload format 1.0 (`httpMethod` /
+// `path`); the v2 shape (`requestContext.http.method` / `rawPath`) is still
+// read first so the handler stays portable if it ever moves to a region
+// where HTTP APIs exist. See eventMethod/eventPath below.
 //
 // Routes (all behind the gateway's Cognito JWT authorizer — admin pool
 // membership IS the authorization; this code never sees unauthenticated
@@ -144,8 +150,20 @@ export function validateLocalePair(enObj, zhObj) {
   return problems;
 }
 
-// Route matching on the HTTP API's rawPath (deploy with the $default stage so
-// no stage prefix appears — documented in AWS-SETUP.md).
+// Payload-shape adapters. HTTP API (v2) carries the method under
+// requestContext.http and the path as rawPath; REST API (v1) uses httpMethod
+// and path. On a REST API `path` is already stage-stripped — a request to
+// /prod/tables arrives as "/tables" — so route matching is identical either way.
+export function eventMethod(event) {
+  return event?.requestContext?.http?.method ?? event?.httpMethod ?? '';
+}
+
+export function eventPath(event) {
+  return event?.rawPath ?? event?.path ?? '/';
+}
+
+// Route matching on the request path, which never includes a stage prefix
+// (see eventPath) — documented in AWS-SETUP.md.
 export function routeOf(method, path) {
   const clean = path.replace(/\/+$/, '') || '/';
   if (method === 'OPTIONS') return { name: 'preflight' };
@@ -221,8 +239,8 @@ export async function handler(event) {
     return json(500, { error: `Lambda misconfigured; missing env: ${missing.join(', ')}` });
   }
 
-  const method = event.requestContext?.http?.method ?? '';
-  const path = event.rawPath ?? '/';
+  const method = eventMethod(event);
+  const path = eventPath(event);
   const route = routeOf(method, path);
 
   try {

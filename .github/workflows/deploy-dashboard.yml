@@ -1,0 +1,111 @@
+name: Deploy dashboard SPA
+
+# Builds the admin dashboard and ships the built assets to Amplify Hosting.
+#
+# The Amplify app is deliberately NOT connected to this GitHub repo. Connecting
+# it needs an interactive OAuth/GitHub-App authorization in the Amplify console,
+# and in a monorepo it also needs AMPLIFY_MONOREPO_APP_ROOT plumbing. Driving
+# the deploy from here instead reuses the OIDC role the two Lambdas already use,
+# so all three deployables share one auth story and one place to look.
+#
+# dashboard/server/** is excluded: that is the admin Lambda, which has its own
+# workflow (deploy-admin-api.yml). Without the exclusion a server-only change
+# would pay for an SPA rebuild as well, and runner minutes are metered.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dashboard/**'
+      - '!dashboard/server/**'
+      - '.github/workflows/deploy-dashboard.yml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: dashboard
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: dashboard
+        # These are baked into the bundle at build time and are all public
+        # values (they ship to every browser that loads the app), which is why
+        # they are repo *variables* rather than secrets. VITE_MOCK=0 matters:
+        # dashboard/.env.local sets it to 1 for local development, and a stray
+        # 1 here would deploy a build serving fixtures instead of real data.
+        env:
+          VITE_MOCK: '0'
+          VITE_COGNITO_AUTHORITY: ${{ vars.VITE_COGNITO_AUTHORITY }}
+          VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID }}
+          VITE_COGNITO_DOMAIN: ${{ vars.VITE_COGNITO_DOMAIN }}
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+        run: npm run build
+
+      - name: Fail if the build came out in mock mode
+        working-directory: dashboard
+        # Cheap guard against a misconfigured variable silently publishing
+        # fixture data to the real dashboard. The mock user's email only
+        # survives tree-shaking when VITE_MOCK is truthy.
+        run: |
+          if grep -rq "demo@mock.local" dist/assets/; then
+            echo "::error::Built bundle contains mock fixtures - check VITE_MOCK and the repo variables."
+            exit 1
+          fi
+          echo "Build is in real-API mode."
+
+      - name: Package build output
+        working-directory: dashboard/dist
+        run: zip -r ../../dashboard-dist.zip .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          # Amplify Hosting has no endpoint in ap-east-2, so the app lives in
+          # ap-northeast-2 while everything else stays in Taipei.
+          aws-region: ${{ vars.AMPLIFY_REGION }}
+
+      - name: Deploy to Amplify Hosting
+        run: |
+          set -euo pipefail
+          deployment=$(aws amplify create-deployment \
+            --app-id "${{ vars.AMPLIFY_APP_ID }}" --branch-name main)
+          job_id=$(echo "$deployment" | jq -r '.jobId')
+          upload_url=$(echo "$deployment" | jq -r '.zipUploadUrl')
+
+          curl -sSf -X PUT --upload-file dashboard-dist.zip "$upload_url"
+
+          aws amplify start-deployment \
+            --app-id "${{ vars.AMPLIFY_APP_ID }}" --branch-name main --job-id "$job_id"
+
+          echo "Waiting for job $job_id..."
+          for _ in $(seq 1 60); do
+            status=$(aws amplify get-job --app-id "${{ vars.AMPLIFY_APP_ID }}" \
+              --branch-name main --job-id "$job_id" --query 'job.summary.status' --output text)
+            echo "  status=$status"
+            case "$status" in
+              SUCCEED) echo "Deployed."; exit 0 ;;
+              FAILED|CANCELLED) echo "::error::Amplify job $job_id ended as $status"; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "::error::Timed out waiting for Amplify job $job_id"
+          exit 1

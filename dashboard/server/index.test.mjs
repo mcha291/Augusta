@@ -1,6 +1,8 @@
 // Functional tests for the admin API Lambda: the real handler is invoked with
-// HTTP-API-v2-shaped events; Postgres is substituted via the _setPoolForTests
-// seam and the GitHub contents API via a recording fetch stub. Run: npm test
+// proxy-shaped events in both payload formats — v1 (REST API, what is actually
+// deployed, since ap-east-2 has no HTTP APIs) and v2 (HTTP API). Postgres is
+// substituted via the _setPoolForTests seam and the GitHub contents API via a
+// recording fetch stub. Run: npm test
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,6 +32,20 @@ function httpEvent({ method = 'GET', path = '/', query, body } = {}) {
   return {
     rawPath: path,
     requestContext: { http: { method } },
+    queryStringParameters: query,
+    body: body ? JSON.stringify(body) : undefined,
+  };
+}
+
+// REST API (payload format 1.0) — the shape the deployed gateway actually
+// sends. `path` is stage-stripped by API Gateway, so /prod/tables arrives here
+// as /tables; requestContext.path keeps the stage and is deliberately not read.
+function restEvent({ method = 'GET', path = '/', query, body } = {}) {
+  return {
+    path,
+    httpMethod: method,
+    resource: path,
+    requestContext: { path: `/prod${path}`, httpMethod: method },
     queryStringParameters: query,
     body: body ? JSON.stringify(body) : undefined,
   };
@@ -92,6 +108,28 @@ test('OPTIONS preflight returns 204 with the configured origin', async () => {
 test('unknown route returns 404', async () => {
   const res = await handler(httpEvent({ method: 'DELETE', path: '/translations' }));
   assert.equal(res.statusCode, 404);
+});
+
+// The deployed gateway is a REST API, so payload format 1.0 is the shape that
+// actually runs in production — v2 is the portable-but-unused path. If these
+// break, every route 404s behind the real gateway while the v2 tests stay green.
+test('REST payload (v1) routes identically to HTTP payload (v2)', async () => {
+  _setPoolForTests(makePool([{ match: /COUNT/, result: { rows: [{ count: 7 }] } }]));
+  const res = await handler(restEvent({ path: '/tables' }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(parse(res).tables[0], { name: 'users', rowCount: 7 });
+});
+
+test('REST payload (v1) carries method through for non-GET verbs', async () => {
+  const res = await handler(restEvent({ method: 'OPTIONS', path: '/translations' }));
+  assert.equal(res.statusCode, 204);
+  assert.equal(res.headers['Access-Control-Allow-Origin'], 'https://admin.example.com');
+});
+
+test('REST payload (v1) resolves path parameters from the path, not pathParameters', async () => {
+  const res = await handler(restEvent({ path: '/tables/pg_shadow' }));
+  assert.equal(res.statusCode, 404);
+  assert.match(parse(res).error, /Unknown table/);
 });
 
 // ---------------------------------------------------------------------------
