@@ -25,9 +25,9 @@ Account `180891490019`. Written 2026-07-24.
 | C1 ap-east-2 network foundation | **done** — subnet group + scoped SGs |
 | C2 snapshot / copy / restore | **done** — private instance live in Taipei |
 | C3 Lambda deployed to Taipei | **done** — needs `DB_PASSWORD` |
-| C4 repoint front door | **done** — all 5 integrations on Taipei, stage `6f0bzv` deployed |
-| C5 soak + decommission | **in progress** — Sydney still running, untouched |
-| D1 open Function URL | **resolved in app** — deletion deferred, see note |
+| C4 repoint front door | **done** — now **7** integrations, all on Taipei; stage is `production` (`6f0bzv` was a deployment id, not the stage) |
+| C5 soak + decommission | **done 2026-08-03** — Sydney fully decommissioned, see below |
+| D1 open Function URL | **closed 2026-08-03** — Function URL deleted |
 | D3 RDS private | **done** — restored `PubliclyAccessible: false` |
 | D3b live 0.0.0.0/0 exposure | **closed** — Sydney SG tightened, verified still working |
 | D4 endpoints consolidated | **done** — single front door |
@@ -42,8 +42,21 @@ Account `180891490019`. Written 2026-07-24.
 | Lambda SG | `sg-04bc9817aedc7ba73` (`tish-lambda-sg`) |
 | RDS SG | `sg-06942ffa08d47eb78` (`tish-rds-sg`) — 5432 from Lambda SG only |
 | RDS instance | `season1` → `season1.c308e88466sa.ap-east-2.rds.amazonaws.com`, private, 7-day backups |
-| Lambda | `operation-strix`, nodejs24.x, **timeout 15s** (was 3s) |
+| Lambda | `operation-strix`, nodejs24.x, **timeout 15s** (was 3s), 128 MB |
 | IAM | inline `CloudWatchLogsApEast2` added to `operation-strix-role-8wrlapsc` |
+
+Three more Lambdas joined the region on 2026-08-01, after this table was written
+— Phase 5 rather than Track C, listed here so the region's inventory is complete:
+
+| Resource | Identifier |
+| --- | --- |
+| Lambda | `tish-migrate`, nodejs24.x, 300s, 256 MB — the migration runner; RDS is private, so this is the only way to apply a migration |
+| Lambda | `tish-escalate-db`, nodejs24.x, 60s, 256 MB |
+| Lambda | `tish-escalate-dispatch`, nodejs24.x, 120s, 256 MB |
+
+Note `operation-strix` is still on **128 MB** — the C5 "Watch" note below
+recommended 256 MB and it was never applied. The three functions above were
+created at 256 MB.
 
 ---
 
@@ -240,9 +253,23 @@ Nothing here touches identity, so it's fully reversible until cutover.
 
 ### C2. Snapshot and copy — mind the encryption
 
-`season1` is encrypted with a **customer-managed** KMS key
+`season1` is encrypted with a KMS key
 (`.../key/0ff4660b-f1b8-4c78-938c-cce231772e61`) that is regional. A cross-region
 copy must re-encrypt with a destination-region key, or it fails.
+
+> **Correction (2026-08-03).** That key was described here as *customer-managed*
+> and it is not. `describe-key` reports `KeyManager: AWS` under the alias
+> `alias/aws/rds` — the default AWS-managed key RDS uses when no other is named.
+> The re-encryption requirement above is unaffected and was right for the wrong
+> reason: an AWS-managed key cannot be used cross-region either.
+>
+> What the mistake does change is teardown. **An AWS-managed key cannot be
+> deleted** — `ScheduleKeyDeletion` fails with `AccessDeniedException` even as
+> root, because the key policy grants the account only `Describe*/Get*/List*/
+> RevokeGrant`. This is not a permissions problem to work around; AWS owns the
+> key's lifecycle. It also costs nothing, and with no encrypted resource left in
+> the region it is inert. The C5 teardown left it in place because there is no
+> other option.
 
 ```bash
 aws rds create-db-snapshot --region ap-southeast-2 --db-instance-identifier season1 --db-snapshot-identifier season1-premigration
@@ -312,12 +339,51 @@ alias attributes), so a genuine duplicate is still rejected at `signUp` — the
 user just gets a worse error message instead of inline feedback. Closes when the
 next build ships, since the app now uses the API Gateway route.
 
-#### Remaining
+#### Decommissioned 2026-08-03
 
-1. Ship a build containing the endpoint consolidation.
-2. Delete the Sydney Function URL — **only after** that build is out.
-3. Soak for a week, then decommission the Sydney Lambda and RDS. Keep
-   `season1-premigration` well beyond that.
+**Sydney is gone. There is no longer a rollback path to it** — see the Rollback
+section, which this supersedes.
+
+The soak ended with hard evidence rather than an elapsed timer: CloudWatch showed
+the Sydney Lambda's **last invocation was 2026-07-24**, the day *before* cutover,
+and **zero** in the nine days since. So the open question in D1 — whether testers
+on build 7 were still calling the Function URL — was answered empirically before
+anything was deleted. Nobody was.
+
+Verified before deleting: all **7** API Gateway integrations resolved to
+ap-east-2 (the table above says 5; it had grown), and no ENIs remained attached
+to the Sydney security groups.
+
+Deleted, in this order:
+
+1. Lambda Function URL (`AuthType: NONE` — the D1b user-enumeration endpoint)
+2. Lambda `operation-strix`
+3. RDS `season1` — `--skip-final-snapshot --delete-automated-backups`
+4. Manual snapshot `season1-premigration` — **the rollback anchor, deliberately
+   destroyed on the owner's instruction.** Taipei's own 7-day automated backups
+   are now the only recovery point; the 2026-07-24 pre-cutover state is
+   unrecoverable.
+5. Layer `pg-layer:1`
+6. Security groups `rds-ec2-1` and `ec2-rds-1`
+
+Post-check: Sydney lists zero RDS instances, zero snapshots, zero Lambda
+functions. Taipei `/genders`, `/conditions` and `/check-availability` all 200 and
+`/me` still 401, so the Cognito authorizer is intact.
+
+**Two gotchas worth keeping.** The two security groups referenced *each other*
+(RDS ingress ← EC2 SG, EC2 egress → RDS SG), so both `delete-security-group`
+calls failed with `DependencyViolation` until the pair of cross-referencing rules
+was revoked first. And the KMS key could not be deleted at all — see the
+correction in C2.
+
+#### Left in Sydney deliberately
+
+Neither is a migration artifact; both predate this stack and were left alone:
+
+- Layer `amplifyDataAmplifyCodegenAssets…AwsCliLayerE322F905`
+- Security groups `rds-rdsproxy-1`, `lambda-rdsproxy-1`, `rdsproxy-lambda-1`,
+  `launch-wizard-1`, `launch-wizard-2` — from an RDS Proxy setup and the EC2
+  launch wizard, unrelated to `season1`
 
 #### Watch
 
@@ -477,10 +543,19 @@ gets deployed and when. Deliberately left alone.
 
 ## Rollback
 
+> **No longer available as of 2026-08-03.** C5 decommissioned Sydney and, on the
+> owner's instruction, deleted `season1-premigration` with it. What follows is
+> kept as the record of what the plan was during the migration; it does not
+> describe anything you can still do.
+
 The `season1-premigration` snapshot is the anchor. Until C5 completes, the Sydney
 stack is untouched and reverting means pointing `utils/api.tsx` and the API
 Gateway integration back. Cognito never moves, so no identity state is ever at
 risk.
+
+**Recovery today** is Taipei's own 7-day automated RDS backups and nothing else.
+Cognito is still untouched by all of this, so identity was never at risk either
+way — the exposure is the medication data, and it is now one region deep.
 
 ## What I can and can't do
 
