@@ -14,9 +14,29 @@
 //   GET /translations            -> both locale files from GitHub (content + sha)
 //   PUT /translations            -> validate + commit one locale file to main
 //
-// Required env vars (no fallbacks by design — fail loudly, never ship
-// credentials in source): DB_HOST, DB_USER, DB_PASSWORD, DB_NAME,
-// GITHUB_TOKEN, GITHUB_REPO (e.g. "mcha291/Augusta"), ALLOWED_ORIGIN.
+// This file is deployed as **two Lambda functions from one zip**, differing
+// only in VPC attachment and which env vars they carry:
+//
+//   tish-admin-api           VPC-attached  -> /tables routes, reaches private RDS
+//   tish-admin-translations  no VPC        -> /translations routes, reaches github.com
+//
+// The split is forced by networking, not by design taste. A VPC-attached
+// Lambda in these subnets has *no route to the internet* — the subnets point
+// 0.0.0.0/0 at an Internet Gateway, and Lambda ENIs get no public IP, so
+// api.github.com is unreachable and the request hangs until the timeout. The
+// alternatives were a NAT gateway or interface endpoints, both of which cost
+// real money monthly to reintroduce connectivity that a function outside the
+// VPC has for free. RDS is private, so the table routes must stay inside.
+//
+// API Gateway routes per resource, so which function serves a request is a
+// gateway integration detail; this code is identical in both and simply never
+// sees the routes it wasn't given.
+//
+// Required env vars are therefore **per route** (see requiredEnvFor). No
+// fallbacks by design — fail loudly, never ship credentials in source. It also
+// means the translations function never carries DB_PASSWORD, and the table
+// function never carries GITHUB_TOKEN: neither can leak a credential it was
+// never given.
 
 import pg from 'pg';
 
@@ -24,7 +44,27 @@ import pg from 'pg';
 // Configuration
 // ---------------------------------------------------------------------------
 
-const REQUIRED_ENV = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME', 'GITHUB_TOKEN', 'GITHUB_REPO', 'ALLOWED_ORIGIN'];
+const DB_ENV = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'];
+const GITHUB_ENV = ['GITHUB_TOKEN', 'GITHUB_REPO'];
+
+/**
+ * Env vars a given route actually needs. Checking the union instead would mean
+ * each function failing closed over credentials it has no use for — and would
+ * have hidden the real fault here, since a function missing GITHUB_TOKEN and a
+ * function that cannot route to GitHub both surface as a broken /translations.
+ */
+export function requiredEnvFor(routeName) {
+  switch (routeName) {
+    case 'listTables':
+    case 'getTable':
+      return [...DB_ENV, 'ALLOWED_ORIGIN'];
+    case 'getTranslations':
+    case 'putTranslations':
+      return [...GITHUB_ENV, 'ALLOWED_ORIGIN'];
+    default:
+      return ['ALLOWED_ORIGIN'];
+  }
+}
 
 // Read-only viewer allowlist. Mirrors the table set the app backend exposes
 // via its /debug endpoint. Never derived from user input.
@@ -273,32 +313,35 @@ function json(statusCode, body) {
 }
 
 export async function handler(event) {
-  const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
-  if (missing.length > 0) {
-    return json(500, { error: `Lambda misconfigured; missing env: ${missing.join(', ')}` });
-  }
-
   const method = eventMethod(event);
   const path = eventPath(event);
   const route = routeOf(method, path);
 
-  // Preflight is exempt: browsers send OPTIONS without an Authorization header,
-  // so there are no claims to check and nothing is returned but CORS headers.
-  if (route.name !== 'preflight' && !isApproved(event)) {
+  // Preflight is exempt from everything below: browsers send OPTIONS without an
+  // Authorization header, so there are no claims to check, and it returns
+  // nothing but CORS headers so there is no configuration to require.
+  if (route.name === 'preflight') return json(204, {});
+
+  if (!isApproved(event)) {
     // Distinct from the gateway's 401. 401 means "no valid token"; this means
     // "valid token, account not approved yet", which is what a newly signed-up
     // staff member sees and what the dashboard turns into a waiting message.
+    //
+    // Ordered before the config check deliberately: a caller who is not
+    // approved should not be able to probe which env vars this function holds.
     return json(403, {
       error: 'Your account is awaiting administrator approval.',
       code: 'NOT_APPROVED',
     });
   }
 
+  const missing = requiredEnvFor(route.name).filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    return json(500, { error: `Lambda misconfigured; missing env: ${missing.join(', ')}` });
+  }
+
   try {
     switch (route.name) {
-      case 'preflight':
-        return json(204, {});
-
       case 'listTables': {
         const db = getPool();
         const tables = [];

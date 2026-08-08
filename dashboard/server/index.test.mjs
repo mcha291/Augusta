@@ -6,7 +6,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, ALLOWED_TABLES, groupsFrom } from './index.mjs';
+import { handler, _setPoolForTests, ALLOWED_TABLES, groupsFrom, requiredEnvFor } from './index.mjs';
 
 const ENV = {
   DB_HOST: 'db.local', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'postgres',
@@ -86,6 +86,14 @@ function stubFetch(files, { putStatus = 200 } = {}) {
   return calls;
 }
 
+const DB_ENV_KEYS = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'];
+const GITHUB_ENV_KEYS = ['GITHUB_TOKEN', 'GITHUB_REPO'];
+
+// Locale fixtures, used by the env-split tests below as well as the
+// translations section further down.
+const EN = { common: { hello: 'Hello {{name}}' } };
+const ZH = { common: { hello: '你好 {{name}}' } };
+
 const realFetch = globalThis.fetch;
 let pool;
 
@@ -109,6 +117,65 @@ test('fails closed with 500 when env vars are missing', async () => {
   const res = await handler(httpEvent({ path: '/tables' }));
   assert.equal(res.statusCode, 500);
   assert.match(parse(res).error, /missing env/);
+});
+
+// ---------------------------------------------------------------------------
+// Per-route env requirements
+// ---------------------------------------------------------------------------
+// One zip is deployed as two functions: the VPC-attached one holds DB
+// credentials and no GitHub token, the non-VPC one the reverse. Requiring the
+// union would make each fail closed over secrets it was deliberately not given.
+
+test('table routes need DB credentials but not a GitHub token', async () => {
+  for (const k of GITHUB_ENV_KEYS) delete process.env[k];
+  _setPoolForTests(makePool([{ match: /COUNT/, result: { rows: [{ count: 2 }] } }]));
+  const res = await handler(restEvent({ path: '/tables' }));
+  assert.equal(res.statusCode, 200, 'no GitHub token must not break the table viewer');
+});
+
+test('translations routes need a GitHub token but not DB credentials', async () => {
+  for (const k of DB_ENV_KEYS) delete process.env[k];
+  stubFetch({ 'en.json': EN, 'zh-Hant.json': ZH });
+  const res = await handler(restEvent({ path: '/translations' }));
+  assert.equal(res.statusCode, 200, 'no DB credentials must not break the editor');
+});
+
+test('a table route still fails closed without DB credentials', async () => {
+  for (const k of DB_ENV_KEYS) delete process.env[k];
+  const res = await handler(restEvent({ path: '/tables' }));
+  assert.equal(res.statusCode, 500);
+  assert.match(parse(res).error, /DB_HOST/);
+});
+
+test('a translations route still fails closed without a GitHub token', async () => {
+  for (const k of GITHUB_ENV_KEYS) delete process.env[k];
+  const res = await handler(restEvent({ path: '/translations' }));
+  assert.equal(res.statusCode, 500);
+  assert.match(parse(res).error, /GITHUB_TOKEN/);
+});
+
+test('requiredEnvFor never demands a credential the route cannot use', () => {
+  assert.deepEqual(requiredEnvFor('listTables').filter((k) => k.startsWith('GITHUB')), []);
+  assert.deepEqual(requiredEnvFor('getTranslations').filter((k) => k.startsWith('DB_')), []);
+  // ALLOWED_ORIGIN is the one both need — it shapes the CORS headers.
+  for (const r of ['listTables', 'getTable', 'getTranslations', 'putTranslations']) {
+    assert.ok(requiredEnvFor(r).includes('ALLOWED_ORIGIN'), `${r} must require ALLOWED_ORIGIN`);
+  }
+});
+
+// Config state must not be probeable by someone who has not been approved.
+test('an unapproved caller gets 403, not a 500 revealing what is unconfigured', async () => {
+  for (const k of Object.keys(ENV)) delete process.env[k];
+  const res = await handler(restEvent({ path: '/tables', groups: [] }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(parse(res).code, 'NOT_APPROVED');
+});
+
+// Preflight predates both checks: no Authorization header, nothing to configure.
+test('preflight works even with no env and no claims at all', async () => {
+  for (const k of Object.keys(ENV)) delete process.env[k];
+  const res = await handler(restEvent({ method: 'OPTIONS', path: '/tables', groups: null }));
+  assert.equal(res.statusCode, 204);
 });
 
 test('OPTIONS preflight returns 204 with the configured origin', async () => {
@@ -240,9 +307,6 @@ test('GET /tables/{name} falls back to the first column for unknown sort', async
 // ---------------------------------------------------------------------------
 // Translations
 // ---------------------------------------------------------------------------
-
-const EN = { common: { hello: 'Hello {{name}}' } };
-const ZH = { common: { hello: '你好 {{name}}' } };
 
 test('GET /translations returns both locales with shas', async () => {
   stubFetch({ 'en.json': EN, 'zh-Hant.json': ZH });

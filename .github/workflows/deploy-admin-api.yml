@@ -46,8 +46,21 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Update Lambda code
+        # One zip, two functions. They run identical code and differ only in
+        # VPC attachment and env: the first is in the VPC to reach the private
+        # RDS and serves /tables; the second is outside it to reach
+        # api.github.com and serves /translations. A VPC-attached Lambda in
+        # these subnets has no internet route at all, which is why this is two
+        # functions instead of one. See dashboard/AWS-SETUP.md.
+        #
+        # Both must be updated together — they share a source file, so shipping
+        # one and not the other leaves the routes running different builds.
         run: |
-          aws lambda update-function-code \
-            --function-name "${{ vars.ADMIN_FUNCTION_NAME }}" \
-            --zip-file fileb://function.zip \
-            --publish
+          for fn in "${{ vars.ADMIN_FUNCTION_NAME }}" "${{ vars.TRANSLATIONS_FUNCTION_NAME }}"; do
+            echo "Deploying $fn..."
+            aws lambda update-function-code \
+              --function-name "$fn" \
+              --zip-file fileb://function.zip \
+              --publish \
+              --query 'Version' --output text
+          done

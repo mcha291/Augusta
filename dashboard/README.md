@@ -11,12 +11,21 @@ membership; there is no self-signup.
 | Path | What it is |
 | --- | --- |
 | `src/` | React 19 + Vite SPA (shadcn/ui, TanStack Query/Table) |
-| `server/` | The admin API Lambda — a single-file handler, its own npm package |
+| `server/` | The admin API — one handler, deployed as **two** Lambdas (see below) |
 | `cognito-triggers/` | Pre Sign-up trigger: restricts self-registration to the company domain |
 | `AWS-SETUP.md` | Every AWS resource behind this, with identifiers |
 
-Each of the three deploys independently; they share nothing but the API contract
-in `src/lib/types.ts`.
+Each deploys independently; they share nothing but the API contract in
+`src/lib/types.ts`.
+
+`server/` ships as two Lambdas from one zip — identical code, different
+networking. `tish-admin-api` sits in the VPC to reach the private database and
+serves `/tables`; `tish-admin-translations` sits outside it to reach
+`api.github.com` and serves `/translations`. A VPC-attached Lambda in these
+subnets has no internet route at all, and restoring one costs money monthly, so
+the split is the cheap way round it. `requiredEnvFor()` keeps the env
+requirements per-route, so neither function holds the other's credentials.
+Details and the measurements in `AWS-SETUP.md`.
 
 ## Access
 

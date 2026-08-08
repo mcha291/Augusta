@@ -7,17 +7,16 @@ been done, so it is a record of what exists and how to change it. Account
 
 **Live URL: <https://main.d1x8yq4r6ivp8n.amplifyapp.com>**
 
-## ⚠ Outstanding — the localization editor is not functional yet
+## ⚠ Outstanding — the localization editor needs a GitHub token
 
-`GITHUB_TOKEN` on the admin Lambda is the literal placeholder
+`GITHUB_TOKEN` on `tish-admin-translations` is the literal placeholder
 `REPLACE_WITH_GITHUB_PAT`. A personal access token can't be created on your
 behalf, so it's the one step left.
 
 Until it is replaced: **the database viewer works, the translations page does
-not** (both `/translations` routes return a sanitized 500; the real 401 from
-GitHub is in CloudWatch). Nothing else is affected — the placeholder is there
-rather than the variable being absent because the handler fails closed on *any*
-missing env var, which would have taken the database viewer down too.
+not** — it returns a sanitized 500, with the real `401 Bad credentials` in
+CloudWatch. The placeholder is there rather than the variable being absent so
+that the failure is a clean auth rejection rather than a misconfiguration.
 
 1. GitHub → Settings → Developer settings → Fine-grained personal access tokens
    → **Generate new token**.
@@ -27,12 +26,13 @@ missing env var, which would have taken the database viewer down too.
 5. Install it (the token never reaches the browser; it lives only in the Lambda):
 
 ```bash
-aws lambda update-function-configuration --region ap-east-2 --function-name tish-admin-api --environment "Variables={DB_HOST=season1.c308e88466sa.ap-east-2.rds.amazonaws.com,DB_USER=mcha291,DB_PASSWORD=$DB_PASSWORD,DB_NAME=postgres,GITHUB_REPO=mcha291/Augusta,GITHUB_LOCALES_DIR=tish-app/locales,ALLOWED_ORIGIN=https://main.d1x8yq4r6ivp8n.amplifyapp.com,GITHUB_TOKEN=$NEW_PAT}"
+aws lambda update-function-configuration --region ap-east-2 --function-name tish-admin-translations --environment "Variables={GITHUB_REPO=mcha291/Augusta,GITHUB_LOCALES_DIR=tish-app/locales,ALLOWED_ORIGIN=https://main.d1x8yq4r6ivp8n.amplifyapp.com,GITHUB_TOKEN=$NEW_PAT}"
 ```
 
-`update-function-configuration` **replaces** the whole environment map, so every
-variable has to be present in that one call — omitting `DB_PASSWORD` would take
-the database viewer down. Set `DB_PASSWORD` and `NEW_PAT` in your shell first.
+Note the function name: the token goes on `tish-admin-translations`, **not**
+`tish-admin-api` — see the split below. `update-function-configuration`
+**replaces** the whole environment map, so every variable has to be in that one
+call. Set `NEW_PAT` in your shell first so the token stays out of your history.
 
 ## Accounts: staff sign themselves up, you approve
 
@@ -137,9 +137,10 @@ MIGRATION.md flags for the app pool.
 | App client (SPA, no secret) | `3ke31mij0lu8u4mulvkt388npk` | ap-east-2 |
 | Hosted UI domain | `https://tish-admin.auth.ap-east-2.amazoncognito.com` | ap-east-2 |
 | Authorization group | `approved` — membership is the actual access grant | ap-east-2 |
-| Lambda | `tish-admin-api`, nodejs24.x, 256 MB, 15s, VPC-attached | ap-east-2 |
+| Lambda | `tish-admin-api`, nodejs24.x, 256 MB, 15s, **VPC-attached** — `/tables` | ap-east-2 |
+| Lambda | `tish-admin-translations`, nodejs24.x, 256 MB, 15s, **no VPC** — `/translations` | ap-east-2 |
 | Lambda | `tish-admin-presignup`, nodejs24.x, 128 MB, 5s, no VPC | ap-east-2 |
-| Lambda execution roles | `tish-admin-api-role`, `tish-admin-presignup-role` | global |
+| Lambda execution roles | `tish-admin-api-role`, `tish-admin-translations-role`, `tish-admin-presignup-role` | global |
 | SES identity | `ti-smarthealth.com`, policy `CognitoTaipei` | ap-northeast-2 |
 | SNS caller role (SMS) | `CognitoIdpSNSServiceRole-tish-admin` | global |
 | REST API | `0u10zqz4r0`, stage `prod` | ap-east-2 |
@@ -147,11 +148,46 @@ MIGRATION.md flags for the app pool.
 | Cognito authorizer | `tish-admin-pool` on all four authorized methods | ap-east-2 |
 | Amplify app | `d1x8yq4r6ivp8n` (`tish-dashboard`), branch `main` | **ap-northeast-2** |
 
-The Lambda shares the app backend's VPC placement — subnets
+`tish-admin-api` shares the app backend's VPC placement — subnets
 `subnet-0ef1ccc6d175653c3`, `subnet-05a4cca510c84174d`, `subnet-02d53fa57a84c5a23`
 and security group `sg-04bc9817aedc7ba73` (`tish-lambda-sg`), which is what
 `tish-rds-sg` accepts 5432 from. `season1` is private, so that group membership
 is the only route to it.
+
+### Why the API is two Lambdas
+
+**A VPC-attached Lambda here has no route to the internet.** The subnets send
+`0.0.0.0/0` to an Internet Gateway, there is no NAT gateway and no VPC
+endpoints, and Lambda ENIs never get public IPs — so a request to
+`api.github.com` from inside the VPC hangs until the function times out. This
+was measured, not assumed: the same `/translations` call takes **14s** (timeout)
+on the VPC function and **3s** (a clean `401 Bad credentials`) outside it.
+
+So the routes are split by what they need to reach:
+
+| Function | VPC | Reaches | Serves | Holds |
+| --- | --- | --- | --- | --- |
+| `tish-admin-api` | yes | private RDS | `/tables`, `/tables/{name}` | `DB_*` |
+| `tish-admin-translations` | no | api.github.com | `/translations` | `GITHUB_*` |
+
+**One zip, deployed twice.** They run identical code from `server/index.mjs`;
+only VPC config and env differ. `requiredEnvFor()` makes the env requirements
+per-route, so neither function carries a credential it cannot use — the
+translations function has no `DB_PASSWORD` and the table function has no
+`GITHUB_TOKEN`. Each fails closed with a 500 on the other's routes, which API
+Gateway never sends it anyway.
+
+The alternatives were a NAT gateway (~$30–45/month) or interface endpoints
+(~$7/month per AZ, and you have three) — both paying monthly to restore
+connectivity that a function outside the VPC has for nothing.
+
+**This is the pattern to follow for the planned telemetry work.** Athena and S3
+are "the internet" from inside that VPC too, so query routes belong on
+`tish-admin-translations` (or a sibling outside the VPC), not on
+`tish-admin-api`. Do that and the telemetry path needs no VPC endpoints and no
+NAT at all. Athena, Glue, Kinesis, Firehose, Timestream and OpenSearch are all
+available in ap-east-2 — verified 2026-08-08. QuickSight is **not**, which is
+academic given the dashboard is custom-built.
 
 ### Two things are not in Taipei, and can't be
 
@@ -193,7 +229,7 @@ OIDC role (`github-lambda-deploy`) — no AWS keys in GitHub. See
 
 | Change under | Workflow | Target |
 | --- | --- | --- |
-| `dashboard/server/**` | `deploy-admin-api.yml` | Lambda `tish-admin-api` |
+| `dashboard/server/**` | `deploy-admin-api.yml` | Lambdas `tish-admin-api` **and** `tish-admin-translations` (same zip) |
 | `dashboard/cognito-triggers/**` | `deploy-cognito-triggers.yml` | Lambda `tish-admin-presignup` |
 | `dashboard/**` (excl. `server/`) | `deploy-dashboard.yml` | Amplify `d1x8yq4r6ivp8n` |
 | `tish-app/backend/**` | `deploy-backend.yml` | Lambda `operation-strix` |
@@ -243,7 +279,9 @@ Recorded, not fixed — these belong to the security plan rather than this setup
 
 - `DB_PASSWORD` and `GITHUB_TOKEN` are plaintext Lambda env vars, readable by
   anyone with `lambda:GetFunctionConfiguration`. Secrets Manager is the fix.
-  Same finding as D2 in `MIGRATION.md`, which the app backend also has.
+  Same finding as D2 in `MIGRATION.md`, which the app backend also has. The
+  two-function split does narrow the blast radius — each holds only its own
+  credential — but does not solve it.
 - The Lambda connects as `mcha291`, the RDS master user, but only ever SELECTs.
   A read-only Postgres role would be least privilege.
 - `pg` connects with `ssl: { rejectUnauthorized: false }`, so the database
