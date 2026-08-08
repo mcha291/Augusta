@@ -115,6 +115,10 @@
     "burstSection": "ALARM REPEATS",
     "burstLabel": "How many times the alarm sounds",
     "burstAndroidNote": "This phone sounds the alarm once, whatever you choose here. The setting still applies to other phones on this reminder.",
+    "snoozeSection": "SNOOZE",
+    "snoozeLabel": "How long snooze waits",
+    "snoozeOption": "{{minutes}} min",
+    "snoozeEscalationNote": "Snoozing also delays your caregiver being told by the same amount.",
     "escalationSection": "IF YOU DO NOT RESPOND",
     "escalationEnabledLabel": "Tell my caregiver",
     "escalationDelayLabel": "How long to wait first",
@@ -423,6 +427,7 @@
       "emailOrPhoneRequired": "Enter an email address or a phone number.",
       "escalationDelayRange": "The escalation delay must be between 5 and 240 minutes.",
       "alarmRepeatCountRange": "The alarm must repeat between 1 and 6 times.",
+      "snoozeMinutesRange": "Snooze must be between 1 and 120 minutes.",
       "escalationOrderInvalid": "That escalation order isn’t valid.",
       "timeFormatInvalid": "Enter a time as HH:mm — for example 08:00."
     }

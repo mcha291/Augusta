@@ -35,6 +35,7 @@ import {
     type MealKey,
     type MealTimes,
 } from '@/utils/meal-alarms';
+import { snoozeMinutesFor } from '@/utils/alarm-settings';
 import { scheduleMedicationNotifications } from '@/utils/notification-helper';
 import ActiveProfileBadge from '@/components/active-profile-badge';
 import { useAuth } from '@/context/AuthContext';
@@ -62,6 +63,21 @@ const CUSTOM_DELAY_MAX = 240;
 
 /** D-9 / 2.6 — how many consecutive alerts one dose schedules. */
 const BURST_OPTIONS = [1, 2, 3, 4, 5, 6];
+
+/**
+ * Migration 008 — how long the snooze button defers the alarm, in minutes.
+ *
+ * Presets rather than a number field, the same call the escalation delay makes
+ * below: the primary users are elderly and the app leans on large targets
+ * throughout.
+ *
+ * Capped at 30 here against the column's 120 on purpose. A snooze re-anchors the
+ * escalation clock (D-6), so a long one is indistinguishable to the caregiver
+ * from a patient who has quietly stopped responding — and D-12 only rescues that
+ * after four presses. Nothing stops a longer value being stored; the form simply
+ * does not lead anyone into it.
+ */
+const SNOOZE_OPTIONS = [5, 10, 15, 30];
 
 export default function MedicationReminderForm() {
     const router = useRouter();
@@ -155,6 +171,12 @@ export default function MedicationReminderForm() {
     );
     const [alarmRepeatCount, setAlarmRepeatCount] = useState(
         Number(initialData?.alarm_repeat_count) || 3
+    );
+    // Migration 008. Normalised through `alarm-settings` rather than with a
+    // local `|| 10`, so the form, the scheduler and the server cannot disagree
+    // about what an absent or malformed value means.
+    const [snoozeMinutes, setSnoozeMinutes] = useState(
+        snoozeMinutesFor(initialData?.snooze_minutes)
     );
 
     // Presets over a raw number input: the primary users are elderly, and the app
@@ -269,6 +291,7 @@ export default function MedicationReminderForm() {
                 escalation_delay_minutes: effectiveDelay,
                 escalation_order: escalationOrder,
                 alarm_repeat_count: alarmRepeatCount,
+                snooze_minutes: snoozeMinutes,
             };
 
             const res = await apiRequest(`/medication-reminders`, {
@@ -318,6 +341,15 @@ export default function MedicationReminderForm() {
                         // would schedule nothing at all until then.
                         escalation_enabled: escalationEnabled,
                         escalation_delay_minutes: effectiveDelay,
+                        // Carried for the same reason as the two above: this
+                        // object is what the scheduler writes into the OS queue
+                        // right now, and anything missing from it is a setting
+                        // the alarms do not honour until the next reconcile.
+                        // `alarm_repeat_count` was already missing here — a
+                        // reminder saved with a burst of 5 scheduled 3 until
+                        // the medications screen next re-synced.
+                        alarm_repeat_count: alarmRepeatCount,
+                        snooze_minutes: snoozeMinutes,
                     }, { viewerUserId: user?.id });
                 }
 
@@ -540,7 +572,43 @@ export default function MedicationReminderForm() {
                     ) : null}
                 </Surface>
 
-                {/* --- 5c. CAREGIVER ESCALATION (D-3 / D-8 / 2.4) --- */}
+                {/* --- 5c. SNOOZE (4.4 / migration 008) --- */}
+                <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionHeaderText}>{t('medicationReminderForm.snoozeSection')}</Text>
+                </View>
+                <Surface style={[styles.cardSurface, { padding: 12 }]} elevation={0}>
+                    <Text style={styles.sectionLabel}>{t('medicationReminderForm.snoozeLabel')}</Text>
+                    <View style={styles.chipRow}>
+                        {SNOOZE_OPTIONS.map((minutes) => {
+                            const isSel = snoozeMinutes === minutes;
+                            return (
+                                <Chip
+                                    key={minutes}
+                                    selected={isSel}
+                                    onPress={() => setSnoozeMinutes(minutes)}
+                                    style={[styles.chip, { backgroundColor: isSel ? COLORS.primary : 'white' }]}
+                                    selectedColor={isSel ? 'white' : COLORS.primary}
+                                    showSelectedCheck={false}
+                                >
+                                    {t('medicationReminderForm.snoozeOption', { minutes })}
+                                </Chip>
+                            );
+                        })}
+                    </View>
+                    {/*
+                      Said out loud because it is the one thing about this setting
+                      a patient cannot infer, and it has a consequence: a snooze
+                      re-anchors the caregiver escalation clock (D-6), so a longer
+                      snooze is also a longer wait before anyone else is told. Only
+                      shown when escalation is actually on — otherwise there is no
+                      caregiver to delay and the sentence would be noise.
+                    */}
+                    {escalationEnabled ? (
+                        <Text variant="labelSmall" style={styles.audioHint}>{t('medicationReminderForm.snoozeEscalationNote')}</Text>
+                    ) : null}
+                </Surface>
+
+                {/* --- 5d. CAREGIVER ESCALATION (D-3 / D-8 / 2.4) --- */}
                 <View style={styles.sectionHeader}>
                     <Text style={styles.sectionHeaderText}>{t('medicationReminderForm.escalationSection')}</Text>
                 </View>

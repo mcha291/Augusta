@@ -10,6 +10,7 @@ import AlarmOverlay from '../components/alarm-overlay';
 import { AuthProvider, useAuth } from '../context/AuthContext';
 import { useNotificationSync } from '../hooks/use-notification-sync';
 import { initI18n } from '../i18n';
+import { DEFAULT_SNOOZE_MINUTES, snoozeMinutesFor } from '../utils/alarm-settings';
 import { cancelAlarmBurst, dismissPresentedAlarms, notificationPermissionRequest, rescheduleNextOccurrence, setupNotificationChannels } from '../utils/notification-helper';
 import { registerPushToken } from '../utils/push-token';
 
@@ -31,14 +32,22 @@ export default function RootLayout() {
   // 4.3 — this holds the *identity* of the dose, not its details. The overlay
   // resolves the medication name and dosage itself when it opens; carrying them
   // here would just be re-introducing the frozen copy the payload used to hold.
+  //
+  // `snoozeMinutes` is the exception that proves the rule, and it is here rather
+  // than resolved for the same reason `soundKey` is: it governs how the alarm
+  // *behaves* rather than what it says, so it has to work on an alarm whose dose
+  // cannot be resolved at all. Normalised at schedule time (`alarm-settings`),
+  // so an alarm written by a pre-008 build carries none and lands on ten.
   const [alarmData, setAlarmData] = useState<{
     visible: boolean;
     reminderId: number | null;
     ownerUserId: number | null;
     timeStr: string | null;
     soundKey: string;
+    snoozeMinutes: number;
   }>({
-    visible: false, reminderId: null, ownerUserId: null, timeStr: null, soundKey: 'default'
+    visible: false, reminderId: null, ownerUserId: null, timeStr: null, soundKey: 'default',
+    snoozeMinutes: DEFAULT_SNOOZE_MINUTES
   });
   const [i18nReady, setI18nReady] = useState(false);
 
@@ -78,7 +87,8 @@ export default function RootLayout() {
         reminderId: Number(data.reminderId),
         ownerUserId: data.ownerUserId != null ? Number(data.ownerUserId) : null,
         timeStr: data.timeStr ?? null,
-        soundKey: data.soundKey || 'default'
+        soundKey: data.soundKey || 'default',
+        snoozeMinutes: snoozeMinutesFor(data.snoozeMinutes)
       });
 
       if (Platform.OS === 'web') return;
@@ -136,9 +146,20 @@ export default function RootLayout() {
     // 4.3's cache, refresh and degrade paths without a device:
     //   triggerAlarm(12)            → resolves reminder 12
     //   triggerAlarm(999999)        → nothing to resolve, generic prompt
+    //   triggerAlarm(12, null, null, 'default', 30)
+    //                               → snooze button reads "30m"
     if (__DEV__ && Platform.OS === 'web') {
-      (window as any).triggerAlarm = (reminderId = 1, ownerUserId = null, timeStr = null, sound = 'default') => {
-        setAlarmData({ visible: true, reminderId, ownerUserId, timeStr, soundKey: sound });
+      (window as any).triggerAlarm = (
+        reminderId = 1,
+        ownerUserId = null,
+        timeStr = null,
+        sound = 'default',
+        snoozeMinutes = DEFAULT_SNOOZE_MINUTES
+      ) => {
+        setAlarmData({
+          visible: true, reminderId, ownerUserId, timeStr, soundKey: sound,
+          snoozeMinutes: snoozeMinutesFor(snoozeMinutes),
+        });
       };
     }
 
@@ -390,6 +411,7 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
         ownerUserId={alarmData.ownerUserId}
         timeStr={alarmData.timeStr}
         soundKey={alarmData.soundKey}
+        snoozeMinutes={alarmData.snoozeMinutes}
         onDismiss={() => setAlarmData((prev: any) => ({ ...prev, visible: false }))}
       />
     </>

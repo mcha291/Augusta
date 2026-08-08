@@ -2,7 +2,8 @@ import { SOUND_MAP } from '@/constants/sounds';
 import { useAuth } from '@/context/AuthContext';
 import { useResolvedReminder } from '@/hooks/use-resolved-reminder';
 import { recordDoseAction } from '@/utils/dose-queue';
-import { SNOOZE_MINUTES, dismissPresentedAlarms, scheduleSnoozeAlert } from '@/utils/notification-helper';
+import { DEFAULT_SNOOZE_MINUTES } from '@/utils/alarm-settings';
+import { dismissPresentedAlarms, scheduleSnoozeAlert } from '@/utils/notification-helper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAudioPlayer } from 'expo-audio';
 import React, { useCallback, useEffect } from 'react';
@@ -22,6 +23,8 @@ interface AlarmOverlayProps {
   /** Which alarm slot fired, used to pick the right label of several. */
   timeStr?: string | null;
   soundKey: string;
+  /** How long the snooze button defers the alarm, in minutes. */
+  snoozeMinutes?: number;
   onDismiss: () => void;
 }
 
@@ -31,6 +34,7 @@ export default function AlarmOverlay({
   ownerUserId,
   timeStr,
   soundKey,
+  snoozeMinutes = DEFAULT_SNOOZE_MINUTES,
   onDismiss,
 }: AlarmOverlayProps) {
   const { t } = useTranslation();
@@ -96,6 +100,9 @@ export default function AlarmOverlay({
           ownerUserId: owner,
           timeStr,
           soundKey,
+          // From the payload, so a second snooze defers the alarm by the same
+          // interval as the first rather than reverting to the default.
+          minutes: snoozeMinutes,
         }).then((armed) => {
           if (!armed) console.warn('[alarm-overlay] snooze did not re-arm the alarm');
         });
@@ -121,11 +128,16 @@ export default function AlarmOverlay({
         ownerUserId: owner,
         action,
         timeStr,
-        ...(action === 'snooze' ? { minutes: SNOOZE_MINUTES } : {}),
+        // The value the device actually re-armed on, not the reminder's column:
+        // the two are the same in the ordinary case, and when they are not it is
+        // this one the patient will experience. `snoozed_until` has to point at
+        // the moment the alarm really comes back, or 5.4 escalates against a
+        // clock that disagrees with the phone in the patient's hand.
+        ...(action === 'snooze' ? { minutes: snoozeMinutes } : {}),
       }).catch((e) => console.warn('[alarm-overlay] could not record the dose', e));
     }
     onDismiss();
-  }, [reminderId, ownerUserId, timeStr, soundKey, onDismiss]);
+  }, [reminderId, ownerUserId, timeStr, soundKey, snoozeMinutes, onDismiss]);
 
   // 4.5 — `startVibration` lived here, defined and never called. It also leaked
   // its interval: the clearInterval was inside the callback and read `isVisible`
@@ -192,7 +204,7 @@ export default function AlarmOverlay({
                   said "5m" while nothing snoozed at all, and the one thing worse
                   than a button that does nothing is one that does something
                   other than what it says. */}
-              {t('alarmOverlay.snooze', { minutes: SNOOZE_MINUTES })}
+              {t('alarmOverlay.snooze', { minutes: snoozeMinutes })}
             </Button>
           </View>
 

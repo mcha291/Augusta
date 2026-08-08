@@ -631,7 +631,7 @@ test('a failed top-up must not stop a patient seeing their medication list', asy
 
 test('POST /medication-doses confirms the dose nearest to now without being told which', async () => {
   const pool = makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /UPDATE medication_doses\s+SET confirmed_at/, result: { rows: [{ id: 5, confirmed_at: 'now' }], rowCount: 1 } },
   ]);
   _setPoolForTests(pool);
@@ -642,14 +642,14 @@ test('POST /medication-doses confirms the dose nearest to now without being told
   assert.equal(res.statusCode, 200);
   assert.equal(parse(res).confirmed_at, 'now');
 
-  const lookup = sqlMatching(pool, /SELECT d\.\* FROM medication_doses/);
+  const lookup = sqlMatching(pool, /SELECT d\.\*.*FROM medication_doses/);
   assert.match(lookup, /abs\(extract\(epoch FROM \(d\.scheduled_for - now\(\)\)\)\) ASC/, 'nearest, so the client never computes a timestamp');
   assert.match(lookup, /r\.user_id = \$2/, 'scoped to the target user, not just the reminder id');
 });
 
 test('confirming twice does not overwrite who recorded it first (D-1: two devices)', async () => {
   const pool = makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /UPDATE medication_doses\s+SET confirmed_at/, result: { rows: [{ id: 5 }], rowCount: 1 } },
   ]);
   _setPoolForTests(pool);
@@ -666,20 +666,20 @@ test('the dose lookup prefers unconfirmed but does not exclude confirmed', async
   // idempotency above unreachable — and under D-1 the second confirm is the
   // caregiver's, i.e. exactly the case the column pair exists for.
   const pool = makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /UPDATE medication_doses\s+SET confirmed_at/, result: { rows: [{ id: 5 }], rowCount: 1 } },
   ]);
   _setPoolForTests(pool);
   await handler(restEvent({ method: 'POST', path: '/medication-doses', sub: 'sub-1', body: { reminder_id: 42 } }));
 
-  const sql = sqlMatching(pool, /SELECT d\.\* FROM medication_doses/);
+  const sql = sqlMatching(pool, /SELECT d\.\*.*FROM medication_doses/);
   assert.match(sql, /ORDER BY \(d\.confirmed_at IS NOT NULL\) ASC/, 'unconfirmed wins when one exists');
   assert.doesNotMatch(sql, /AND d\.confirmed_at IS NULL/, 'but a confirmed dose is still findable');
 });
 
 test('a dose that was never materialised returns 404 rather than pretending to record', async () => {
   _setPoolForTests(makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [], rowCount: 0 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [], rowCount: 0 } },
   ]));
   const res = await handler(restEvent({ method: 'POST', path: '/medication-doses', sub: 'sub-1', body: { reminder_id: 42 } }));
   assert.equal(res.statusCode, 404);
@@ -697,7 +697,7 @@ test('POST /medication-doses without a reminder_id is a 400 and touches no SQL',
 
 test('snoozing sets snoozed_until and counts the snooze', async () => {
   const pool = makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /SET snoozed_until/, result: { rows: [{ id: 5, snooze_count: 1 }], rowCount: 1 } },
   ]);
   _setPoolForTests(pool);
@@ -716,7 +716,7 @@ test('snoozing sets snoozed_until and counts the snooze', async () => {
 
 test('D-12: past three snoozes the response says escalation happens regardless', async () => {
   const pool = makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /SET snoozed_until/, result: { rows: [{ id: 5, snooze_count: 4 }], rowCount: 1 } },
   ]);
   _setPoolForTests(pool);
@@ -729,7 +729,7 @@ test('D-12: past three snoozes the response says escalation happens regardless',
 
 test('at or below the threshold, snoozing still defers escalation as D-6 intends', async () => {
   const pool = makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /SET snoozed_until/, result: { rows: [{ id: 5, snooze_count: 3 }], rowCount: 1 } },
   ]);
   _setPoolForTests(pool);
@@ -742,7 +742,7 @@ test('at or below the threshold, snoozing still defers escalation as D-6 intends
 
 test('snoozing an already-confirmed dose is a 409, not a silent no-op', async () => {
   _setPoolForTests(makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /SET snoozed_until/, result: { rows: [], rowCount: 0 } },
   ]));
   const res = await handler(restEvent({
@@ -755,7 +755,7 @@ test('snoozing an already-confirmed dose is a 409, not a silent no-op', async ()
 test('the snooze interval is clamped rather than trusted', async () => {
   let params;
   _setPoolForTests(makePool([
-    { match: /SELECT d\.\* FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
     { match: /SET snoozed_until/, result: (t, p) => { params = p; return { rows: [{ id: 5, snooze_count: 1 }], rowCount: 1 }; } },
   ]));
   await handler(restEvent({
@@ -763,6 +763,60 @@ test('the snooze interval is clamped rather than trusted', async () => {
     body: { reminder_id: 42, action: 'snooze', minutes: 99999 },
   }));
   assert.equal(params[1], 120);
+});
+
+// --- migration 008: the reminder's own snooze_minutes ------------------------
+
+test('a snooze with no minutes uses the reminder\'s configured interval', async () => {
+  // For callers with no value of their own to send — a direct API consumer, the
+  // dashboard, 5.7's missed list when it lands, and any build from before the
+  // overlay knew about the column. All of them used to land on a hardcoded 10
+  // that could contradict the reminder, so `snoozed_until` pointed at a moment
+  // no alarm corresponded to and 5.4 escalated against a clock the phone in the
+  // patient's hand disagreed with. (4.4's offline queue is *not* one of these:
+  // it persists `minutes` with the action, so a replay sends it explicitly.)
+  let params;
+  _setPoolForTests(makePool([
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5, snooze_minutes: 30 }], rowCount: 1 } },
+    { match: /SET snoozed_until/, result: (t, p) => { params = p; return { rows: [{ id: 5, snooze_count: 1 }], rowCount: 1 }; } },
+  ]));
+  await handler(restEvent({
+    method: 'POST', path: '/medication-doses', sub: 'sub-1',
+    body: { reminder_id: 42, action: 'snooze' },
+  }));
+  assert.equal(params[1], 30);
+});
+
+test('an explicit snooze interval still wins over the reminder\'s', async () => {
+  // The device has already re-armed its local alarm on the value it sent, and
+  // the server agreeing is what keeps snoozed_until pointing at the moment the
+  // patient will actually be alerted again.
+  let params;
+  _setPoolForTests(makePool([
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5, snooze_minutes: 30 }], rowCount: 1 } },
+    { match: /SET snoozed_until/, result: (t, p) => { params = p; return { rows: [{ id: 5, snooze_count: 1 }], rowCount: 1 }; } },
+  ]));
+  await handler(restEvent({
+    method: 'POST', path: '/medication-doses', sub: 'sub-1',
+    body: { reminder_id: 42, action: 'snooze', minutes: 5 },
+  }));
+  assert.equal(params[1], 5);
+});
+
+test('a database without migration 008 still snoozes for ten minutes', async () => {
+  // The lookup selects r.snooze_minutes, so a pre-008 database yields undefined
+  // rather than a number. Falling through to the documented default is what
+  // keeps the route working during the window between deploy and migrate.
+  let params;
+  _setPoolForTests(makePool([
+    { match: /SELECT d\.\*.*FROM medication_doses/, result: { rows: [{ id: 5 }], rowCount: 1 } },
+    { match: /SET snoozed_until/, result: (t, p) => { params = p; return { rows: [{ id: 5, snooze_count: 1 }], rowCount: 1 }; } },
+  ]));
+  await handler(restEvent({
+    method: 'POST', path: '/medication-doses', sub: 'sub-1',
+    body: { reminder_id: 42, action: 'snooze' },
+  }));
+  assert.equal(params[1], 10);
 });
 
 // --- reading (server half of 5.7) -------------------------------------------
@@ -1605,6 +1659,78 @@ test('an unknown escalation_order is a 400, and both valid values are accepted',
     }));
     assert.equal(res.statusCode, 200, `expected ${order} to be accepted`);
   }
+});
+
+// --- migration 008: snooze_minutes ------------------------------------------
+
+test('POST /medication-reminders persists the snooze length', async () => {
+  let inserted;
+  let sql;
+  _setPoolForTests(selfPool([
+    { match: /INSERT INTO medication_reminders/, result: (t, params) => { sql = t; inserted = params; return { rows: [{ id: 5 }] }; } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/medication-reminders', sub: 'sub-1',
+    body: { med_id: 2, alarms: ['08:00'], snooze_minutes: 15 },
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(insertedByColumn(sql, inserted).snooze_minutes, 15);
+});
+
+test('POST /medication-reminders defaults snooze_minutes when omitted', async () => {
+  let sql;
+  _setPoolForTests(selfPool([
+    { match: /INSERT INTO medication_reminders/, result: (t) => { sql = t; return { rows: [{ id: 5 }] }; } },
+  ]));
+  await handler(restEvent({
+    method: 'POST', path: '/medication-reminders', sub: 'sub-1',
+    body: { med_id: 2, alarms: ['08:00'] },
+  }));
+  // Same reasoning as the escalation columns: NOT NULL, and an omitted field
+  // arrives as an explicit NULL because the statement always lists every column.
+  assert.match(sql, /COALESCE\(\$\d+,10\)/);
+});
+
+test('snooze_minutes outside 1-120 is a 400', async () => {
+  for (const value of [0, 121, 7.5, 'later']) {
+    _setPoolForTests(selfPool([
+      { match: /INSERT INTO medication_reminders/, result: { rows: [{ id: 5 }] } },
+    ]));
+    const res = await handler(restEvent({
+      method: 'POST', path: '/medication-reminders', sub: 'sub-1',
+      body: { med_id: 2, snooze_minutes: value },
+    }));
+    assert.equal(res.statusCode, 400, `expected 400 for ${value}`);
+    assert.match(parse(res).error, /snooze_minutes/);
+  }
+});
+
+test('PUT leaves snooze_minutes alone when it is not mentioned', async () => {
+  let updated;
+  let sql;
+  _setPoolForTests(selfPool([
+    { match: /UPDATE medication_reminders SET/, result: (t, params) => { sql = t; updated = params; return { rows: [{ id: 5 }] }; } },
+  ]));
+  await handler(restEvent({
+    method: 'PUT', path: '/medication-reminders', sub: 'sub-1',
+    body: { id: 5, escalation_enabled: true },
+  }));
+  assert.equal(updatedByColumn(sql, updated).snooze_minutes ?? null, null);
+});
+
+test('PUT can change snooze_minutes on its own', async () => {
+  let updated;
+  let sql;
+  _setPoolForTests(selfPool([
+    { match: /UPDATE medication_reminders SET/, result: (t, params) => { sql = t; updated = params; return { rows: [{ id: 5 }] }; } },
+  ]));
+  await handler(restEvent({
+    method: 'PUT', path: '/medication-reminders', sub: 'sub-1',
+    body: { id: 5, snooze_minutes: 20 },
+  }));
+  const cols = updatedByColumn(sql, updated);
+  assert.equal(cols.snooze_minutes, 20);
+  assert.equal(cols.alarms ?? null, null, 'everything unmentioned stays nullish so COALESCE preserves it');
 });
 
 test('a validation failure writes nothing', async () => {

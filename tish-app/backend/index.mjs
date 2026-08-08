@@ -128,7 +128,13 @@ const TABLE_DEFINITIONS = [
         -- rate-limited to one alarm per nine minutes while idle, so a burst
         -- there collapses to a single alert (D-10).
         alarm_repeat_count INTEGER NOT NULL DEFAULT 3
-            CHECK (alarm_repeat_count BETWEEN 1 AND 6)
+            CHECK (alarm_repeat_count BETWEEN 1 AND 6),
+        -- Snooze length (migration 008). 1-120 is the clamp the dose-action
+        -- route already applied to a snooze POST, and 10 was its fallback — so
+        -- the column gives that a per-reminder home rather than introducing a
+        -- new range, and its default reproduces the old constant exactly.
+        snooze_minutes INTEGER NOT NULL DEFAULT 10
+            CHECK (snooze_minutes BETWEEN 1 AND 120)
     );
 
     CREATE INDEX medication_reminders_escalation_enabled_idx
@@ -662,6 +668,7 @@ export const PROBLEM_CODES = Object.freeze({
     EMAIL_OR_PHONE_REQUIRED: 'EMAIL_OR_PHONE_REQUIRED',
     ESCALATION_DELAY_OUT_OF_RANGE: 'ESCALATION_DELAY_OUT_OF_RANGE',
     ALARM_REPEAT_COUNT_OUT_OF_RANGE: 'ALARM_REPEAT_COUNT_OUT_OF_RANGE',
+    SNOOZE_MINUTES_OUT_OF_RANGE: 'SNOOZE_MINUTES_OUT_OF_RANGE',
     ESCALATION_ORDER_INVALID: 'ESCALATION_ORDER_INVALID',
     TIME_FORMAT_INVALID: 'TIME_FORMAT_INVALID',
 });
@@ -1473,6 +1480,19 @@ export const handler = async (event) => {
                         });
                     }
                 }
+                // Migration 008. Same shape as the two above: the column has a
+                // CHECK, so without this guard an out-of-range value reaches
+                // Postgres and returns a 500 carrying internal prose.
+                if (payload?.snooze_minutes !== undefined && payload.snooze_minutes !== null) {
+                    const snooze = Number(payload.snooze_minutes);
+                    if (!Number.isInteger(snooze) || snooze < 1 || snooze > 120) {
+                        escalationProblems.push({
+                            field: 'snooze_minutes',
+                            code: PROBLEM_CODES.SNOOZE_MINUTES_OUT_OF_RANGE,
+                            message: "snooze_minutes must be a whole number of minutes between 1 and 120.",
+                        });
+                    }
+                }
                 if (payload?.escalation_order !== undefined && payload.escalation_order !== null) {
                     // Both values are accepted even though 'sms_first' is not yet
                     // selectable in the UI (D-8 gates it on Track B). Rejecting it
@@ -1518,13 +1538,14 @@ export const handler = async (event) => {
                         escalation_enabled = COALESCE($15, escalation_enabled),
                         escalation_delay_minutes = COALESCE($16, escalation_delay_minutes),
                         escalation_order = COALESCE($17, escalation_order),
-                        alarm_repeat_count = COALESCE($18, alarm_repeat_count)
-                        WHERE id = $19 AND user_id = $20 RETURNING *`;
+                        alarm_repeat_count = COALESCE($18, alarm_repeat_count),
+                        snooze_minutes = COALESCE($19, snooze_minutes)
+                        WHERE id = $20 AND user_id = $21 RETURNING *`;
                     // An id that matches nothing used to return an empty body
                     // with 200. The form's res.json() then threw, the throw was
                     // swallowed, and the app went on to schedule notifications
                     // from local state for a reminder the server never updated.
-                    const updated = (await pool.query(q, [payload.status, payload.selected_dosage, payload.at_breakfast, payload.breakfast_timing, payload.at_lunch, payload.lunch_timing, payload.at_dinner, payload.dinner_timing, payload.at_bedtime, payload.frequency_days, payload.alarms, payload.alarm_labels, payload.reminder_sound, payload.alarm_sources, payload.escalation_enabled, payload.escalation_delay_minutes, payload.escalation_order, payload.alarm_repeat_count, payload.id, targetId])).rows[0];
+                    const updated = (await pool.query(q, [payload.status, payload.selected_dosage, payload.at_breakfast, payload.breakfast_timing, payload.at_lunch, payload.lunch_timing, payload.at_dinner, payload.dinner_timing, payload.at_bedtime, payload.frequency_days, payload.alarms, payload.alarm_labels, payload.reminder_sound, payload.alarm_sources, payload.escalation_enabled, payload.escalation_delay_minutes, payload.escalation_order, payload.alarm_repeat_count, payload.snooze_minutes, payload.id, targetId])).rows[0];
                     if (!updated) { fail('REMINDER_NOT_FOUND'); }
                     else {
                         // 5.1 — the schedule may have moved, so future
@@ -1548,22 +1569,23 @@ export const handler = async (event) => {
                         body = updated;
                     }
                 } else {
-                    // The COALESCE wrappers on $16-$19 are load-bearing, not
-                    // decoration. Migration 002 makes these columns NOT NULL
-                    // DEFAULT ..., and a column *default* only applies when the
-                    // column is omitted from the statement — sending an explicit
-                    // NULL into a NOT NULL column is an error, not a fallback.
-                    // Since this statement always lists all 19 columns, an
-                    // omitted field arrives as NULL and has to be defaulted here.
+                    // The COALESCE wrappers on $16-$20 are load-bearing, not
+                    // decoration. Migrations 002 and 008 make these columns NOT
+                    // NULL DEFAULT ..., and a column *default* only applies when
+                    // the column is omitted from the statement — sending an
+                    // explicit NULL into a NOT NULL column is an error, not a
+                    // fallback. Since this statement always lists all 20 columns,
+                    // an omitted field arrives as NULL and has to be defaulted
+                    // here.
                     //
-                    // The values deliberately mirror the migration's defaults:
-                    // escalation off, 30 minutes, caregiver_first, 3 alerts. Off
-                    // is D-3's column default so shipping the feature doesn't
-                    // retroactively enable it for existing rows; the *form*
-                    // opts new reminders in, which is the opposite and is meant
-                    // to be.
-                    const q = `INSERT INTO medication_reminders (user_id, med_id, selected_dosage, at_breakfast, breakfast_timing, at_lunch, lunch_timing, at_dinner, dinner_timing, at_bedtime, frequency_days, alarms, alarm_labels, reminder_sound, alarm_sources, escalation_enabled, escalation_delay_minutes, escalation_order, alarm_repeat_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,COALESCE($16,false),COALESCE($17,30),COALESCE($18,'caregiver_first'),COALESCE($19,3)) RETURNING *`;
-                    body = (await pool.query(q, [targetId, payload.med_id, payload.selected_dosage, payload.at_breakfast, payload.breakfast_timing, payload.at_lunch, payload.lunch_timing, payload.at_dinner, payload.dinner_timing, payload.at_bedtime, payload.frequency_days, payload.alarms, payload.alarm_labels, payload.reminder_sound, payload.alarm_sources, payload.escalation_enabled, payload.escalation_delay_minutes, payload.escalation_order, payload.alarm_repeat_count])).rows[0];
+                    // The values deliberately mirror the migrations' defaults:
+                    // escalation off, 30 minutes, caregiver_first, 3 alerts,
+                    // 10-minute snooze. Off is D-3's column default so shipping
+                    // the feature doesn't retroactively enable it for existing
+                    // rows; the *form* opts new reminders in, which is the
+                    // opposite and is meant to be.
+                    const q = `INSERT INTO medication_reminders (user_id, med_id, selected_dosage, at_breakfast, breakfast_timing, at_lunch, lunch_timing, at_dinner, dinner_timing, at_bedtime, frequency_days, alarms, alarm_labels, reminder_sound, alarm_sources, escalation_enabled, escalation_delay_minutes, escalation_order, alarm_repeat_count, snooze_minutes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,COALESCE($16,false),COALESCE($17,30),COALESCE($18,'caregiver_first'),COALESCE($19,3),COALESCE($20,10)) RETURNING *`;
+                    body = (await pool.query(q, [targetId, payload.med_id, payload.selected_dosage, payload.at_breakfast, payload.breakfast_timing, payload.at_lunch, payload.lunch_timing, payload.at_dinner, payload.dinner_timing, payload.at_bedtime, payload.frequency_days, payload.alarms, payload.alarm_labels, payload.reminder_sound, payload.alarm_sources, payload.escalation_enabled, payload.escalation_delay_minutes, payload.escalation_order, payload.alarm_repeat_count, payload.snooze_minutes])).rows[0];
 
                     // 5.1 — a brand-new reminder has no doses yet, and the
                     // escalation job and the missed list are both blind to a
@@ -1631,7 +1653,7 @@ export const handler = async (event) => {
                     // exactly which dose it means — 5.7's list, eventually.
                     const explicit = payload?.scheduled_for || null;
                     const found = await pool.query(`
-                        SELECT d.* FROM medication_doses d
+                        SELECT d.*, r.snooze_minutes FROM medication_doses d
                         JOIN medication_reminders r ON r.id = d.reminder_id
                         WHERE d.reminder_id = $1
                           AND r.user_id = $2
@@ -1674,7 +1696,27 @@ export const handler = async (event) => {
                         // D-6 — a snooze re-anchors escalation rather than
                         // counting as silence, and D-12 caps how long that can
                         // go on. `snooze_count` is what 5.4 reads to decide.
-                        const minutes = Math.min(Math.max(parseInt(payload?.minutes) || 10, 1), 120);
+                        //
+                        // **The reminder's own `snooze_minutes` is the fallback,
+                        // not 10** (migration 008).
+                        //
+                        // An explicit `minutes` still wins, and must: the device
+                        // has already re-armed its local alarm on that value, and
+                        // `snoozed_until` has to point at the moment the patient
+                        // will actually be alerted again or 5.4 escalates against
+                        // a clock the phone disagrees with. 4.4's offline queue
+                        // persists the value with the action, so a replay carries
+                        // it too.
+                        //
+                        // What the fallback is for is every caller that has no
+                        // value to send — a direct API consumer, the dashboard,
+                        // 5.7's missed list when it lands — plus any build from
+                        // before the overlay knew about the column. A hardcoded 10
+                        // served those by contradicting whatever the reminder was
+                        // actually configured for. The literal 10 survives only for
+                        // a database that has not run migration 008 yet.
+                        const configured = parseInt(dose.snooze_minutes) || 10;
+                        const minutes = Math.min(Math.max(parseInt(payload?.minutes) || configured, 1), 120);
                         const saved = await pool.query(`
                             UPDATE medication_doses
                             SET snoozed_until = now() + ($2 || ' minutes')::interval,

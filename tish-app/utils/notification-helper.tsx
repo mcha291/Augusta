@@ -5,6 +5,7 @@ import { SOUND_OPTIONS, channelIdForSound, notificationSoundFile } from '../cons
 import i18next from '../i18n';
 import { planAlarmsForReminder, planChainForward } from './alarm-schedule';
 import type { AlarmPlan } from './alarm-schedule';
+import { snoozeMinutesFor } from './alarm-settings';
 import { confirmedDoseKeys } from './doses';
 import type { DoseRow } from './doses';
 import type { BudgetPlan } from './notification-budget';
@@ -283,6 +284,17 @@ export async function scheduleMedicationNotifications(reminder: any, options: Sc
       soundKey: reminder.reminder_sound,
       frequencyDays: plan.frequencyDays,
       escalationOffsetMinutes: plan.escalationOffsetMinutes,
+      // Migration 008, carried the same way `soundKey` is and for the same
+      // reason: the overlay reads it when the alarm fires, and that can be days
+      // after this ran and with no network. Resolving it from the cached
+      // reminder instead would make an alarm that cannot be resolved — a fresh
+      // install, cleared data — silently snooze for ten minutes rather than for
+      // what this reminder is configured for.
+      //
+      // Normalised here rather than at the far end so the value written into
+      // the OS queue is already the value that will be honoured; a row from a
+      // pre-008 server has no such field and lands on the documented default.
+      snoozeMinutes: snoozeMinutesFor(reminder.snooze_minutes),
     },
   });
 }
@@ -636,14 +648,12 @@ export async function dismissPresentedAlarms(reminderId: number, ownerUserId?: n
   }
 }
 
-/** 4.4 — how long the snooze button defers the alarm. Mirrors the server's default. */
-export const SNOOZE_MINUTES = 10;
-
 export interface SnoozeRequest {
   reminderId: number;
   ownerUserId?: number;
   timeStr?: string | null;
   soundKey?: string | null;
+  /** The reminder's `snooze_minutes`. Falls back to 10 when absent. */
   minutes?: number;
 }
 
@@ -672,12 +682,12 @@ export async function scheduleSnoozeAlert({
   ownerUserId,
   timeStr,
   soundKey,
-  minutes = SNOOZE_MINUTES,
+  minutes,
 }: SnoozeRequest): Promise<boolean> {
   if (Platform.OS === 'web' || !Number.isFinite(Number(reminderId)) || !timeStr) return false;
 
   const owner = Number.isFinite(Number(ownerUserId)) ? Number(ownerUserId) : undefined;
-  const delay = Math.min(Math.max(Math.trunc(Number(minutes)) || SNOOZE_MINUTES, 1), 120);
+  const delay = snoozeMinutesFor(minutes);
 
   try {
     await scheduleOneAlert({
@@ -694,9 +704,14 @@ export async function scheduleSnoozeAlert({
         ownerUserId: owner,
         soundKey,
         timeStr,
+        // Carried so a second press of snooze defers the alarm by the same
+        // interval as the first. Without it the re-armed alert would silently
+        // revert to the default, which is the more confusing failure precisely
+        // because the patient chose to be reminded again.
+        snoozeMinutes: delay,
         // No `frequencyDays`, deliberately: `rescheduleNextOccurrence` bails
-        // without one, and it must. This alert is ten minutes from now, not an
-        // occurrence of the schedule — chaining off it would move the whole
+        // without one, and it must. This alert is `delay` minutes from now, not
+        // an occurrence of the schedule — chaining off it would move the whole
         // reminder onto snooze time.
         snoozed: true,
       },

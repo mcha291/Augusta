@@ -86,6 +86,7 @@ const PROBLEM_KEYS = {
   EMAIL_OR_PHONE_REQUIRED: 'errors.field.emailOrPhoneRequired',
   ESCALATION_DELAY_OUT_OF_RANGE: 'errors.field.escalationDelayRange',
   ALARM_REPEAT_COUNT_OUT_OF_RANGE: 'errors.field.alarmRepeatCountRange',
+  SNOOZE_MINUTES_OUT_OF_RANGE: 'errors.field.snoozeMinutesRange',
   ESCALATION_ORDER_INVALID: 'errors.field.escalationOrderInvalid',
   TIME_FORMAT_INVALID: 'errors.field.timeFormatInvalid',
 } as const;

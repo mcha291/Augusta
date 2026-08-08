@@ -186,7 +186,7 @@ export default function HomeScreen() {
         <View style={styles.metricsRow}>
           <MetricItem icon="calendar-month" label={t('home.metricAppointments')} value={data.appointments.length} onPress={() => router.push('/appointments')} />
           <MetricItem icon="pill" label={t('home.metricMeds')} value={data.meds.length} onPress={() => router.push('/medications')} />
-          <MetricItem icon="flask-outline" label={t('home.metricReports')} value="12" onPress={() => router.push('/results')} />
+          <MetricItem icon="flask-outline" label={t('home.metricReports')} value={data.reports.length} onPress={() => router.push('/results')} />
         </View>
 
         {/* 4. UPCOMING LIST (Uses GlobalStyles.listItem) */}

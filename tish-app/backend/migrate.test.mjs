@@ -425,6 +425,42 @@ test('007 is replay-safe, like every migration that adds a constraint', () => {
   assert.match(sql, /SELECT 1 FROM pg_constraint WHERE conname = 'user_relationships_revoked_at_check'/);
 });
 
+// ---------------------------------------------------------------------------
+// Migration 008 — medication_reminders.snooze_minutes
+// ---------------------------------------------------------------------------
+
+const MIGRATION_008 = '008_reminder_snooze_minutes.sql';
+
+test("migration 008's default reproduces the hardcoded constant exactly", () => {
+  // The same discipline as 005, and the reason it matters here: this column
+  // replaced a constant that was already governing alarms on people's phones. A
+  // default that disagreed would change how an existing reminder snoozes the
+  // moment the migration ran, without anybody editing anything.
+  const sql = readFileSync(path.join(HERE, 'migrations', MIGRATION_008), 'utf8');
+  assert.match(sql, /snooze_minutes INTEGER NOT NULL DEFAULT 10\b/);
+});
+
+test('SCHEMA_SQL keeps migration 008 bounds, so a rebuilt database constrains them too', () => {
+  const schema = schemaSql();
+  assert.match(schema, /snooze_minutes INTEGER NOT NULL DEFAULT 10/);
+  assert.match(schema, /CHECK \(snooze_minutes BETWEEN 1 AND 120\)/);
+});
+
+test("008's snooze bound matches the clamp the dose route already applied", () => {
+  // The range is not new — POST /medication-doses has always clamped a snooze to
+  // 1-120 and fallen back to 10. The column gives that a per-reminder home, so
+  // the two must not drift: a value the column accepts and the route clamps
+  // would leave `snoozed_until` disagreeing with the alarm on the phone.
+  const sql = readFileSync(path.join(HERE, 'migrations', MIGRATION_008), 'utf8');
+  assert.match(sql, /CHECK \(snooze_minutes BETWEEN 1 AND 120\)/);
+});
+
+test('008 is replay-safe, like every migration that adds a constraint', () => {
+  const sql = readFileSync(path.join(HERE, 'migrations', MIGRATION_008), 'utf8');
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS snooze_minutes/);
+  assert.match(sql, /SELECT 1 FROM pg_constraint WHERE conname = 'medication_reminders_snooze_minutes_check'/);
+});
+
 test('users is preserved across a reset, which is why these two needed a migration', () => {
   // The load-bearing fact behind this whole migration existing. Every other
   // schema change reached the live database by /reset-db rebuilding the table
