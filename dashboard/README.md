@@ -12,10 +12,22 @@ membership; there is no self-signup.
 | --- | --- |
 | `src/` | React 19 + Vite SPA (shadcn/ui, TanStack Query/Table) |
 | `server/` | The admin API Lambda — a single-file handler, its own npm package |
+| `cognito-triggers/` | Pre Sign-up trigger: restricts self-registration to the company domain |
 | `AWS-SETUP.md` | Every AWS resource behind this, with identifiers |
 
-`server/` is deployed and versioned independently of the SPA; the two share
-nothing but the API contract in `src/lib/types.ts`.
+Each of the three deploys independently; they share nothing but the API contract
+in `src/lib/types.ts`.
+
+## Access
+
+Staff register themselves at `/signup` with a `@ti-smarthealth.com` address,
+confirm the emailed code, and then wait: an administrator has to add them to the
+Cognito `approved` group before any data is reachable. That group membership —
+not merely having an account — is what the admin API checks on every request.
+
+Sign-up talks to Cognito's unauthenticated `SignUp` / `ConfirmSignUp` /
+`ResendConfirmationCode` operations directly over `fetch` (`src/lib/signup.ts`).
+They need no request signing and no credentials, so no AWS SDK is bundled.
 
 ## Local development
 

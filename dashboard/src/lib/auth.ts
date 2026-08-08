@@ -2,13 +2,31 @@ import { useAuth } from "react-oidc-context"
 
 import { config, MOCK } from "@/lib/config"
 
+/** Membership of this Cognito group is what the admin API actually checks. */
+export const APPROVED_GROUP = "approved"
+
 export interface AdminAuth {
   isLoading: boolean
   isAuthenticated: boolean
   email: string | undefined
+  /**
+   * Read from the ID token's `cognito:groups` claim. This is presentation only
+   * — it decides whether to show the dashboard or a waiting screen, saving a
+   * round trip that would only come back 403. The API enforces the same rule
+   * server-side on every request, which is the check that matters.
+   */
+  isApproved: boolean
   error: string | undefined
   signIn: () => void
   signOut: () => void
+}
+
+/** Cognito sends this as an array; be tolerant of a string just in case. */
+function groupsOf(profile: Record<string, unknown> | undefined): string[] {
+  const raw = profile?.["cognito:groups"]
+  if (Array.isArray(raw)) return raw.map(String)
+  if (typeof raw === "string") return raw.split(",").map((g) => g.trim())
+  return []
 }
 
 /** oidc-client-ts settings for the Cognito admin pool (Hosted UI, code + PKCE) */
@@ -32,6 +50,7 @@ function useRealAdminAuth(): AdminAuth {
     isLoading: auth.isLoading,
     isAuthenticated: auth.isAuthenticated,
     email: auth.user?.profile?.email,
+    isApproved: groupsOf(auth.user?.profile).includes(APPROVED_GROUP),
     error: auth.error?.message,
     signIn: () => void auth.signinRedirect(),
     signOut: () => {
@@ -54,6 +73,7 @@ function useMockAdminAuth(): AdminAuth {
     isLoading: false,
     isAuthenticated: true,
     email: "demo@mock.local",
+    isApproved: true,
     error: undefined,
     signIn: () => {},
     signOut: () => window.alert("Mock mode — no real session to sign out of."),

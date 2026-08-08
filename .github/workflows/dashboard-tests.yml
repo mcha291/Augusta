@@ -37,6 +37,21 @@ jobs:
 
       - run: npm test
 
+  cognito-triggers:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard/cognito-triggers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Dependency free, so no install step and no cache to configure.
+      - run: npm test
+
   spa-typecheck-build:
     runs-on: ubuntu-latest
     defaults:

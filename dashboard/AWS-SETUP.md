@@ -34,26 +34,100 @@ aws lambda update-function-configuration --region ap-east-2 --function-name tish
 variable has to be present in that one call — omitting `DB_PASSWORD` would take
 the database viewer down. Set `DB_PASSWORD` and `NEW_PAT` in your shell first.
 
-## Your login
+## Accounts: staff sign themselves up, you approve
 
-A user has been created for `admin@ti-smarthealth.com` and Cognito has emailed
-it a temporary password. First sign-in forces a password change. Only people
-created in this pool can reach the dashboard — **pool membership is the
-authorization**, which is why self-signup is disabled
-(`AllowAdminCreateUserOnly=true`).
+Self-registration is open at **<https://main.d1x8yq4r6ivp8n.amplifyapp.com/signup>**.
+Signing up gets someone an account; it does **not** get them data.
 
-Add another admin:
+1. Staff fill in name, work email, optional mobile, password.
+2. A Pre Sign-up Lambda rejects anything that isn't `@ti-smarthealth.com`.
+3. Cognito emails a six-digit code; entering it confirms the address.
+4. They land on "waiting for approval" and stay there until you act.
+5. **You approve** by adding them to the `approved` group — Cognito console →
+   User pools → `tish-admin` → Users → pick the user → Group memberships →
+   Add. Or:
 
 ```bash
-aws cognito-idp admin-create-user --region ap-east-2 --user-pool-id ap-east-2_RkCillRxC --username someone@example.com --user-attributes Name=email,Value=someone@example.com Name=email_verified,Value=true --desired-delivery-mediums EMAIL
+aws cognito-idp admin-add-user-to-group --region ap-east-2 --user-pool-id ap-east-2_RkCillRxC --username someone@ti-smarthealth.com --group-name approved
 ```
 
-MFA (authenticator app) is **enabled but optional** — enrol from the hosted UI.
-To make it mandatory for everyone:
+**Membership of `approved` is the authorization.** The admin API checks it on
+every request and returns 403 without it, so an unapproved account can sign in
+and see nothing. Removing someone from the group revokes access within the ID
+token's lifetime — up to an hour, not immediately.
+
+The check is enforced server-side in `server/index.mjs`; the dashboard reads the
+same `cognito:groups` claim only to decide whether to show the waiting screen
+instead of firing requests that would all 403.
+
+> Approval reaches a session at sign-in. Someone approved while signed in has to
+> sign out and back in — the waiting screen says so.
+
+Your own account (`admin@ti-smarthealth.com`) was created before self-signup
+existed and is already in `approved`.
+
+MFA (authenticator app) is **enabled but optional**. To make it mandatory:
 
 ```bash
 aws cognito-idp set-user-pool-mfa-config --region ap-east-2 --user-pool-id ap-east-2_RkCillRxC --software-token-mfa-configuration Enabled=true --mfa-configuration ON
 ```
+
+### Changing who may register
+
+The domain rule lives in the Lambda's `ALLOWED_EMAIL_DOMAINS` env var
+(comma-separated), so widening it needs no code change:
+
+```bash
+aws lambda update-function-configuration --region ap-east-2 --function-name tish-admin-presignup --environment "Variables={ALLOWED_EMAIL_DOMAINS=ti-smarthealth.com,partner.example}"
+```
+
+Admin-created users bypass the rule deliberately — otherwise a bad value here
+would lock you out of your own escape hatch.
+
+## Email comes from ti-smarthealth.com
+
+The pool is on `EmailSendingAccount: DEVELOPER`, sending as
+**`Tish Admin <no-reply@ti-smarthealth.com>`** through the SES domain identity
+in **ap-northeast-2 (Seoul)** — DKIM verified, SPF already in the apex record.
+Taipei has no SES endpoint and Seoul is its designated alternate.
+
+This works despite SES still being **in the sandbox**, and that is the reason
+sign-up is restricted to the company domain. Sandbox rules allow sending only to
+verified identities — and the verified identity is the *domain*, so any
+`@ti-smarthealth.com` recipient is fine while `someone@gmail.com` is not. A
+gmail signup would be accepted by Cognito and then never receive its code, so
+the trigger rejects it up front with an explanation instead.
+
+**Once SES production access is granted** (still `ProductionAccessEnabled:
+false` as of 2026-08-08, filed per MIGRATION.md A0), external addresses become
+deliverable and `ALLOWED_EMAIL_DOMAINS` can be widened. Nothing else changes.
+
+The SES sending authorization policy `CognitoTaipei` on the identity now lists
+**both** pools — the app's and this one. It trusts the regional principal
+`cognito-idp.ap-east-2.amazonaws.com`; the global one fails silently.
+
+## SMS verification: wired, but blocked upstream
+
+Everything on the AWS side is in place — the pool has an `SmsConfiguration`
+pointing at `CognitoIdpSNSServiceRole-tish-admin` (its own `ExternalId`, not
+shared with the app pool's role), and the sign-up form already collects a
+mobile number in E.164.
+
+**It is not switched on, because SNS in ap-east-2 is still in the sandbox.**
+Two verified numbers exist (`+886905115797` and one AU number); SMS to anyone
+else is silently dropped. The monthly spend cap is also still the `$1` default.
+
+To turn it on once SNS production access lands and the cap is raised — add
+`phone_number` to the auto-verified attributes:
+
+```bash
+aws cognito-idp update-user-pool --region ap-east-2 --user-pool-id ap-east-2_RkCillRxC --auto-verified-attributes email phone_number
+```
+
+⚠ `update-user-pool` **replaces** every setting it accepts, so a bare call like
+that resets the email config, the Lambda trigger and the password policy. Build
+the payload from a live `describe-user-pool` first — the same footgun
+MIGRATION.md flags for the app pool.
 
 ## What exists
 
@@ -62,8 +136,12 @@ aws cognito-idp set-user-pool-mfa-config --region ap-east-2 --user-pool-id ap-ea
 | Cognito user pool | `ap-east-2_RkCillRxC` (`tish-admin`) | ap-east-2 |
 | App client (SPA, no secret) | `3ke31mij0lu8u4mulvkt388npk` | ap-east-2 |
 | Hosted UI domain | `https://tish-admin.auth.ap-east-2.amazoncognito.com` | ap-east-2 |
+| Authorization group | `approved` — membership is the actual access grant | ap-east-2 |
 | Lambda | `tish-admin-api`, nodejs24.x, 256 MB, 15s, VPC-attached | ap-east-2 |
-| Lambda execution role | `tish-admin-api-role` (+ `AWSLambdaVPCAccessExecutionRole`) | global |
+| Lambda | `tish-admin-presignup`, nodejs24.x, 128 MB, 5s, no VPC | ap-east-2 |
+| Lambda execution roles | `tish-admin-api-role`, `tish-admin-presignup-role` | global |
+| SES identity | `ti-smarthealth.com`, policy `CognitoTaipei` | ap-northeast-2 |
+| SNS caller role (SMS) | `CognitoIdpSNSServiceRole-tish-admin` | global |
 | REST API | `0u10zqz4r0`, stage `prod` | ap-east-2 |
 | API invoke URL | `https://0u10zqz4r0.execute-api.ap-east-2.amazonaws.com/prod` | ap-east-2 |
 | Cognito authorizer | `tish-admin-pool` on all four authorized methods | ap-east-2 |
@@ -116,6 +194,7 @@ OIDC role (`github-lambda-deploy`) — no AWS keys in GitHub. See
 | Change under | Workflow | Target |
 | --- | --- | --- |
 | `dashboard/server/**` | `deploy-admin-api.yml` | Lambda `tish-admin-api` |
+| `dashboard/cognito-triggers/**` | `deploy-cognito-triggers.yml` | Lambda `tish-admin-presignup` |
 | `dashboard/**` (excl. `server/`) | `deploy-dashboard.yml` | Amplify `d1x8yq4r6ivp8n` |
 | `tish-app/backend/**` | `deploy-backend.yml` | Lambda `operation-strix` |
 
@@ -145,6 +224,18 @@ Verified at provisioning time, without signing in:
 - The deployed SPA redirects to the hosted UI with the right `client_id`,
   `redirect_uri` and PKCE (`code_challenge_method=S256`), no console errors.
 - Deep link `/database` → 200 (SPA rewrite rule works).
+- Approval gate against the deployed Lambda: claims without `approved` → **403
+  NOT_APPROVED with no database query issued**; `cognito:groups=[approved]` → 200 with data.
+- Sign-up form at `/signup` with a `@gmail.com` address → the trigger's own
+  message rendered in the form, **and no user created in the pool**.
+
+**Not yet verified: that a verification email actually arrives.** Cognito
+accepted the SES configuration (it validates the identity and the sending
+policy when `DEVELOPER` is set), and the domain is verified with DKIM passing —
+but no mail has been sent through the path end to end, because doing so means
+creating a real account. The first staff sign-up is the test. If no code
+arrives, look at SES Seoul's sending metrics and the pool's CloudWatch logs
+before suspecting the client.
 
 ## Known gaps
 

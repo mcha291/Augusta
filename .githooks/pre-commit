@@ -16,6 +16,11 @@ if echo "$staged" | grep -q '^dashboard/server/'; then
   npm --prefix dashboard/server test || status=1
 fi
 
+if echo "$staged" | grep -q '^dashboard/cognito-triggers/'; then
+  echo "pre-commit: cognito trigger files staged - running trigger tests..."
+  npm --prefix dashboard/cognito-triggers test || status=1
+fi
+
 if [ "$status" -ne 0 ]; then
   echo "pre-commit: tests failed - commit aborted."
   exit 1

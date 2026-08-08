@@ -162,6 +162,45 @@ export function eventPath(event) {
   return event?.rawPath ?? event?.path ?? '/';
 }
 
+// ---------------------------------------------------------------------------
+// Approval gate
+// ---------------------------------------------------------------------------
+//
+// Self-signup is open on the admin pool, so "has a valid token" no longer means
+// "may see patient data" — the gateway's Cognito authorizer accepts any
+// confirmed member of the pool, which now includes anyone who just registered.
+// Membership of the `approved` group is the actual authorization, and an
+// administrator grants it by hand in the Cognito console.
+//
+// Checked here rather than in a Pre-Authentication trigger deliberately: this
+// is the request that touches the data, and the claim is only as old as the ID
+// token (one hour), whereas sign-in gating would leave a removed user working
+// until their refresh token expired, up to 30 days later.
+
+export const APPROVED_GROUP = 'approved';
+
+// REST API authorizers flatten claims to strings, so cognito:groups arrives as
+// "[approved, other]" — not an array, and not JSON. HTTP API authorizers pass a
+// real array. Accept both, plus the single-value string form.
+export function groupsFrom(claims) {
+  const raw = claims?.['cognito:groups'];
+  if (Array.isArray(raw)) return raw.map((g) => String(g).trim()).filter(Boolean);
+  if (typeof raw !== 'string') return [];
+  return raw
+    .replace(/^\[|\]$/g, '')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+}
+
+export function isApproved(event) {
+  const claims = event?.requestContext?.authorizer?.claims ?? event?.requestContext?.authorizer?.jwt?.claims;
+  // No claims at all means the gateway authorizer did not run. That is either a
+  // direct invoke or a misconfigured route, and neither should reach data.
+  if (!claims) return false;
+  return groupsFrom(claims).includes(APPROVED_GROUP);
+}
+
 // Route matching on the request path, which never includes a stage prefix
 // (see eventPath) — documented in AWS-SETUP.md.
 export function routeOf(method, path) {
@@ -242,6 +281,18 @@ export async function handler(event) {
   const method = eventMethod(event);
   const path = eventPath(event);
   const route = routeOf(method, path);
+
+  // Preflight is exempt: browsers send OPTIONS without an Authorization header,
+  // so there are no claims to check and nothing is returned but CORS headers.
+  if (route.name !== 'preflight' && !isApproved(event)) {
+    // Distinct from the gateway's 401. 401 means "no valid token"; this means
+    // "valid token, account not approved yet", which is what a newly signed-up
+    // staff member sees and what the dashboard turns into a waiting message.
+    return json(403, {
+      error: 'Your account is awaiting administrator approval.',
+      code: 'NOT_APPROVED',
+    });
+  }
 
   try {
     switch (route.name) {

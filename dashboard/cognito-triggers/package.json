@@ -1,0 +1,10 @@
+{
+  "name": "tish-admin-cognito-triggers",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cognito Pre Sign-up trigger for the tish-admin user pool: restricts self-signup to the company email domain. No dependencies — deploy is index.mjs + package.json. See ../AWS-SETUP.md.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

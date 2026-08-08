@@ -6,7 +6,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, ALLOWED_TABLES } from './index.mjs';
+import { handler, _setPoolForTests, ALLOWED_TABLES, groupsFrom } from './index.mjs';
 
 const ENV = {
   DB_HOST: 'db.local', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'postgres',
@@ -28,10 +28,17 @@ function makePool(routes = []) {
   };
 }
 
-function httpEvent({ method = 'GET', path = '/', query, body } = {}) {
+// `groups` defaults to the approved group so the existing route tests exercise
+// the routes rather than the gate; the gate has its own tests below. Pass
+// groups: null to simulate a signed-in but unapproved staff member.
+function httpEvent({ method = 'GET', path = '/', query, body, groups = ['approved'] } = {}) {
   return {
     rawPath: path,
-    requestContext: { http: { method } },
+    requestContext: {
+      http: { method },
+      // HTTP API authorizers pass claims as real arrays.
+      authorizer: groups === null ? undefined : { jwt: { claims: { 'cognito:groups': groups } } },
+    },
     queryStringParameters: query,
     body: body ? JSON.stringify(body) : undefined,
   };
@@ -40,12 +47,17 @@ function httpEvent({ method = 'GET', path = '/', query, body } = {}) {
 // REST API (payload format 1.0) — the shape the deployed gateway actually
 // sends. `path` is stage-stripped by API Gateway, so /prod/tables arrives here
 // as /tables; requestContext.path keeps the stage and is deliberately not read.
-function restEvent({ method = 'GET', path = '/', query, body } = {}) {
+function restEvent({ method = 'GET', path = '/', query, body, groups = ['approved'] } = {}) {
   return {
     path,
     httpMethod: method,
     resource: path,
-    requestContext: { path: `/prod${path}`, httpMethod: method },
+    requestContext: {
+      path: `/prod${path}`,
+      httpMethod: method,
+      // REST authorizers flatten claims to strings: "[approved, other]".
+      authorizer: groups === null ? undefined : { claims: { 'cognito:groups': `[${groups.join(', ')}]` } },
+    },
     queryStringParameters: query,
     body: body ? JSON.stringify(body) : undefined,
   };
@@ -130,6 +142,54 @@ test('REST payload (v1) resolves path parameters from the path, not pathParamete
   const res = await handler(restEvent({ path: '/tables/pg_shadow' }));
   assert.equal(res.statusCode, 404);
   assert.match(parse(res).error, /Unknown table/);
+});
+
+// ---------------------------------------------------------------------------
+// Approval gate
+// ---------------------------------------------------------------------------
+// Self-signup is open on the admin pool, so a valid token no longer implies
+// authorization — only membership of the `approved` group does.
+
+test('a signed-in but unapproved account gets 403, and no query runs', async () => {
+  const pool = makePool([{ match: /COUNT/, result: { rows: [{ count: 3 }] } }]);
+  _setPoolForTests(pool);
+  const res = await handler(restEvent({ path: '/tables', groups: [] }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(parse(res).code, 'NOT_APPROVED');
+  assert.equal(pool.calls.length, 0, 'must not touch the database for an unapproved caller');
+});
+
+test('membership of some other group is not approval', async () => {
+  const res = await handler(restEvent({ path: '/tables', groups: ['staff', 'readonly'] }));
+  assert.equal(res.statusCode, 403);
+});
+
+test('the REST authorizer bracket-string form is parsed, not matched as a substring', () => {
+  assert.deepEqual(groupsFrom({ 'cognito:groups': '[approved, ops]' }), ['approved', 'ops']);
+  assert.deepEqual(groupsFrom({ 'cognito:groups': 'approved' }), ['approved']);
+  assert.deepEqual(groupsFrom({ 'cognito:groups': ['approved'] }), ['approved']);
+  assert.deepEqual(groupsFrom({}), []);
+  // "not-approved" must not satisfy a check for "approved"
+  assert.equal(groupsFrom({ 'cognito:groups': '[not-approved]' }).includes('approved'), false);
+});
+
+// A direct invoke, or a route accidentally left with authorization NONE, has no
+// claims at all. That must fail closed rather than be read as "no groups yet".
+test('missing authorizer claims are rejected, not treated as unapproved-but-harmless', async () => {
+  const res = await handler(restEvent({ path: '/tables', groups: null }));
+  assert.equal(res.statusCode, 403);
+});
+
+test('preflight is exempt — browsers send OPTIONS with no Authorization header', async () => {
+  const res = await handler(restEvent({ method: 'OPTIONS', path: '/tables', groups: null }));
+  assert.equal(res.statusCode, 204);
+});
+
+test('the gate also covers writes, not just reads', async () => {
+  const res = await handler(
+    restEvent({ method: 'PUT', path: '/translations', groups: [], body: { locale: 'en' } })
+  );
+  assert.equal(res.statusCode, 403);
 });
 
 // ---------------------------------------------------------------------------
