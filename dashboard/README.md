@@ -3,8 +3,9 @@
 Internal admin tool for the Tish app: a read-only database viewer and a
 localization editor that commits locale changes straight to this repo.
 
-**Live: <https://main.d1x8yq4r6ivp8n.amplifyapp.com>** — access is Cognito pool
-membership; there is no self-signup.
+**Live: <https://admin.ti-smarthealth.com>** — staff register themselves, an
+administrator approves. Membership of the Cognito `approved` group is the
+access grant, not merely having an account.
 
 ## Layout
 

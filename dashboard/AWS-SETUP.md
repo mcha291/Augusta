@@ -5,7 +5,7 @@ step-by-step runbook to be worked through by hand; everything in it has now
 been done, so it is a record of what exists and how to change it. Account
 `180891490019`. Provisioned 2026-08-08.
 
-**Live URL: <https://main.d1x8yq4r6ivp8n.amplifyapp.com>**
+**Live URL: <https://admin.ti-smarthealth.com>**
 
 ## ⚠ Outstanding — the localization editor needs a GitHub token
 
@@ -26,7 +26,7 @@ that the failure is a clean auth rejection rather than a misconfiguration.
 5. Install it (the token never reaches the browser; it lives only in the Lambda):
 
 ```bash
-aws lambda update-function-configuration --region ap-east-2 --function-name tish-admin-translations --environment "Variables={GITHUB_REPO=mcha291/Augusta,GITHUB_LOCALES_DIR=tish-app/locales,ALLOWED_ORIGIN=https://main.d1x8yq4r6ivp8n.amplifyapp.com,GITHUB_TOKEN=$NEW_PAT}"
+aws lambda update-function-configuration --region ap-east-2 --function-name tish-admin-translations --environment "Variables={GITHUB_REPO=mcha291/Augusta,GITHUB_LOCALES_DIR=tish-app/locales,ALLOWED_ORIGIN=https://admin.ti-smarthealth.com,GITHUB_TOKEN=$NEW_PAT}"
 ```
 
 Note the function name: the token goes on `tish-admin-translations`, **not**
@@ -36,7 +36,7 @@ call. Set `NEW_PAT` in your shell first so the token stays out of your history.
 
 ## Accounts: staff sign themselves up, you approve
 
-Self-registration is open at **<https://main.d1x8yq4r6ivp8n.amplifyapp.com/signup>**.
+Self-registration is open at **<https://admin.ti-smarthealth.com/signup>**.
 Signing up gets someone an account; it does **not** get them data.
 
 1. Staff fill in name, work email, optional mobile, password.
@@ -147,6 +147,8 @@ MIGRATION.md flags for the app pool.
 | API invoke URL | `https://0u10zqz4r0.execute-api.ap-east-2.amazonaws.com/prod` | ap-east-2 |
 | Cognito authorizer | `tish-admin-pool` on all four authorized methods | ap-east-2 |
 | Amplify app | `d1x8yq4r6ivp8n` (`tish-dashboard`), branch `main` | **ap-northeast-2** |
+| Custom domain | `admin.ti-smarthealth.com` → branch `main`, ACM cert managed by Amplify | ap-northeast-2 |
+| DNS | `admin` CNAME in Route 53 zone `Z0492003C3ORSSH0BIWC`, written by Amplify | global |
 
 `tish-admin-api` shares the app backend's VPC placement — subnets
 `subnet-0ef1ccc6d175653c3`, `subnet-05a4cca510c84174d`, `subnet-02d53fa57a84c5a23`
@@ -208,6 +210,28 @@ were assumed by the original plan and neither is available:
 The API and Lambda *are* in Taipei, next to RDS, so no request touches two
 regions.
 
+## The custom domain
+
+`admin.ti-smarthealth.com` is an Amplify domain association on branch `main`.
+Because the Route 53 zone is in the same account, Amplify requested the ACM
+certificate and wrote both the validation record and the `admin` CNAME itself —
+nothing was created by hand, and renewal is automatic. This is the one job
+Amplify does that S3 + CloudFront would have meant doing manually, including an
+ACM certificate pinned to us-east-1.
+
+**It is the single canonical origin.** `main.d1x8yq4r6ivp8n.amplifyapp.com`
+still serves the page — it is the same branch — but API calls from it are now
+CORS-blocked, because the gateway's preflight is a MOCK integration that can
+return exactly one origin. Supporting both would mean either echoing back
+whatever `Origin` the browser sent, which permits any site, or moving preflight
+onto the Lambda and paying an invocation per request. Neither is worth it for a
+second URL nobody needs to use.
+
+No rebuild was needed to switch. The SPA derives its OAuth `redirect_uri` from
+`window.location.origin` ([src/lib/auth.ts](src/lib/auth.ts)), so it follows
+whatever host it is served from; only Cognito's registered callback list and the
+CORS origin are host-specific. Rolling back is those two things in reverse.
+
 ## CORS, and why local dev uses mock mode
 
 `ALLOWED_ORIGIN` is a single origin (the Amplify URL) — the handler echoes
@@ -247,7 +271,7 @@ Amplify's own environment variables does nothing, because Amplify never builds.
 
 ## Smoke test
 
-1. Open <https://main.d1x8yq4r6ivp8n.amplifyapp.com> → redirected to the Cognito
+1. Open <https://admin.ti-smarthealth.com> → redirected to the Cognito
    hosted UI → sign in (password change on first use).
 2. Database page: pick `genders` → 4 rows, read-only.
 3. Translations page: needs the PAT above; until then it errors.
