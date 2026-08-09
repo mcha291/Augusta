@@ -580,10 +580,16 @@ export async function handler(event) {
           if (res.rowCount === 0) return json(404, { error: `No article type with id ${route.id}` });
           return json(200, { deleted: route.id });
         } catch (e) {
-          // 23503 is the ON DELETE RESTRICT from migration 010 doing its job.
-          // The alternative designs both lose data silently, so this failure is
-          // the feature and it deserves a sentence rather than a 500.
-          if (e?.code === '23503') {
+          // Migration 010's ON DELETE RESTRICT doing its job. **Two codes, and
+          // the distinction is not academic:** Postgres raises `23001`
+          // (restrict_violation) for an explicit RESTRICT and `23503`
+          // (foreign_key_violation) for the NO ACTION default. Only 23001 can
+          // actually reach here today; 23503 is listed so that changing the
+          // constraint later cannot silently turn this 409 back into a 500.
+          //
+          // Found live, not by a test — the unit test asserted 23503 because
+          // that is what the code assumed, so it agreed with the bug.
+          if (e?.code === '23001' || e?.code === '23503') {
             return json(409, {
               error: 'That type is still used by one or more articles. Move them to another type first.',
               code: 'TYPE_IN_USE',

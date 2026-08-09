@@ -1037,7 +1037,14 @@ export const handler = async (event) => {
                 // The migration ledger. `tish-migrate {"command":"status"}`
                 // answers the same question and is authoritative, but this is
                 // one HTTP call rather than a Lambda invoke.
-                'schema_migrations'
+                'schema_migrations',
+                // 009 / 010 — the news tables. `announcements` holds drafts,
+                // which the patient-facing route deliberately never returns, so
+                // this is the only way to see whether a staff member's article
+                // actually saved. `announcement_types` is where a wrong tag or a
+                // missing translation is diagnosed.
+                'announcements',
+                'announcement_types'
             ];
 
             if (!allowedTables.includes(tableName)) {

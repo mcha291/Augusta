@@ -524,13 +524,22 @@ test('GET /announcement-types reports how many articles use each one', async () 
 test('DELETING A TYPE STILL IN USE IS A 409, not a 500 and not a silent cascade', async () => {
   // The RESTRICT in migration 010 is the feature; this is the sentence that
   // makes it usable. A 500 here would read as "the dashboard is broken".
-  _setPoolForTests(makePool([
-    { match: /DELETE FROM announcement_types/, result: () => { const e = new Error('violates foreign key'); e.code = '23503'; throw e; } },
-  ]));
-  const res = await handler(restEvent({ method: 'DELETE', path: '/announcement-types/1' }));
-  assert.equal(res.statusCode, 409);
-  assert.equal(parse(res).code, 'TYPE_IN_USE');
-  assert.match(parse(res).error, /still used/);
+  //
+  // **23001 is the code an explicit RESTRICT actually raises**, and this test
+  // asserted 23503 until a live probe returned a 500. The original passed
+  // because the fake threw whatever the handler was written to expect, so the
+  // test and the bug agreed with each other. Both codes are covered now: 23503
+  // is what the NO ACTION default raises, so it becomes reachable the moment
+  // anyone rewrites that constraint.
+  for (const code of ['23001', '23503']) {
+    _setPoolForTests(makePool([
+      { match: /DELETE FROM announcement_types/, result: () => { const e = new Error('violates RESTRICT setting'); e.code = code; throw e; } },
+    ]));
+    const res = await handler(restEvent({ method: 'DELETE', path: '/announcement-types/1' }));
+    assert.equal(res.statusCode, 409, `SQLSTATE ${code} should be a 409`);
+    assert.equal(parse(res).code, 'TYPE_IN_USE');
+    assert.match(parse(res).error, /still used/);
+  }
 });
 
 test('a duplicate label is a named 422, not the raw unique-index message', async () => {
