@@ -57,6 +57,14 @@ export function requiredEnvFor(routeName) {
   switch (routeName) {
     case 'listTables':
     case 'getTable':
+    case 'listAnnouncements':
+    case 'createAnnouncement':
+    case 'updateAnnouncement':
+    case 'deleteAnnouncement':
+    case 'listAnnouncementTypes':
+    case 'createAnnouncementType':
+    case 'updateAnnouncementType':
+    case 'deleteAnnouncementType':
       return [...DB_ENV, 'ALLOWED_ORIGIN'];
     case 'getTranslations':
     case 'putTranslations':
@@ -79,7 +87,83 @@ export const ALLOWED_TABLES = [
   'genders',
   'conditions',
   'appointment_statuses',
+  'announcements',
 ];
+
+// ---------------------------------------------------------------------------
+// Announcements
+// ---------------------------------------------------------------------------
+
+/** Mirrors the app's locale set; the column suffix each one writes to. */
+export const ANNOUNCEMENT_LOCALES = { en: 'en', 'zh-Hant': 'zh_hant' };
+
+const isFilled = (v) => typeof v === 'string' && v.trim() !== '';
+
+/**
+ * Validate an article type (migration 010).
+ *
+ * **Only the English label is required.** It is the natural key, unique
+ * case-insensitively in the database, and the read path falls back to it when a
+ * translation is missing — so a type with no 中文 label still renders, in
+ * English, which is the same bargain the articles themselves strike. Requiring
+ * both would block staff from creating a category until someone who reads
+ * Chinese is available.
+ */
+export function validateAnnouncementType(input) {
+  const problems = [];
+  if (!isFilled(input?.label_en)) problems.push('label_en is required — it is the type’s name and its key');
+  if (input?.color != null && !/^#[0-9a-fA-F]{6}$/.test(String(input.color))) {
+    problems.push('color must be a 6-digit hex value like #6366F1');
+  }
+  if (input?.sort_order != null && !Number.isInteger(input.sort_order)) {
+    problems.push('sort_order must be a whole number');
+  }
+  return problems;
+}
+
+/**
+ * Validate an article, returning the same `problems` array shape
+ * `validateLocalePair` uses so the handler can 422 both the same way.
+ *
+ * **Publishing is the strict gate, saving a draft is not.** A draft is
+ * work in progress and half a sentence in one language is a legitimate state to
+ * leave it in; a *published* article is rendered on a patient's home screen,
+ * where `localiseAnnouncement` resolves it as a unit. An article published with
+ * a title in neither language renders a card with a blank headline, and one with
+ * no body renders a headline that opens onto nothing.
+ */
+export function validateAnnouncement(input, { publishing } = {}) {
+  const problems = [];
+
+  // Migration 010 moved the vocabulary into a table, so this checks the shape
+  // and the foreign key checks the value. A type that does not exist comes back
+  // from Postgres as a constraint violation, which the handler turns into a 422
+  // naming the field rather than leaking the constraint text.
+  if (!Number.isInteger(input?.type_id)) {
+    problems.push('type_id is required — pick one of the configured article types');
+  }
+
+  for (const [locale, suffix] of Object.entries(ANNOUNCEMENT_LOCALES)) {
+    const title = input?.[`title_${suffix}`];
+    const content = input?.[`content_${suffix}`];
+    // A body with no headline is the one lopsided case that is always wrong:
+    // the list renders titles, so the article would be invisible from the list
+    // and unreachable even though it holds text.
+    if (isFilled(content) && !isFilled(title)) {
+      problems.push(`${locale}: content without a title — the list renders titles, so this article would be unreachable`);
+    }
+  }
+
+  if (publishing) {
+    const complete = Object.values(ANNOUNCEMENT_LOCALES)
+      .some((s) => isFilled(input?.[`title_${s}`]) && isFilled(input?.[`content_${s}`]));
+    if (!complete) {
+      problems.push('publishing needs a title and body filled in for at least one language');
+    }
+  }
+
+  return problems;
+}
 
 // Path of the locales directory *within the GitHub repo*. The app repo is a
 // monorepo with the Expo app under tish-app/, so the default reflects that.
@@ -251,6 +335,18 @@ export function routeOf(method, path) {
   if (method === 'GET' && tableMatch) return { name: 'getTable', table: tableMatch[1] };
   if (method === 'GET' && clean === '/translations') return { name: 'getTranslations' };
   if (method === 'PUT' && clean === '/translations') return { name: 'putTranslations' };
+  if (method === 'GET' && clean === '/announcements') return { name: 'listAnnouncements' };
+  if (method === 'POST' && clean === '/announcements') return { name: 'createAnnouncement' };
+  // \d+ rather than .+ so a non-numeric id is a 404 here instead of reaching a
+  // query as NaN, which Postgres rejects with prose the client should not see.
+  const articleMatch = clean.match(/^\/announcements\/(\d+)$/);
+  if (method === 'PUT' && articleMatch) return { name: 'updateAnnouncement', id: Number(articleMatch[1]) };
+  if (method === 'DELETE' && articleMatch) return { name: 'deleteAnnouncement', id: Number(articleMatch[1]) };
+  if (method === 'GET' && clean === '/announcement-types') return { name: 'listAnnouncementTypes' };
+  if (method === 'POST' && clean === '/announcement-types') return { name: 'createAnnouncementType' };
+  const typeMatch = clean.match(/^\/announcement-types\/(\d+)$/);
+  if (method === 'PUT' && typeMatch) return { name: 'updateAnnouncementType', id: Number(typeMatch[1]) };
+  if (method === 'DELETE' && typeMatch) return { name: 'deleteAnnouncementType', id: Number(typeMatch[1]) };
   return { name: 'notFound' };
 }
 
@@ -306,7 +402,7 @@ function json(statusCode, body) {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGIN || '',
       'Access-Control-Allow-Headers': 'Authorization,Content-Type',
-      'Access-Control-Allow-Methods': 'GET,PUT,OPTIONS',
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
     },
     body: JSON.stringify(body),
   };
@@ -413,6 +509,179 @@ export async function handler(event) {
           return json(409, { error: 'File changed since you loaded it — reload and reapply your edits.' });
         }
         return json(200, { commitUrl: result.commitUrl, sha: result.newSha });
+      }
+
+      case 'listAnnouncementTypes': {
+        const db = getPool();
+        const res = await db.query(
+          `SELECT t.*, COUNT(a.id)::int AS article_count
+             FROM announcement_types t
+             LEFT JOIN announcements a ON a.type_id = t.id
+            GROUP BY t.id
+            ORDER BY t.sort_order ASC, t.id ASC`
+        );
+        // `article_count` is what lets the editor grey out a delete before the
+        // user clicks it, rather than explaining the RESTRICT afterwards.
+        return json(200, { types: res.rows });
+      }
+
+      case 'createAnnouncementType':
+      case 'updateAnnouncementType': {
+        let input;
+        try {
+          input = JSON.parse(event.body ?? '');
+        } catch {
+          return json(400, { error: 'Request body must be JSON' });
+        }
+
+        const problems = validateAnnouncementType(input);
+        if (problems.length > 0) return json(422, { error: 'Validation failed', problems });
+
+        const db = getPool();
+        const values = [
+          String(input.label_en).trim(),
+          isFilled(input.label_zh_hant) ? String(input.label_zh_hant).trim() : null,
+          input.color ?? null,
+          Number.isInteger(input.sort_order) ? input.sort_order : 0,
+        ];
+
+        try {
+          if (route.name === 'createAnnouncementType') {
+            const res = await db.query(
+              `INSERT INTO announcement_types (label_en, label_zh_hant, color, sort_order)
+               VALUES ($1, $2, $3, $4) RETURNING *`,
+              values
+            );
+            return json(201, { type: res.rows[0] });
+          }
+          const res = await db.query(
+            `UPDATE announcement_types
+                SET label_en = $1, label_zh_hant = $2, color = $3, sort_order = $4
+              WHERE id = $5 RETURNING *`,
+            [...values, route.id]
+          );
+          if (res.rowCount === 0) return json(404, { error: `No article type with id ${route.id}` });
+          return json(200, { type: res.rows[0] });
+        } catch (e) {
+          // 23505 is the case-insensitive unique index on label_en. Reported as
+          // a named field rather than swallowed into the catch-all 500, because
+          // "News already exists" is something the user can act on.
+          if (e?.code === '23505') {
+            return json(422, { error: 'Validation failed', problems: ['a type with that English label already exists'] });
+          }
+          throw e;
+        }
+      }
+
+      case 'deleteAnnouncementType': {
+        const db = getPool();
+        try {
+          const res = await db.query('DELETE FROM announcement_types WHERE id = $1 RETURNING id', [route.id]);
+          if (res.rowCount === 0) return json(404, { error: `No article type with id ${route.id}` });
+          return json(200, { deleted: route.id });
+        } catch (e) {
+          // 23503 is the ON DELETE RESTRICT from migration 010 doing its job.
+          // The alternative designs both lose data silently, so this failure is
+          // the feature and it deserves a sentence rather than a 500.
+          if (e?.code === '23503') {
+            return json(409, {
+              error: 'That type is still used by one or more articles. Move them to another type first.',
+              code: 'TYPE_IN_USE',
+            });
+          }
+          throw e;
+        }
+      }
+
+      case 'listAnnouncements': {
+        // Drafts included and unresolved: this is the editor's view, so it needs
+        // both languages side by side and the articles that are not live yet.
+        // The patient-facing read in the app backend is the opposite of this on
+        // both counts.
+        const db = getPool();
+        const [articles, types] = await Promise.all([
+          db.query(
+            `SELECT a.*, t.label_en AS type_label_en, t.label_zh_hant AS type_label_zh_hant, t.color AS type_color
+               FROM announcements a
+               JOIN announcement_types t ON t.id = a.type_id
+              ORDER BY COALESCE(a.published_at, a.created_at) DESC, a.id DESC`
+          ),
+          // Returned alongside rather than fetched separately: the editor needs
+          // them to render a type picker on every article, and a second round
+          // trip would let the page paint a picker with nothing in it.
+          db.query('SELECT * FROM announcement_types ORDER BY sort_order ASC, id ASC'),
+        ]);
+        return json(200, { announcements: articles.rows, types: types.rows });
+      }
+
+      case 'createAnnouncement':
+      case 'updateAnnouncement': {
+        let input;
+        try {
+          input = JSON.parse(event.body ?? '');
+        } catch {
+          return json(400, { error: 'Request body must be JSON' });
+        }
+
+        const publishing = input?.published === true;
+        const problems = validateAnnouncement(input, { publishing });
+        if (problems.length > 0) return json(422, { error: 'Validation failed', problems });
+
+        const db = getPool();
+        const values = [
+          input.title_en ?? null,
+          input.title_zh_hant ?? null,
+          input.content_en ?? null,
+          input.content_zh_hant ?? null,
+          input.type_id,
+        ];
+
+        try {
+          if (route.name === 'createAnnouncement') {
+            const res = await db.query(
+              `INSERT INTO announcements
+                 (title_en, title_zh_hant, content_en, content_zh_hant, type_id, published_at)
+               VALUES ($1, $2, $3, $4, $5, CASE WHEN $6::boolean THEN now() ELSE NULL END)
+               RETURNING *`,
+              [...values, publishing]
+            );
+            return json(201, { announcement: res.rows[0] });
+          }
+
+        // **An edit to a live article keeps its original publication date.**
+        // COALESCE rather than now(): the patient-facing list orders by
+        // published_at, so restamping it would jump a typo fix to the top of
+        // everyone's home screen above genuinely newer news. Unpublishing
+        // clears it outright, so re-publishing later is deliberately a new date.
+          const res = await db.query(
+            `UPDATE announcements SET
+               title_en = $1, title_zh_hant = $2,
+               content_en = $3, content_zh_hant = $4,
+               type_id = $5,
+               published_at = CASE WHEN $6::boolean THEN COALESCE(published_at, now()) ELSE NULL END,
+               updated_at = now()
+             WHERE id = $7
+             RETURNING *`,
+            [...values, publishing, route.id]
+          );
+          if (res.rowCount === 0) return json(404, { error: `No article with id ${route.id}` });
+          return json(200, { announcement: res.rows[0] });
+        } catch (e) {
+          // 23503: a type_id that is not a row. Only reachable from a stale
+          // editor whose type was deleted in another tab, so it is a real case
+          // rather than a defensive one.
+          if (e?.code === '23503') {
+            return json(422, { error: 'Validation failed', problems: ['that article type no longer exists — reload and pick another'] });
+          }
+          throw e;
+        }
+      }
+
+      case 'deleteAnnouncement': {
+        const db = getPool();
+        const res = await db.query('DELETE FROM announcements WHERE id = $1 RETURNING id', [route.id]);
+        if (res.rowCount === 0) return json(404, { error: `No article with id ${route.id}` });
+        return json(200, { deleted: route.id });
       }
 
       default:

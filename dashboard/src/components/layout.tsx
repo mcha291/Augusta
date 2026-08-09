@@ -1,4 +1,4 @@
-import { Database, Languages, LogOut } from "lucide-react"
+import { Database, Languages, LogOut, Newspaper } from "lucide-react"
 import { NavLink, Outlet } from "react-router-dom"
 
 import { Badge } from "@/components/ui/badge"
@@ -9,6 +9,7 @@ import { MOCK } from "@/lib/config"
 import { cn } from "@/lib/utils"
 
 const NAV_ITEMS = [
+  { to: "/news", label: "News", icon: Newspaper },
   { to: "/translations", label: "Translations", icon: Languages },
   { to: "/database", label: "Database", icon: Database },
 ]

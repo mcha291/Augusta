@@ -4,7 +4,7 @@
 
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, resolveRoutePath, APP_TIMEZONE, ERRORS, PROBLEM_CODES, errorBody } from './index.mjs';
+import { handler, _setPoolForTests, resolveRoutePath, APP_TIMEZONE, ERRORS, PROBLEM_CODES, errorBody, localiseAnnouncement, DEFAULT_ANNOUNCEMENT_LOCALE } from './index.mjs';
 
 // ---------------------------------------------------------------------------
 // Scripted pool: routes queries by regex against the SQL text, records calls.
@@ -262,7 +262,10 @@ test('POST /reset-db does not drop users, and says what it preserved', async () 
   ]));
   const res = await handler(restEvent({ method: 'POST', path: '/reset-db' }));
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(parse(res).preserved, ['users', 'genders', 'conditions', 'user_relationships']);
+  // `announcement_types` joined the list in migration 010 — the first preserved
+  // table whose rows staff edit, rather than reference data that is seeded once.
+  assert.deepEqual(parse(res).preserved, ['users', 'genders', 'conditions', 'user_relationships', 'announcement_types']);
+  assert.doesNotMatch(sql, /DROP TABLE IF EXISTS announcement_types\b/);
 
   // The assertion that matters: the SQL actually sent, not just the response.
   assert.doesNotMatch(sql, /DROP TABLE IF EXISTS users\b/);
@@ -2265,4 +2268,100 @@ test('the route fallthrough still names the path it could not match', async () =
   const res = await handler(restEvent({ path: '/nope', sub: 'sub-1' }));
   assert.equal(parse(res).code, 'ROUTE_NOT_FOUND');
   assert.match(parse(res).error, /\/nope/);
+});
+
+// ---------------------------------------------------------------------------
+// Announcements (migration 009) — localisation and the draft boundary
+// ---------------------------------------------------------------------------
+
+const article = (over = {}) => ({
+  id: 1,
+  type: 'news',
+  title_en: 'Clinic closed Monday',
+  title_zh_hant: '週一休診',
+  content_en: 'The clinic is closed.',
+  content_zh_hant: '診所休診。',
+  published_at: '2026-08-01T00:00:00.000Z',
+  ...over,
+});
+
+test('localiseAnnouncement resolves to the reader’s language', () => {
+  assert.equal(localiseAnnouncement(article(), 'en').title, 'Clinic closed Monday');
+  assert.equal(localiseAnnouncement(article(), 'zh-Hant').title, '週一休診');
+});
+
+test('AN ARTICLE FALLS BACK AS A UNIT, never a headline in one language over a body in the other', () => {
+  // The failure this exists to prevent is not a missing translation — it is a
+  // half-translated article rendering as though the app were broken.
+  const enOnly = article({ title_zh_hant: null, content_zh_hant: null });
+  const got = localiseAnnouncement(enOnly, 'zh-Hant');
+  assert.equal(got.locale, 'en');
+  assert.equal(got.title, 'Clinic closed Monday');
+  assert.equal(got.content, 'The clinic is closed.');
+});
+
+test('a blank translation counts as absent, not as an empty article', () => {
+  // An editor who tabbed through the Chinese fields leaves '' rather than NULL.
+  const got = localiseAnnouncement(article({ title_zh_hant: '   ' }), 'zh-Hant');
+  assert.equal(got.locale, 'en');
+  assert.equal(got.title, 'Clinic closed Monday');
+});
+
+test('an unknown locale falls back to the default rather than resolving to nothing', () => {
+  const got = localiseAnnouncement(article(), 'fr');
+  assert.equal(got.locale, DEFAULT_ANNOUNCEMENT_LOCALE);
+});
+
+test('the per-locale fields survive alongside the flattened pair', () => {
+  // Installed builds read title/content; newer ones may resolve for themselves
+  // when the user switches language without a refetch.
+  const got = localiseAnnouncement(article(), 'en');
+  assert.equal(got.title_zh_hant, '週一休診');
+  assert.equal(got.locale, 'en');
+});
+
+test('GET /announcements returns published rows only, newest published first', async () => {
+  let sql;
+  _setPoolForTests(selfPool([
+    { match: /FROM announcements/, result: (t) => { sql = t; return { rows: [article()] }; } },
+  ]));
+  const res = await handler(restEvent({ path: '/announcements', sub: 'sub-1', query: { locale: 'en' } }));
+  assert.equal(res.statusCode, 200);
+  assert.match(sql, /WHERE a\.published_at IS NOT NULL/);
+  assert.match(sql, /ORDER BY a\.published_at DESC/);
+  // Migration 010: the tag is a row now, so the read has to reach it.
+  assert.match(sql, /JOIN announcement_types t ON t\.id = a\.type_id/);
+  assert.equal(parse(res)[0].title, 'Clinic closed Monday');
+});
+
+test('THE DRAFT FILTER IS IN THE SQL, so an unpublished article never reaches the wire', async () => {
+  // A client-side filter would mean shipping the draft to filter it out.
+  let sql;
+  _setPoolForTests(selfPool([
+    { match: /FROM announcements/, result: (t) => { sql = t; return { rows: [] }; } },
+  ]));
+  await handler(restEvent({ path: '/announcements', sub: 'sub-1', query: { locale: 'en' } }));
+  assert.doesNotMatch(sql, /SELECT \* FROM announcements ORDER BY id DESC/);
+  assert.match(sql, /published_at IS NOT NULL/);
+});
+
+test('an explicit ?locale wins without reading users.locale at all', async () => {
+  // The client is the only thing that knows the live choice, so asking the
+  // database as well would be a query that can only disagree.
+  _setPoolForTests(selfPool([
+    { match: /SELECT locale FROM users/, result: { rows: [{ locale: 'zh-Hant' }] } },
+    { match: /FROM announcements/, result: { rows: [article()] } },
+  ]));
+  const res = await handler(restEvent({ path: '/announcements', sub: 'sub-1', query: { locale: 'en' } }));
+  assert.equal(parse(res)[0].locale, 'en');
+});
+
+test('a build that predates ?locale falls back to the stored users.locale', async () => {
+  _setPoolForTests(selfPool([
+    { match: /SELECT locale FROM users/, result: { rows: [{ locale: 'en' }] } },
+    { match: /FROM announcements/, result: { rows: [article()] } },
+  ]));
+  const res = await handler(restEvent({ path: '/announcements', sub: 'sub-1' }));
+  assert.equal(parse(res)[0].locale, 'en');
+  assert.equal(parse(res)[0].title, 'Clinic closed Monday');
 });

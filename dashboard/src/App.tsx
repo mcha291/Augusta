@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { LandingPage } from "@/features/auth/LandingPage"
 import { SignUpPage } from "@/features/auth/SignUpPage"
 import { DatabasePage } from "@/features/database/DatabasePage"
+import { NewsPage } from "@/features/news/NewsPage"
 import { TranslationsPage } from "@/features/translations/TranslationsPage"
 import { useAdminAuth } from "@/lib/auth"
 import { missingConfig } from "@/lib/config"
@@ -108,10 +109,11 @@ export default function App() {
   return (
     <Routes>
       <Route element={<Layout />}>
-        <Route index element={<Navigate to="/translations" replace />} />
+        <Route index element={<Navigate to="/news" replace />} />
+        <Route path="/news" element={<NewsPage />} />
         <Route path="/translations" element={<TranslationsPage />} />
         <Route path="/database" element={<DatabasePage />} />
-        <Route path="*" element={<Navigate to="/translations" replace />} />
+        <Route path="*" element={<Navigate to="/news" replace />} />
       </Route>
     </Routes>
   )

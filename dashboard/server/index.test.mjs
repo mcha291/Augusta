@@ -6,7 +6,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, ALLOWED_TABLES, groupsFrom, requiredEnvFor } from './index.mjs';
+import { handler, _setPoolForTests, ALLOWED_TABLES, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
 
 const ENV = {
   DB_HOST: 'db.local', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'postgres',
@@ -370,4 +370,232 @@ test('internal errors return sanitized 500 (no stack/details in the response)', 
   const res = await handler(httpEvent({ path: '/translations' }));
   assert.equal(res.statusCode, 500);
   assert.equal(parse(res).error, 'Internal error');
+});
+
+// ---------------------------------------------------------------------------
+// Announcements
+// ---------------------------------------------------------------------------
+
+const draft = (over = {}) => ({
+  type_id: 2,
+  title_en: 'Clinic closed Monday',
+  content_en: 'The clinic is closed all day.',
+  title_zh_hant: '週一休診',
+  content_zh_hant: '診所全日休診。',
+  ...over,
+});
+
+test('validateAnnouncement requires a type_id, since 010 made the vocabulary a table', () => {
+  assert.deepEqual(validateAnnouncement(draft()), []);
+  assert.match(validateAnnouncement(draft({ type_id: undefined }))[0], /type_id is required/);
+  // A label is not a type any more — only the foreign key is.
+  assert.match(validateAnnouncement(draft({ type_id: 'news' }))[0], /type_id is required/);
+});
+
+test('A DRAFT MAY BE HALF-WRITTEN, because that is what a draft is', () => {
+  const problems = validateAnnouncement(draft({ title_zh_hant: '', content_zh_hant: '' }));
+  assert.deepEqual(problems, []);
+});
+
+test('PUBLISHING NEEDS ONE COMPLETE LANGUAGE, or the card renders blank', () => {
+  const halfWritten = draft({ content_en: '', title_zh_hant: '', content_zh_hant: '' });
+  const problems = validateAnnouncement(halfWritten, { publishing: true });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /at least one language/);
+  // The same article is a perfectly legal draft.
+  assert.deepEqual(validateAnnouncement(halfWritten), []);
+});
+
+test('a body with no headline is rejected even as a draft', () => {
+  // Unreachable rather than incomplete: the editor list renders titles, so this
+  // article would hold text nobody could ever open.
+  const problems = validateAnnouncement(draft({ title_zh_hant: '' }));
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /zh-Hant: content without a title/);
+});
+
+test('GET /announcements returns drafts too, unresolved, newest first', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /FROM announcements/, result: (t) => { sql = t; return { rows: [{ id: 1, published_at: null }] }; } },
+  ]));
+  const res = await handler(restEvent({ path: '/announcements' }));
+  assert.equal(res.statusCode, 200);
+  assert.match(sql, /ORDER BY COALESCE\(a\.published_at, a\.created_at\) DESC/);
+  assert.doesNotMatch(sql, /WHERE a\.published_at IS NOT NULL/);
+});
+
+test('the article list carries the types too, so the picker is never empty on first paint', async () => {
+  _setPoolForTests(makePool([
+    { match: /FROM announcements a/, result: { rows: [{ id: 1 }] } },
+    { match: /FROM announcement_types ORDER BY/, result: { rows: [{ id: 1, label_en: 'News' }] } },
+  ]));
+  const res = await handler(restEvent({ path: '/announcements' }));
+  assert.equal(parse(res).types[0].label_en, 'News');
+});
+
+test('POST /announcements creates a draft when published is absent', async () => {
+  let params;
+  _setPoolForTests(makePool([
+    { match: /INSERT INTO announcements/, result: (t, p) => { params = p; return { rows: [{ id: 7 }], rowCount: 1 }; } },
+  ]));
+  const res = await handler(restEvent({ method: 'POST', path: '/announcements', body: draft() }));
+  assert.equal(res.statusCode, 201);
+  assert.equal(params[5], false);
+});
+
+test('POST /announcements refuses to publish an article with no complete language', async () => {
+  _setPoolForTests(makePool([]));
+  const res = await handler(restEvent({
+    method: 'POST', path: '/announcements',
+    body: draft({ content_en: '', title_zh_hant: '', content_zh_hant: '', published: true }),
+  }));
+  assert.equal(res.statusCode, 422);
+  assert.match(parse(res).problems[0], /at least one language/);
+});
+
+test('EDITING A LIVE ARTICLE KEEPS ITS PUBLICATION DATE', async () => {
+  // Restamping would jump a typo fix above genuinely newer news on every
+  // patient's home screen, because the app orders by published_at.
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /UPDATE announcements/, result: (t) => { sql = t; return { rows: [{ id: 3 }], rowCount: 1 }; } },
+  ]));
+  const res = await handler(restEvent({
+    method: 'PUT', path: '/announcements/3', body: draft({ published: true }),
+  }));
+  assert.equal(res.statusCode, 200);
+  assert.match(sql, /COALESCE\(published_at, now\(\)\)/);
+});
+
+test('unpublishing clears published_at rather than keeping a stale date', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /UPDATE announcements/, result: (t) => { sql = t; return { rows: [{ id: 3 }], rowCount: 1 }; } },
+  ]));
+  await handler(restEvent({ method: 'PUT', path: '/announcements/3', body: draft({ published: false }) }));
+  assert.match(sql, /ELSE NULL END/);
+});
+
+test('PUT and DELETE on an unknown id are 404, not a silent success', async () => {
+  for (const method of ['PUT', 'DELETE']) {
+    _setPoolForTests(makePool([]));  // rowCount 0
+    const res = await handler(restEvent({ method, path: '/announcements/999', body: draft() }));
+    assert.equal(res.statusCode, 404, `${method} should 404`);
+  }
+});
+
+test('a non-numeric article id does not reach a query', async () => {
+  const pool = makePool([]);
+  _setPoolForTests(pool);
+  const res = await handler(restEvent({ method: 'DELETE', path: '/announcements/abc' }));
+  assert.equal(res.statusCode, 404);
+  assert.equal(pool.calls.length, 0);
+});
+
+// --- article types (migration 010) ------------------------------------------
+
+test('validateAnnouncementType requires the English label but not the Chinese one', () => {
+  // Only label_en is the key, and the read path falls back to it. Requiring
+  // both would block staff from adding a category until a Chinese reader is
+  // free, which is the opposite of why this table exists.
+  assert.deepEqual(validateAnnouncementType({ label_en: 'Recalls' }), []);
+  assert.match(validateAnnouncementType({ label_en: '  ' })[0], /label_en is required/);
+  assert.deepEqual(validateAnnouncementType({ label_en: 'Recalls', label_zh_hant: null }), []);
+});
+
+test('a malformed colour or sort order is named rather than stored', () => {
+  assert.match(validateAnnouncementType({ label_en: 'X', color: 'red' })[0], /6-digit hex/);
+  assert.deepEqual(validateAnnouncementType({ label_en: 'X', color: '#6366F1' }), []);
+  assert.match(validateAnnouncementType({ label_en: 'X', sort_order: 1.5 })[0], /whole number/);
+});
+
+test('GET /announcement-types reports how many articles use each one', async () => {
+  let sql;
+  _setPoolForTests(makePool([
+    { match: /FROM announcement_types t/, result: (t) => { sql = t; return { rows: [{ id: 1, label_en: 'News', article_count: 3 }] }; } },
+  ]));
+  const res = await handler(restEvent({ path: '/announcement-types' }));
+  assert.equal(res.statusCode, 200);
+  assert.match(sql, /COUNT\(a\.id\)::int AS article_count/);
+  assert.equal(parse(res).types[0].article_count, 3);
+});
+
+test('DELETING A TYPE STILL IN USE IS A 409, not a 500 and not a silent cascade', async () => {
+  // The RESTRICT in migration 010 is the feature; this is the sentence that
+  // makes it usable. A 500 here would read as "the dashboard is broken".
+  _setPoolForTests(makePool([
+    { match: /DELETE FROM announcement_types/, result: () => { const e = new Error('violates foreign key'); e.code = '23503'; throw e; } },
+  ]));
+  const res = await handler(restEvent({ method: 'DELETE', path: '/announcement-types/1' }));
+  assert.equal(res.statusCode, 409);
+  assert.equal(parse(res).code, 'TYPE_IN_USE');
+  assert.match(parse(res).error, /still used/);
+});
+
+test('a duplicate label is a named 422, not the raw unique-index message', async () => {
+  _setPoolForTests(makePool([
+    { match: /INSERT INTO announcement_types/, result: () => { const e = new Error('duplicate key'); e.code = '23505'; throw e; } },
+  ]));
+  const res = await handler(restEvent({ method: 'POST', path: '/announcement-types', body: { label_en: 'News' } }));
+  assert.equal(res.statusCode, 422);
+  assert.match(parse(res).problems[0], /already exists/);
+  assert.doesNotMatch(JSON.stringify(parse(res)), /duplicate key/);
+});
+
+test('an article pointing at a deleted type is a 422 the editor can recover from', async () => {
+  // Reachable in one tab after another deletes the type.
+  _setPoolForTests(makePool([
+    { match: /INSERT INTO announcements/, result: () => { const e = new Error('fk'); e.code = '23503'; throw e; } },
+  ]));
+  const res = await handler(restEvent({ method: 'POST', path: '/announcements', body: draft() }));
+  assert.equal(res.statusCode, 422);
+  assert.match(parse(res).problems[0], /no longer exists/);
+});
+
+test('an empty Chinese label is stored as NULL, not as an empty string', async () => {
+  // So the read path's "is it filled?" test and the database agree about what
+  // "missing translation" means.
+  let params;
+  _setPoolForTests(makePool([
+    { match: /INSERT INTO announcement_types/, result: (t, p) => { params = p; return { rows: [{ id: 5 }], rowCount: 1 }; } },
+  ]));
+  await handler(restEvent({ method: 'POST', path: '/announcement-types', body: { label_en: 'Recalls', label_zh_hant: '   ' } }));
+  assert.equal(params[1], null);
+});
+
+test('type routes are gated on approval like everything else', async () => {
+  for (const [method, path] of [['GET', '/announcement-types'], ['POST', '/announcement-types'], ['DELETE', '/announcement-types/1']]) {
+    const pool = makePool([]);
+    _setPoolForTests(pool);
+    const res = await handler(restEvent({ method, path, body: { label_en: 'X' }, groups: [] }));
+    assert.equal(res.statusCode, 403, `${method} ${path} should be gated`);
+    assert.equal(pool.calls.length, 0);
+  }
+});
+
+test('announcement routes need the database env, never the GitHub token', () => {
+  for (const name of ['listAnnouncements', 'createAnnouncement', 'updateAnnouncement', 'deleteAnnouncement',
+                      'listAnnouncementTypes', 'createAnnouncementType', 'updateAnnouncementType', 'deleteAnnouncementType']) {
+    const env = requiredEnvFor(name);
+    assert.ok(env.includes('DB_HOST'), `${name} needs DB_HOST`);
+    assert.ok(!env.includes('GITHUB_TOKEN'), `${name} must not require GITHUB_TOKEN`);
+  }
+});
+
+test('the unapproved gate covers writes, not just reads', async () => {
+  for (const [method, path] of [['POST', '/announcements'], ['PUT', '/announcements/1'], ['DELETE', '/announcements/1']]) {
+    const pool = makePool([]);
+    _setPoolForTests(pool);
+    const res = await handler(restEvent({ method, path, body: draft(), groups: [] }));
+    assert.equal(res.statusCode, 403, `${method} ${path} should be gated`);
+    assert.equal(pool.calls.length, 0);
+  }
+});
+
+test('CORS advertises the write methods the editor actually uses', async () => {
+  const res = await handler(restEvent({ method: 'OPTIONS', path: '/announcements' }));
+  for (const m of ['POST', 'PUT', 'DELETE']) {
+    assert.match(res.headers['Access-Control-Allow-Methods'], new RegExp(m));
+  }
 });

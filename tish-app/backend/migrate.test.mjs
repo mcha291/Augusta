@@ -468,3 +468,132 @@ test('users is preserved across a reset, which is why these two needed a migrati
   assert.ok(RESET_PRESERVED_TABLES.includes('users'));
   assert.doesNotMatch(RESET_SQL, /DROP TABLE[^;]*\busers\b/i);
 });
+
+// --- migration 009: localised, publishable announcements ---------------------
+
+const MIGRATION_009 = '009_announcements_localised_publishing.sql';
+const migration009 = () => readFileSync(path.join(HERE, 'migrations', MIGRATION_009), 'utf8');
+
+test('009 gives announcements a column per locale rather than one row per language', () => {
+  const sql = migration009();
+  for (const col of ['title_en', 'title_zh_hant', 'content_en', 'content_zh_hant']) {
+    assert.match(sql, new RegExp(`ADD COLUMN IF NOT EXISTS ${col}\\b`));
+  }
+});
+
+test('SCHEMA_SQL keeps 009 shape, so a rebuilt database matches a migrated one', () => {
+  const schema = schemaSql();
+  for (const col of ['title_en', 'title_zh_hant', 'content_en', 'content_zh_hant', 'published_at']) {
+    assert.match(schema, new RegExp(`\\b${col}\\b`));
+  }
+  // The legacy pair is gone from the rebuild path too, or a reset would
+  // recreate the columns the migration just dropped.
+  assert.doesNotMatch(schema, /CREATE TABLE announcements[\s\S]*?\btitle TEXT/);
+});
+
+test('THE LEGACY BACKFILL IS GUARDED, so a replay cannot wipe what it already moved', () => {
+  // The one statement here that is not idempotent on its own. Without the
+  // column-existence guard a second run would find title/content already
+  // dropped and the UPDATE would error, or worse, a partial re-run would
+  // overwrite edited text with a stale copy.
+  const sql = migration009();
+  assert.match(sql, /information_schema\.columns[\s\S]*?column_name = 'title'/);
+  assert.match(sql, /SET title_en\s*=\s*COALESCE\(title_en, title\)/);
+  assert.match(sql, /DROP COLUMN IF EXISTS title\b/);
+  assert.match(sql, /DROP COLUMN IF EXISTS content\b/);
+});
+
+test('009 normalises type before constraining it, or the CHECK could not be added', () => {
+  const sql = migration009();
+  const update = sql.indexOf("UPDATE announcements SET type = 'news'");
+  const constraint = sql.indexOf("ADD CONSTRAINT announcements_type_check");
+  assert.ok(update > -1 && constraint > -1);
+  assert.ok(update < constraint, 'rows must be inside the vocabulary before it closes');
+});
+
+test('009 is replay-safe, like every migration that adds a constraint', () => {
+  const sql = migration009();
+  assert.match(sql, /SELECT 1 FROM pg_constraint WHERE conname = 'announcements_type_check'/);
+  assert.match(sql, /CREATE INDEX IF NOT EXISTS announcements_published_idx/);
+});
+
+test('the published index is partial, so drafts do not sit in the read path index', () => {
+  assert.match(migration009(), /announcements_published_idx[\s\S]*?WHERE published_at IS NOT NULL/);
+});
+
+test('announcements is NOT preserved across a reset, so a rebuild reaches it', () => {
+  // Why 009 could have been a rebuild rather than a migration, and the reason
+  // the backfill matters anyway: the live table is reachable both ways, so the
+  // two paths have to agree about the end state.
+  assert.ok(!RESET_PRESERVED_TABLES.includes('announcements'));
+});
+
+// --- migration 010: article types become editable rows ----------------------
+
+const MIGRATION_010 = '010_announcement_types.sql';
+const migration010 = () => readFileSync(path.join(HERE, 'migrations', MIGRATION_010), 'utf8');
+
+test('010 seeds exactly the three defaults, in both languages', () => {
+  const sql = migration010();
+  for (const [en, zh] of [['System Updates', '系統更新'], ['News', '最新消息'], ['Announcements', '公告']]) {
+    assert.match(sql, new RegExp(`'${en}',\\s*'${zh}'`), `${en} should seed with its 中文 label`);
+  }
+});
+
+test('SCHEMA_SQL and SEED_SQL carry 010 too, so a rebuild lands in the same place', () => {
+  const schema = schemaSql();
+  assert.match(schema, /CREATE TABLE announcement_types/);
+  assert.match(schema, /type_id INTEGER NOT NULL REFERENCES announcement_types\(id\) ON DELETE RESTRICT/);
+  for (const label of ['System Updates', 'News', 'Announcements']) {
+    assert.match(SEED_SQL, new RegExp(`'${label}'`));
+  }
+});
+
+test('ANNOUNCEMENT_TYPES IS PRESERVED, because staff own these rows now', () => {
+  // The first preserved table that is somebody's work rather than reference
+  // data. A reset that rebuilt it would discard every category they added and
+  // every translation they wrote.
+  assert.ok(RESET_PRESERVED_TABLES.includes('announcement_types'));
+  assert.doesNotMatch(RESET_SQL, /DROP TABLE[^;]*\bannouncement_types\b/i);
+});
+
+test('DELETING A TYPE IN USE MUST FAIL, rather than cascade articles away', () => {
+  // The editor reports the failure; the constraint is what makes it a failure.
+  // CASCADE here would delete patients' articles as a side effect of tidying up
+  // a tag, and SET NULL would leave a card with no tag at all.
+  assert.match(migration010(), /REFERENCES announcement_types\(id\) ON DELETE RESTRICT/);
+  assert.match(schemaSql(), /ON DELETE RESTRICT/);
+});
+
+test('the label is unique case-insensitively, so News and news cannot coexist', () => {
+  assert.match(migration010(), /CREATE UNIQUE INDEX IF NOT EXISTS announcement_types_label_en_key\s*\n?\s*ON announcement_types \(lower\(label_en\)\)/);
+});
+
+test('010 backfills before it demands NOT NULL, and refuses to proceed if it could not', () => {
+  const sql = migration010();
+  const backfill = sql.indexOf('SET type_id = (SELECT id FROM announcement_types');
+  const guard = sql.indexOf('RAISE EXCEPTION');
+  const notNull = sql.indexOf('ALTER COLUMN type_id SET NOT NULL');
+  assert.ok(backfill > -1 && guard > -1 && notNull > -1);
+  assert.ok(backfill < guard && guard < notNull, 'backfill, then verify, then constrain');
+});
+
+test('010 is replay-safe', () => {
+  const sql = migration010();
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS announcement_types/);
+  assert.match(sql, /ADD COLUMN IF NOT EXISTS type_id/);
+  assert.match(sql, /ON CONFLICT \(lower\(label_en\)\) DO NOTHING/);
+  // Re-adding a foreign key is not idempotent on its own, so it is dropped
+  // first — by name, which is why the name is spelled out rather than left to
+  // Postgres to invent.
+  assert.match(sql, /DROP CONSTRAINT IF EXISTS announcements_type_id_fkey/);
+});
+
+test('the old type column and its CHECK are both removed, not just the column', () => {
+  // Dropping the column leaves the constraint behind on some Postgres paths,
+  // and a stale CHECK on a column that no longer exists is the kind of thing
+  // that only surfaces during the next migration.
+  const sql = migration010();
+  assert.match(sql, /DROP CONSTRAINT IF EXISTS announcements_type_check/);
+  assert.match(sql, /DROP COLUMN IF EXISTS type\b/);
+});

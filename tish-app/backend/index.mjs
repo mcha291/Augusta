@@ -186,7 +186,46 @@ const TABLE_DEFINITIONS = [
         details TEXT,
         status_id INTEGER REFERENCES appointment_statuses(id) DEFAULT 1
     );` },
-    { name: 'announcements', create: `CREATE TABLE announcements (id SERIAL PRIMARY KEY, title TEXT, content TEXT, type TEXT DEFAULT 'news');` },
+    // Migration 010. Staff-editable, so the labels are localised beside the row
+    // rather than in the locale files — a category invented this afternoon has
+    // no `news.type.*` key and never will.
+    { name: 'announcement_types', create: `CREATE TABLE announcement_types (
+        id SERIAL PRIMARY KEY,
+        label_en TEXT NOT NULL,
+        label_zh_hant TEXT,
+        color TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+
+    -- Unique on lower(), because "News" and "news" are the same category to
+    -- everyone except a plain UNIQUE. Also what the seed's ON CONFLICT infers.
+    CREATE UNIQUE INDEX announcement_types_label_en_key
+        ON announcement_types (lower(label_en));` },
+    // Migration 009 mirrored. Per-locale columns rather than one row per
+    // language, so a half-translated article is visible as such in the editor
+    // instead of being an absent second row nobody notices.
+    { name: 'announcements', create: `CREATE TABLE announcements (
+        id SERIAL PRIMARY KEY,
+        title_en TEXT,
+        title_zh_hant TEXT,
+        content_en TEXT,
+        content_zh_hant TEXT,
+        -- RESTRICT, not CASCADE: deleting a type that articles still use has to
+        -- fail loudly. Cascading would delete the articles, and SET NULL would
+        -- leave a card with no tag.
+        type_id INTEGER NOT NULL REFERENCES announcement_types(id) ON DELETE RESTRICT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- NULL means draft. The whole publish state, deliberately one column:
+        -- a boolean alongside a timestamp is two things that can disagree.
+        published_at TIMESTAMPTZ
+    );
+
+    CREATE INDEX announcements_published_idx
+        ON announcements (published_at DESC) WHERE published_at IS NOT NULL;
+
+    CREATE INDEX announcements_type_id_idx ON announcements (type_id);` },
     { name: 'test_config', create: `CREATE TABLE test_config (field_number INTEGER PRIMARY KEY, display_name TEXT NOT NULL, units TEXT, description TEXT);` },
     { name: 'test_results', create: `CREATE TABLE test_results (
         id SERIAL PRIMARY KEY,
@@ -341,13 +380,76 @@ export const APP_TIMEZONE = 'Asia/Taipei';
  * The consequence to keep in mind: **a reset no longer produces a clean
  * relationship graph.** `/debug/link` and `/debug/unlink` exist because of that.
  */
-export const RESET_PRESERVED_TABLES = ['users', 'genders', 'conditions', 'user_relationships'];
+// `announcement_types` joined this list in migration 010, and for a different
+// reason than the rest: it is the first preserved table whose rows are *edited
+// by staff through the admin panel*. `genders` and `conditions` are reference
+// data that happens to be seeded once; these are somebody's work, and a reset
+// that recreated them from SEED_SQL would silently discard every category they
+// had added and every translation they had written.
+export const RESET_PRESERVED_TABLES = ['users', 'genders', 'conditions', 'user_relationships', 'announcement_types'];
 
 /**
  * Tables that existed once, have no definition any more, and should be removed if
  * a database still carries them. Dropped, never recreated.
  */
 const RETIRED_TABLES = ['medications', 'invitations'];
+
+/**
+ * Announcement locales, mapped to the column suffix each one uses.
+ *
+ * **Has to stay in step with `users.locale`'s CHECK** — that column is the
+ * fallback when a request does not name a locale, so a value legal there and
+ * unknown here would resolve to nothing.
+ */
+export const ANNOUNCEMENT_LOCALES = { en: 'en', 'zh-Hant': 'zh_hant' };
+
+/** Matches `users.locale`'s own default, so the fallback path agrees with it. */
+export const DEFAULT_ANNOUNCEMENT_LOCALE = 'zh-Hant';
+
+/**
+ * Flatten one localised announcement row for a single reader.
+ *
+ * **An article resolves to one locale as a unit, chosen by which side has a
+ * title.** Resolving title and body independently would let a half-translated
+ * article render a Chinese headline over an English paragraph, which reads as a
+ * bug rather than as a missing translation. Falling back whole keeps it
+ * coherent: the reader sees the language that exists.
+ *
+ * The legacy flat `title`/`content` keys are still returned, because installed
+ * builds read exactly those two and ship independently of this Lambda. New
+ * clients can use them or resolve the per-locale fields themselves; `locale`
+ * says which side these two actually came from, so neither has to guess.
+ */
+export function localiseAnnouncement(row, locale) {
+    const preferred = ANNOUNCEMENT_LOCALES[locale] ? locale : DEFAULT_ANNOUNCEMENT_LOCALE;
+    const other = preferred === 'en' ? 'zh-Hant' : 'en';
+
+    const titleOf = (l) => row[`title_${ANNOUNCEMENT_LOCALES[l]}`];
+    const hasTitle = (l) => typeof titleOf(l) === 'string' && titleOf(l).trim() !== '';
+
+    const chosen = hasTitle(preferred) ? preferred : (hasTitle(other) ? other : preferred);
+    const suffix = ANNOUNCEMENT_LOCALES[chosen];
+
+    // The type label is resolved independently of the article body, and that
+    // asymmetry is deliberate. The body falls back as a unit because a mixed
+    // headline and paragraph reads as a bug; a tag is one word next to the
+    // headline, and showing "公告" over an English article is better than
+    // showing nothing where a tag should be. They are separate reading tasks.
+    const typeLabel = row[`type_label_${suffix}`]
+        ?? row[`type_label_${ANNOUNCEMENT_LOCALES[other]}`]
+        ?? null;
+
+    return {
+        ...row,
+        locale: chosen,
+        title: row[`title_${suffix}`] ?? null,
+        content: row[`content_${suffix}`] ?? null,
+        // Named `type` because that is what installed builds render. They call
+        // .toUpperCase() on it, which is a no-op on Chinese and correct on
+        // English, so a label reaches an old build intact either way.
+        type: typeLabel,
+    };
+}
 
 /** Drops in reverse dependency order, so no CASCADE is needed to succeed. */
 function dropStatementsFor(tableNames) {
@@ -397,6 +499,10 @@ export const SEED_SQL = `
     INSERT INTO genders (name) VALUES ('Male'), ('Female'), ('Non-binary'), ('Prefer not to say') ON CONFLICT (name) DO NOTHING;
     INSERT INTO conditions (name) VALUES ('Acute Mission Stress'), ('Telepathic Overload'), ('Thorn Toxicity'), ('General Wellness') ON CONFLICT (name) DO NOTHING;
     INSERT INTO appointment_statuses (id, label, color) VALUES (1, 'New', '#6366F1'), (2, 'Cancelled', '#EF4444'), (3, 'Missed', '#F59E0B'), (4, 'Completed', '#22C55E');
+    -- Guarded like genders and conditions, because this table is preserved: a
+    -- seed after a reset must not resurrect a category staff deleted, nor
+    -- overwrite a label they rewrote.
+    INSERT INTO announcement_types (label_en, label_zh_hant, color, sort_order) VALUES ('System Updates', '系統更新', '#6366F1', 1), ('News', '最新消息', '#22C55E', 2), ('Announcements', '公告', '#F59E0B', 3) ON CONFLICT (lower(label_en)) DO NOTHING;
     INSERT INTO medication_library (name, default_dosage) VALUES ('Anti-Telepathy Serum', '200mg, 500mg'), ('High-Grade Peanut Extract', '30mg'), ('Starlight Stamina Mints', '5mg');
     INSERT INTO test_config (field_number, display_name, units) VALUES (1, 'Starlight Level', 'g/dL'), (2, 'Reflex Factor', 'ms'), (3, 'Telepathy Wave', 'Hz');
 `;
@@ -1837,7 +1943,36 @@ export const handler = async (event) => {
                 body = { message: "Deleted" };
             }
         }
-        else if (path === "/announcements") body = (await pool.query('SELECT * FROM announcements ORDER BY id DESC')).rows;
+        else if (path === "/announcements") {
+            // **The client passes its own language, because it is the only thing
+            // that knows it.** `changeLanguage` writes AsyncStorage and never
+            // syncs `users.locale`, so that column is still whatever
+            // registration defaulted it to — it is the fallback for builds that
+            // predate this parameter, not the source of truth.
+            let locale = ANNOUNCEMENT_LOCALES[queryParams.locale] ? queryParams.locale : null;
+            if (!locale) {
+                const userId = await getUserId(cognitoSub);
+                const stored = userId
+                    ? (await pool.query('SELECT locale FROM users WHERE id = $1', [userId])).rows[0]?.locale
+                    : null;
+                locale = ANNOUNCEMENT_LOCALES[stored] ? stored : DEFAULT_ANNOUNCEMENT_LOCALE;
+            }
+
+            // Drafts are invisible here rather than filtered on the client:
+            // an unpublished article is not "hidden", it has not been released,
+            // and a client-side filter would put it on the wire to get there.
+            const rows = (await pool.query(
+                `SELECT a.*,
+                        t.label_en      AS type_label_en,
+                        t.label_zh_hant AS type_label_zh_hant,
+                        t.color         AS type_color
+                   FROM announcements a
+                   JOIN announcement_types t ON t.id = a.type_id
+                  WHERE a.published_at IS NOT NULL
+                  ORDER BY a.published_at DESC, a.id DESC`
+            )).rows;
+            body = rows.map((r) => localiseAnnouncement(r, locale));
+        }
         else if (path === "/admin/stats") {
             // node-postgres hands back bigint as a string, so these were
             // shipping as {"totalUsers":"42"} and `totalUsers + 1` was "421".

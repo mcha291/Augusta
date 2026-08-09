@@ -431,5 +431,12 @@
       "escalationOrderInvalid": "通報順序無效。",
       "timeFormatInvalid": "請以 HH:mm 格式輸入時間，例如 08:00。"
     }
+  },
+  "news": {
+    "title": "最新消息與公告",
+    "empty": "目前沒有任何公告。",
+    "notFound": "此公告已不存在。",
+    "loadFailed": "無法載入公告，請下拉重試。",
+    "readMore": "閱讀更多"
   }
 }

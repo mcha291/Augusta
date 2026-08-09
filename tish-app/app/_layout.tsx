@@ -402,6 +402,8 @@ function AuthProtection({ alarmData, setAlarmData }: any) {
         <Stack.Screen name="medication-reminder-form" />
         <Stack.Screen name="results-form" />
         <Stack.Screen name="medication-library" />
+        <Stack.Screen name="news" />
+        <Stack.Screen name="news-detail" />
         <Stack.Screen name="managed-users" />
       </Stack>
 

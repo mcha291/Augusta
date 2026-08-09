@@ -22,6 +22,7 @@ import {
 
 // Import our new professional styling system
 import { useTextToSpeech } from '@/hooks/use-text-to-speech';
+import { announcementLocaleFrom, resolveAnnouncements } from '@/utils/announcements';
 import { apiRequest } from '@/utils/api';
 import { upcomingAppointmentsToSpeechText } from '@/utils/appointment-speech';
 import { COLORS, SHADOWS, SPACING } from '../../constants/theme';
@@ -32,7 +33,8 @@ export default function HomeScreen() {
   const router = useRouter();
   const { user, activeDependent } = useAuth();
   const { speakingId, toggle: toggleSpeech } = useTextToSpeech();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = announcementLocaleFrom(i18n.language);
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<any>({ appointments: [], meds: [], news: [] });
@@ -51,7 +53,10 @@ export default function HomeScreen() {
       setLoading(true);
       const [apptRes, newsRes, medRes] = await Promise.all([
         apiRequest(`/appointments`, {}, scopedUserId),
-        apiRequest(`/announcements`, {}, scopedUserId),
+        // The client sends its own language: `changeLanguage` writes
+        // AsyncStorage and never syncs `users.locale`, so the server's stored
+        // copy is whatever registration defaulted it to.
+        apiRequest(`/announcements?locale=${encodeURIComponent(locale)}`, {}, scopedUserId),
         apiRequest(`/medication-reminders`, {}, scopedUserId)
       ]);
 
@@ -222,19 +227,42 @@ export default function HomeScreen() {
         ))}
 
         {/* 5. NEWS SECTION */}
-        <View style={GlobalStyles.sectionHeader}>
-          <Text style={GlobalStyles.sectionTitle}>{t('home.newsAndAnnouncements')}</Text>
-        </View>
+        {(() => {
+          // Resolved here rather than trusting the server's flat pair, so
+          // switching language in Profile re-renders into the new one without
+          // waiting for a refetch.
+          const news = resolveAnnouncements(data.news, locale);
+          if (news.length === 0) return null;
+          return (
+            <>
+              <View style={GlobalStyles.sectionHeader}>
+                <Text style={GlobalStyles.sectionTitle}>{t('home.newsAndAnnouncements')}</Text>
+                {news.length > 1 && (
+                  <Button
+                    compact
+                    testID="news-view-all"
+                    onPress={() => router.push('/news')}
+                  >
+                    {t('home.viewAll')}
+                  </Button>
+                )}
+              </View>
 
-        {data.news.slice(0, 1).map((item: any) => (
-          <Surface key={item.id} style={GlobalStyles.card} elevation={0}>
-            <View style={styles.newsTag}>
-              <Text style={styles.newsTagText}>{item.type.toUpperCase()}</Text>
-            </View>
-            <Text style={styles.newsHeadline}>{item.title}</Text>
-            <Text numberOfLines={2} style={styles.newsContent}>{item.content}</Text>
-          </Surface>
-        ))}
+              {news.slice(0, 1).map((item) => (
+                <Pressable key={item.id} onPress={() => router.push(`/news-detail?id=${item.id}`)}>
+                  <Surface style={GlobalStyles.card} elevation={0}>
+                    <View style={styles.newsTag}>
+                      <Text style={styles.newsTagText}>{item.type.toUpperCase()}</Text>
+                    </View>
+                    <Text style={styles.newsHeadline}>{item.title}</Text>
+                    <Text numberOfLines={2} style={styles.newsContent}>{item.content}</Text>
+                    <Text style={styles.newsReadMore}>{t('news.readMore')}</Text>
+                  </Surface>
+                </Pressable>
+              ))}
+            </>
+          );
+        })()}
 
       </ScrollView>
     </View>
@@ -326,5 +354,6 @@ const styles = StyleSheet.create({
   },
   newsTagText: { fontSize: 10, fontWeight: '800', color: COLORS.primary },
   newsHeadline: { fontSize: 18, fontWeight: '800', color: COLORS.ink, marginBottom: 6 },
-  newsContent: { fontSize: 14, color: COLORS.slate, lineHeight: 20 }
+  newsContent: { fontSize: 14, color: COLORS.slate, lineHeight: 20 },
+  newsReadMore: { marginTop: SPACING.sm, fontSize: 13, fontWeight: '700', color: COLORS.primary }
 });

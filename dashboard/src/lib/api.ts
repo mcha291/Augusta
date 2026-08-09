@@ -3,6 +3,12 @@ import { useAuth } from "react-oidc-context"
 import { config, MOCK } from "@/lib/config"
 import { mockApi } from "@/lib/mock"
 import type {
+  Announcement,
+  AnnouncementListResponse,
+  AnnouncementType,
+  AnnouncementTypeListResponse,
+  SaveAnnouncementRequest,
+  SaveAnnouncementTypeRequest,
   SaveTranslationsRequest,
   SaveTranslationsResponse,
   TableDataResponse,
@@ -44,6 +50,14 @@ type Api = {
     name: string,
     params: { limit: number; offset: number; sort?: string; dir?: string }
   ) => Promise<TableDataResponse>
+  listAnnouncements: () => Promise<AnnouncementListResponse>
+  createAnnouncement: (req: SaveAnnouncementRequest) => Promise<{ announcement: Announcement }>
+  updateAnnouncement: (id: number, req: SaveAnnouncementRequest) => Promise<{ announcement: Announcement }>
+  deleteAnnouncement: (id: number) => Promise<{ deleted: number }>
+  listAnnouncementTypes: () => Promise<AnnouncementTypeListResponse>
+  createAnnouncementType: (req: SaveAnnouncementTypeRequest) => Promise<{ type: AnnouncementType }>
+  updateAnnouncementType: (id: number, req: SaveAnnouncementTypeRequest) => Promise<{ type: AnnouncementType }>
+  deleteAnnouncementType: (id: number) => Promise<{ deleted: number }>
 }
 
 function useRealApi(): Api {
@@ -66,6 +80,32 @@ function useRealApi(): Api {
       })
       return request<TableDataResponse>(token, `/tables/${name}?${q}`)
     },
+    listAnnouncements: () => request<AnnouncementListResponse>(token, "/announcements"),
+    createAnnouncement: (req) =>
+      request<{ announcement: Announcement }>(token, "/announcements", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    updateAnnouncement: (id, req) =>
+      request<{ announcement: Announcement }>(token, `/announcements/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(req),
+      }),
+    deleteAnnouncement: (id) =>
+      request<{ deleted: number }>(token, `/announcements/${id}`, { method: "DELETE" }),
+    listAnnouncementTypes: () => request<AnnouncementTypeListResponse>(token, "/announcement-types"),
+    createAnnouncementType: (req) =>
+      request<{ type: AnnouncementType }>(token, "/announcement-types", {
+        method: "POST",
+        body: JSON.stringify(req),
+      }),
+    updateAnnouncementType: (id, req) =>
+      request<{ type: AnnouncementType }>(token, `/announcement-types/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(req),
+      }),
+    deleteAnnouncementType: (id) =>
+      request<{ deleted: number }>(token, `/announcement-types/${id}`, { method: "DELETE" }),
   }
 }
 

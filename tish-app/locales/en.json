@@ -431,5 +431,12 @@
       "escalationOrderInvalid": "That escalation order isn’t valid.",
       "timeFormatInvalid": "Enter a time as HH:mm — for example 08:00."
     }
+  },
+  "news": {
+    "title": "News & Announcements",
+    "empty": "There are no announcements right now.",
+    "notFound": "This announcement is no longer available.",
+    "loadFailed": "Couldn't load announcements. Pull down to try again.",
+    "readMore": "Read more"
   }
 }
