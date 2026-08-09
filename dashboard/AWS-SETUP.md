@@ -1,29 +1,26 @@
 # Tish Admin Dashboard — AWS setup
 
-**Status: provisioned and live, with one thing outstanding.** This was a
+**Status: provisioned and live.** This was a
 step-by-step runbook to be worked through by hand; everything in it has now
 been done, so it is a record of what exists and how to change it. Account
 `180891490019`. Provisioned 2026-08-08.
 
 **Live URL: <https://admin.ti-smarthealth.com>**
 
-## ⚠ Outstanding — the localization editor needs a GitHub token
+## The GitHub token
 
-`GITHUB_TOKEN` on `tish-admin-translations` is the literal placeholder
-`REPLACE_WITH_GITHUB_PAT`. A personal access token can't be created on your
-behalf, so it's the one step left.
+**Installed and working** as of 2026-08-08 — `GET /translations` returns both
+locale files from `mcha291/Augusta` with live SHAs. Nothing is outstanding.
 
-Until it is replaced: **the database viewer works, the translations page does
-not** — it returns a sanitized 500, with the real `401 Bad credentials` in
-CloudWatch. The placeholder is there rather than the variable being absent so
-that the failure is a clean auth rejection rather than a misconfiguration.
+Note the expiry you chose: commits from the localization editor stop working the
+day it lapses, and the failure looks like a generic 500 in the UI with
+`401 Bad credentials` in CloudWatch. To rotate:
 
 1. GitHub → Settings → Developer settings → Fine-grained personal access tokens
    → **Generate new token**.
 2. Repository access: **only** `mcha291/Augusta`.
 3. Permissions: **Contents → Read and write**. Nothing else.
-4. Expiration: your policy — note it somewhere, commits stop working when it lapses.
-5. Install it (the token never reaches the browser; it lives only in the Lambda):
+4. Install it (the token never reaches the browser; it lives only in the Lambda):
 
 ```bash
 aws lambda update-function-configuration --region ap-east-2 --function-name tish-admin-translations --environment "Variables={GITHUB_REPO=mcha291/Augusta,GITHUB_LOCALES_DIR=tish-app/locales,ALLOWED_ORIGIN=https://admin.ti-smarthealth.com,GITHUB_TOKEN=$NEW_PAT}"
@@ -105,6 +102,34 @@ deliverable and `ALLOWED_EMAIL_DOMAINS` can be widened. Nothing else changes.
 The SES sending authorization policy `CognitoTaipei` on the identity now lists
 **both** pools — the app's and this one. It trusts the regional principal
 `cognito-idp.ap-east-2.amazonaws.com`; the global one fails silently.
+
+### Bounce and complaint tracking
+
+Configuration set **`tish-transactional`** (ap-northeast-2), set as the
+identity's *default* — so anything sending as `ti-smarthealth.com` picks it up
+without having to name it, including the app pool whenever it moves off
+`COGNITO_DEFAULT`. Two destinations:
+
+| Destination | Events | Goes to |
+| --- | --- | --- |
+| `sns-alerts` | Bounce, Complaint, Delivery, Reject, RenderingFailure | SNS `tish-ses-events` |
+| `cloudwatch-metrics` | the above plus Send | CloudWatch metrics |
+
+Reputation metrics are enabled on the set, so bounce and complaint rates are
+graphable per configuration set rather than only account-wide.
+
+> **Nothing is subscribed to the SNS topic yet**, so events are published and
+> nobody is told. Add a subscriber — this sends a confirmation email that has to
+> be clicked before it takes effect:
+>
+> ```bash
+> aws sns subscribe --region ap-northeast-2 --topic-arn arn:aws:sns:ap-northeast-2:180891490019:tish-ses-events --protocol email --notification-endpoint admin@ti-smarthealth.com
+> ```
+
+This matters beyond hygiene: SES suspends sending above roughly 5% bounce or
+0.1% complaint, and the account-level suppression list already silently drops
+addresses that hard-bounce. Without these destinations a bounce was invisible
+until someone thought to look at the reputation dashboard.
 
 ## SMS verification: wired, but blocked upstream
 
