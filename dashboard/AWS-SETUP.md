@@ -33,8 +33,16 @@ call. Set `NEW_PAT` in your shell first so the token stays out of your history.
 
 ## Accounts: staff sign themselves up, you approve
 
-Self-registration is open at **<https://admin.ti-smarthealth.com/signup>**.
-Signing up gets someone an account; it does **not** get them data.
+Self-registration is open at **<https://admin.ti-smarthealth.com/signup>**,
+reachable from "Create an account" on the landing screen. Signing up gets
+someone an account; it does **not** get them data.
+
+> Cognito's hosted login carries its own "Need an account? Sign up" link, which
+> appeared as soon as self-signup was enabled on the pool. It works and the
+> domain trigger still guards it, but it collects only email and password — not
+> the name or mobile number. That is why the app shows a landing screen rather
+> than redirecting straight to the hosted login: the redirect made the form
+> above unreachable unless you knew to type `/signup`.
 
 1. Staff fill in name, work email, optional mobile, password.
 2. A Pre Sign-up Lambda rejects anything that isn't `@ti-smarthealth.com`.
@@ -118,13 +126,22 @@ without having to name it, including the app pool whenever it moves off
 Reputation metrics are enabled on the set, so bounce and complaint rates are
 graphable per configuration set rather than only account-wide.
 
-> **Nothing is subscribed to the SNS topic yet**, so events are published and
-> nobody is told. Add a subscriber — this sends a confirmation email that has to
-> be clicked before it takes effect:
->
-> ```bash
-> aws sns subscribe --region ap-northeast-2 --topic-arn arn:aws:sns:ap-northeast-2:180891490019:tish-ses-events --protocol email --notification-endpoint admin@ti-smarthealth.com
-> ```
+`compliance@ti-smarthealth.com` is subscribed to the topic — deliberately not
+`admin@`, so deliverability alerts stay separate from the dashboard's own
+account. **The subscription is not live until someone opens the AWS
+confirmation email and clicks the link**; until then events publish and nobody
+is told. Check with:
+
+```bash
+aws sns list-subscriptions-by-topic --region ap-northeast-2 --topic-arn arn:aws:sns:ap-northeast-2:180891490019:tish-ses-events --query 'Subscriptions[].{To:Endpoint,Arn:SubscriptionArn}' --output table
+```
+
+A `SubscriptionArn` of `PendingConfirmation` means it has not been clicked yet.
+To add another recipient:
+
+```bash
+aws sns subscribe --region ap-northeast-2 --topic-arn arn:aws:sns:ap-northeast-2:180891490019:tish-ses-events --protocol email --notification-endpoint someone@ti-smarthealth.com
+```
 
 This matters beyond hygiene: SES suspends sending above roughly 5% bounce or
 0.1% complaint, and the account-level suppression list already silently drops

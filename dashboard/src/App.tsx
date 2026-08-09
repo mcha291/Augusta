@@ -1,9 +1,9 @@
-import { useEffect } from "react"
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom"
 
 import { Layout } from "@/components/layout"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import { LandingPage } from "@/features/auth/LandingPage"
 import { SignUpPage } from "@/features/auth/SignUpPage"
 import { DatabasePage } from "@/features/database/DatabasePage"
 import { TranslationsPage } from "@/features/translations/TranslationsPage"
@@ -24,18 +24,8 @@ function CenteredNote({ title, children }: { title: string; children?: React.Rea
 export default function App() {
   const auth = useAdminAuth()
   const missing = missingConfig()
-  // Sign-up is the one route reachable without a session. Everything else
-  // bounces to the hosted login, and bouncing a prospective user away from the
-  // registration form would make it unreachable.
+  // Sign-up is reachable without a session, and so is the landing screen below.
   const isSignUp = useLocation().pathname === "/signup"
-
-  // Admin tool: go straight to the hosted login rather than showing a landing page
-  useEffect(() => {
-    if (!isSignUp && missing.length === 0 && !auth.isLoading && !auth.isAuthenticated && !auth.error) {
-      auth.signIn()
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth.isLoading, auth.isAuthenticated, auth.error, isSignUp])
 
   if (missing.length > 0) {
     return (
@@ -73,7 +63,10 @@ export default function App() {
     )
   }
 
-  if (auth.isLoading || !auth.isAuthenticated) {
+  // Still true immediately after the Cognito callback, while oidc-client-ts
+  // exchanges the ?code= for tokens — so this has to stay ahead of the landing
+  // screen, or a returning user sees "Sign in" flash before their session lands.
+  if (auth.isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="w-64 space-y-3">
@@ -83,6 +76,10 @@ export default function App() {
         </div>
       </div>
     )
+  }
+
+  if (!auth.isAuthenticated) {
+    return <LandingPage onSignIn={auth.signIn} />
   }
 
   // Signed in, but not yet in the `approved` group. Showing the dashboard would
