@@ -92,7 +92,7 @@ would lock you out of your own escape hatch.
 ## Email comes from ti-smarthealth.com
 
 The pool is on `EmailSendingAccount: DEVELOPER`, sending as
-**`Tish Admin <no-reply@ti-smarthealth.com>`** through the SES domain identity
+**`Tish Admin <donotreply@ti-smarthealth.com>`** through the SES domain identity
 in **ap-northeast-2 (Seoul)** — DKIM verified, SPF already in the apex record.
 Taipei has no SES endpoint and Seoul is its designated alternate.
 
@@ -106,6 +106,23 @@ the trigger rejects it up front with an explanation instead.
 **Once SES production access is granted** (still `ProductionAccessEnabled:
 false` as of 2026-08-08, filed per MIGRATION.md A0), external addresses become
 deliverable and `ALLOWED_EMAIL_DOMAINS` can be widened. Nothing else changes.
+
+> **This applies to the staff dashboard only.** The *app* pool
+> (`ap-east-2_Z97Td3kcS`) is still on `COGNITO_DEFAULT`, so patient verification
+> codes come from AWS's shared `no-reply@verificationemail.com`, not from this
+> domain. It cannot move until production access lands — inside the sandbox it
+> could only reach `@ti-smarthealth.com` recipients, which is no patient. So the
+> support case gates the sender your actual users see, not just send volume.
+>
+> When it does land, the app pool takes the same `EmailConfiguration` shape as
+> this one: `DEVELOPER`, the same `SourceArn`, and a `From` on this domain. The
+> `CognitoTaipei` identity policy already trusts both pools, and
+> `tish-transactional` is the identity default, so bounce tracking covers it
+> from the first send with no extra wiring.
+
+Any address at the verified domain is a valid `From` — a domain identity does
+not need each mailbox verified separately, and `donotreply@` need not exist as a
+real inbox to send from. Replies to it will bounce, which is the intent.
 
 The SES sending authorization policy `CognitoTaipei` on the identity now lists
 **both** pools — the app's and this one. It trusts the regional principal
