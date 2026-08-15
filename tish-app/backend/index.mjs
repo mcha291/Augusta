@@ -152,6 +152,12 @@ const TABLE_DEFINITIONS = [
         confirmed_at TIMESTAMPTZ,
         -- Not necessarily user_id: under D-1 a caregiver may confirm.
         confirmed_by INTEGER REFERENCES users(id),
+        -- Migration 011 (TELEMETRY.md §2). Telemetry-only and read by nothing
+        -- else: both come from the device clock, so neither may ever feed 5.4's
+        -- escalation or 5.7's missed list. confirmed_at stays the server's own
+        -- answer for exactly that reason.
+        alarm_shown_at TIMESTAMPTZ,
+        confirmed_reported_at TIMESTAMPTZ,
         -- D-6: a snooze re-anchors escalation rather than counting as silence.
         snoozed_until TIMESTAMPTZ,
         snooze_count INTEGER NOT NULL DEFAULT 0
@@ -172,6 +178,24 @@ const TABLE_DEFINITIONS = [
 
     CREATE INDEX medication_doses_reminder_idx
         ON medication_doses (reminder_id, scheduled_for);` },
+    // Migration 012 — the nightly Athena rollup's landing table (TELEMETRY.md
+    // §4). A cache, not a record: every row is re-derivable from S3, and only
+    // the rollup job writes here.
+    { name: 'telemetry_daily_opens', create: `CREATE TABLE telemetry_daily_opens (
+        -- Taipei calendar day, resolved in the Athena query that produced it.
+        day    DATE NOT NULL,
+        source TEXT NOT NULL,
+        opens  INTEGER NOT NULL,
+        -- Distinct users, counted in Athena. Not summable across sources.
+        users  INTEGER NOT NULL,
+        refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- The rollup upserts a trailing window nightly, so late-arriving events
+        -- correct the day they belong to.
+        PRIMARY KEY (day, source)
+    );
+
+    CREATE INDEX telemetry_daily_opens_day_idx
+        ON telemetry_daily_opens (day DESC);` },
     { name: 'appointment_statuses', create: `CREATE TABLE appointment_statuses (id SERIAL PRIMARY KEY, label TEXT UNIQUE NOT NULL, color TEXT);` },
     { name: 'appointments', create: `CREATE TABLE appointments (
         id SERIAL PRIMARY KEY,
@@ -337,6 +361,53 @@ export const DOSE_HORIZON_DAYS = 7;
  * circuit-breaker on a mechanism, not a clinical judgement about a drug.
  */
 export const SNOOZE_ESCALATION_THRESHOLD = 3;
+
+/**
+ * A timestamp a *device* claims, normalised before it reaches SQL
+ * (TELEMETRY.md §2).
+ *
+ * Returns an ISO string or null. Null on anything unparseable rather than
+ * throwing: these columns are telemetry-only, and a malformed one must cost a
+ * missing metric, never the dose confirmation it rode in on. That ordering is
+ * the whole reason this is a separate function — the temptation with a new
+ * field is to validate it alongside `reminder_id`, which would turn a bad clock
+ * into a 400 on the alarm path.
+ */
+function deviceTime(value) {
+    if (value == null) return null;
+    const ms = typeof value === 'number' ? value : Date.parse(String(value));
+    if (!Number.isFinite(ms)) return null;
+    return new Date(ms).toISOString();
+}
+
+/**
+ * SQL that accepts a device timestamp only where it could be true, and yields
+ * NULL everywhere else.
+ *
+ * **A device clock is not evidence and cannot be allowed to become data.** A
+ * phone set a day fast would otherwise write a confirmation that appears to
+ * precede the dose it confirms, or a reaction time of negative twenty hours —
+ * and unlike a crash, nothing about that surfaces. It sits in the table looking
+ * like a measurement until someone computes a percentile over it.
+ *
+ * Two bounds, both from §2:
+ *
+ * - `LEAST(now(), ...)` — nothing was pressed after the request arrived.
+ * - Anything before `scheduled_for - 12h` is discarded outright. That is the
+ *   same ±12h window the dose resolution above already uses, so a timestamp
+ *   outside it describes a dose this row is not.
+ *
+ * Discarding rather than clamping at the lower bound is deliberate: clamping
+ * would manufacture a plausible reading out of an implausible one, which is the
+ * failure mode this exists to prevent. A NULL is honestly missing.
+ */
+function clampedDeviceTime(param) {
+    return `CASE
+        WHEN ${param}::timestamptz IS NULL THEN NULL
+        WHEN ${param}::timestamptz < scheduled_for - interval '12 hours' THEN NULL
+        ELSE LEAST(now(), ${param}::timestamptz)
+    END`;
+}
 
 /**
  * The timezone the server resolves a reminder's wall-clock alarm times in.
@@ -1044,7 +1115,14 @@ export const handler = async (event) => {
                 // actually saved. `announcement_types` is where a wrong tag or a
                 // missing translation is diagnosed.
                 'announcements',
-                'announcement_types'
+                'announcement_types',
+                // 012 — the nightly rollup's output (TELEMETRY.md §4). The one
+                // table here that is a cache rather than a record, and the only
+                // way to answer "did last night's job actually run" without an
+                // Athena query: `refreshed_at` going stale is what a silently
+                // broken schedule looks like, and a fortnight of that is
+                // indistinguishable from a fortnight of no opens.
+                'telemetry_daily_opens'
             ];
 
             if (!allowedTables.includes(tableName)) {
@@ -1787,6 +1865,12 @@ export const handler = async (event) => {
                                  abs(extract(epoch FROM (d.scheduled_for - now()))) ASC
                         LIMIT 1`, [reminderId, targetId, explicit]);
 
+                    // TELEMETRY.md §2 — both optional, both from the device, both
+                    // read by nothing except a metric. A build from before this
+                    // sends neither and behaves exactly as it did.
+                    const reportedAt = deviceTime(payload?.occurred_at);
+                    const alarmShownAt = deviceTime(payload?.alarm_shown_at);
+
                     const dose = found.rows[0];
                     if (!dose) {
                         // Not an error the user can act on, and not a silent
@@ -1799,11 +1883,35 @@ export const handler = async (event) => {
                         // patient and their caregiver may both confirm the same
                         // dose, and the second press must not overwrite who
                         // actually recorded it first.
+                        //
+                        // **The two telemetry columns follow that same "first
+                        // press wins" rule, and they have to.** They are
+                        // measurements from one device, and a caregiver
+                        // confirming a minute after the patient would otherwise
+                        // overwrite half a pair — leaving `alarm_shown_at` from
+                        // the caregiver's phone next to a
+                        // `confirmed_reported_at` from the patient's, whose
+                        // difference is not a reaction time on any device.
+                        // Testing `confirmed_at IS NULL` reads the row as it was
+                        // before this statement, so it is true for exactly the
+                        // press that set it.
+                        //
+                        // `alarm_shown_at` still falls back to whatever a prior
+                        // snooze on this dose recorded, so a patient who snoozed
+                        // and then confirmed from the dashboard keeps the one
+                        // real alarm time there is.
                         const saved = await pool.query(`
                             UPDATE medication_doses
                             SET confirmed_at = COALESCE(confirmed_at, now()),
-                                confirmed_by = COALESCE(confirmed_by, $2)
-                            WHERE id = $1 RETURNING *`, [dose.id, userId]);
+                                confirmed_by = COALESCE(confirmed_by, $2),
+                                confirmed_reported_at = CASE
+                                    WHEN confirmed_at IS NULL THEN ${clampedDeviceTime('$3')}
+                                    ELSE confirmed_reported_at END,
+                                alarm_shown_at = CASE
+                                    WHEN confirmed_at IS NULL
+                                        THEN COALESCE(${clampedDeviceTime('$4')}, alarm_shown_at)
+                                    ELSE alarm_shown_at END
+                            WHERE id = $1 RETURNING *`, [dose.id, userId, reportedAt, alarmShownAt]);
                         body = saved.rows[0];
                     } else {
                         // D-6 — a snooze re-anchors escalation rather than
@@ -1830,11 +1938,21 @@ export const handler = async (event) => {
                         // a database that has not run migration 008 yet.
                         const configured = parseInt(dose.snooze_minutes) || 10;
                         const minutes = Math.min(Math.max(parseInt(payload?.minutes) || configured, 1), 120);
+                        //
+                        // §2 — `alarm_shown_at` is recorded here too, and
+                        // overwritten rather than coalesced. A snooze means this
+                        // alarm was answered and another one is coming; when the
+                        // patient eventually confirms, the alarm their reaction
+                        // should be measured against is the last one that rang,
+                        // not the first. `confirmed_reported_at` is untouched —
+                        // a snooze is not a confirmation.
                         const saved = await pool.query(`
                             UPDATE medication_doses
                             SET snoozed_until = now() + ($2 || ' minutes')::interval,
-                                snooze_count = snooze_count + 1
-                            WHERE id = $1 AND confirmed_at IS NULL RETURNING *`, [dose.id, minutes]);
+                                snooze_count = snooze_count + 1,
+                                alarm_shown_at = COALESCE(${clampedDeviceTime('$3')}, alarm_shown_at)
+                            WHERE id = $1 AND confirmed_at IS NULL RETURNING *`,
+                            [dose.id, minutes, alarmShownAt]);
                         if (!saved.rows[0]) {
                             fail('DOSE_ALREADY_CONFIRMED');
                         } else {

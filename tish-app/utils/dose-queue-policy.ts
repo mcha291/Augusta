@@ -29,6 +29,14 @@ export interface QueuedDoseAction {
   timeStr?: string | null;
   /** When the patient actually pressed the button, not when we retry. */
   occurredAt: number;
+  /**
+   * When the alarm overlay appeared, device clock (TELEMETRY.md §2).
+   *
+   * Carried through the queue rather than recomputed, because a replay has no
+   * way to know it: the overlay closed hours ago. Telemetry-only — nothing in
+   * this module reads it, and no decision here may ever depend on it.
+   */
+  alarmShownAt?: number | null;
   attempts: number;
 }
 

@@ -106,3 +106,85 @@ export interface TableDataResponse {
   sort: string
   dir: "ASC" | "DESC"
 }
+
+// --- Adherence drill-down (TELEMETRY.md §4) --------------------------------
+
+export interface AdherencePatient {
+  id: number
+  full_name: string | null
+  username: string | null
+  doses: number
+  confirmed: number
+  last_dose_at: string | null
+}
+
+export interface AdherencePatientListResponse {
+  patients: AdherencePatient[]
+}
+
+export interface AdherenceSummary {
+  total: number
+  confirmed: number
+  missed: number
+  snoozed: number
+  /** Confirmed by somebody other than the patient (D-1). Segmented, not averaged in. */
+  by_caregiver: number
+}
+
+export interface AdherenceDay {
+  day: string
+  scheduled: number
+  confirmed: number
+  missed: number
+}
+
+/**
+ * One bar of the latency histogram, already bucketed by Postgres.
+ *
+ * `bucket` is a `width_bucket` index over 0–120 minutes in 24 bins, so bucket
+ * *n* covers minutes `(n-1)*5` to `n*5`. Bucket 25 is the overflow — anything
+ * past two hours — which `width_bucket` returns for out-of-range values.
+ */
+export interface AdherenceLatencyBucket {
+  bucket: number
+  n: number
+}
+
+export interface AdherenceDose {
+  id: number
+  user_id: number
+  scheduled_for: string
+  confirmed_at: string | null
+  confirmed_by: number | null
+  /** Device clock at the press, telemetry-only (§2). Null on older rows. */
+  confirmed_reported_at: string | null
+  /** Device clock when the alarm appeared, telemetry-only (§2). */
+  alarm_shown_at: string | null
+  snoozed_until: string | null
+  snooze_count: number
+  med_name: string | null
+  selected_dosage: string | null
+  /** Resolved in SQL against the server clock, never in the browser. */
+  status: "confirmed" | "missed" | "scheduled"
+}
+
+export interface AdherenceResponse {
+  from: string
+  to: string
+  summary: AdherenceSummary
+  daily: AdherenceDay[]
+  latency: AdherenceLatencyBucket[]
+  timeline: AdherenceDose[]
+}
+
+export interface DailyOpen {
+  day: string
+  source: string
+  opens: number
+  users: number
+  refreshed_at: string
+}
+
+export interface DailyOpensResponse {
+  opens: DailyOpen[]
+}

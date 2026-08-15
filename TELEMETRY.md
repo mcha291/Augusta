@@ -1,13 +1,64 @@
-# Telemetry — design agreed, nothing built
+# Telemetry — built end to end
 
-A design session only. **No code was written and no infrastructure exists.**
-Nothing in the working tree changed; the two metrics below are still entirely
-unimplemented. Read this before starting, then start at §7.
+**Every step in §7 is built.** Both pipelines collect, the nightly rollup runs,
+the drill-down ships, and Metabase is up with both data sources connected. The
+design in §1–§6 is unchanged and still governs — nothing was decided differently
+while building it.
 
 The two metrics asked for:
 
 1. **How often a user opens the app.**
 2. **How long it takes a user to confirm taking a dose.**
+
+## Status
+
+| §7 step | State |
+| --- | --- |
+| 1. Client buffer, policy module, `AppState` listener | **Done.** `utils/telemetry-policy.ts` (+33 tests), `utils/telemetry.ts`, `app/_layout.tsx`, flush beside `flushDoseQueue()` in `hooks/use-notification-sync.ts`. |
+| 2. Migration + the four dose-timing edits | **Done and applied.** Migration `011` (not `009` — 009/010 went to announcements), mirrored into `SCHEMA_SQL`. Applied via `tish-migrate` 2026-08-14; ledger shows `011`, both columns live on `medication_doses`. `operation-strix` redeployed after it, never before. |
+| 3. Bucket, Firehose, telemetry Lambda, Athena table | **Done**, all in `ap-east-2` — Firehose, Athena and Glue are all available there, so no `ap-northeast-1` fallback was needed. See the inventory below. |
+| 4. Point the client's flush at the endpoint | **Done.** `TELEMETRY_ENDPOINT = '/telemetry'`. |
+| 5. Metabase | **Running and configured**, `t4g.medium`, both data sources connected. Its app database was moved off a dedicated RDS instance onto the box itself (2026-08-15) to save ~$14/month; nightly EBS snapshots replace RDS backups. |
+| 6. Nightly EventBridge aggregation | **Done.** Migration `012_telemetry_daily_opens.sql`, `backend/rollup.mjs` (+12 tests), Lambdas `tish-telemetry-rollup` (non-VPC, Athena) and `tish-telemetry-rollup-db` (VPC, Postgres), EventBridge `cron(10 20 * * ? *)` = 04:10 Taipei. |
+| 7. Per-patient drill-down | **Done.** `GET /adherence/patients`, `/adherence/{id}`, `/daily-opens` in `dashboard/server/index.mjs` (+17 tests), `dashboard/src/features/adherence/AdherencePage.tsx`. |
+
+### What exists in AWS (all `ap-east-2`)
+
+| Resource | Name |
+| --- | --- |
+| S3 bucket | `tish-telemetry-180891490019` — `events/`, `errors/`, `athena-results/` (30-day expiry), public access blocked, SSE-S3 |
+| Firehose | `tish-telemetry` — DirectPut → S3, GZIP, 5 MB / 300 s buffer, `events/YYYY/MM/dd/HH/` |
+| Lambda | `tish-telemetry-ingest` — nodejs24.x, **non-VPC, no database client**, source in `tish-app/telemetry/` |
+| API route | `POST /telemetry` on `TISCv1`, behind the existing `CognitoAuthorizer` |
+| Glue / Athena | database `tish_telemetry`, table `events`, partition projection — DDL in `tish-app/telemetry/athena/events.sql` |
+| IAM | `tish-telemetry-firehose` (S3 write), `tish-telemetry-ingest-role` (Firehose write + logs) |
+| Rollup | `tish-telemetry-rollup` (non-VPC, Athena) → `tish-telemetry-rollup-db` (VPC, Postgres), EventBridge `tish-telemetry-rollup-schedule` |
+| Metabase | EC2 `i-091db41c5b16cf5e5`, app database in a Postgres container on the same box, nightly EBS snapshots; runbook in `tish-app/telemetry/metabase/README.md` |
+
+**The rollup is two Lambdas, not one, and that is forced.** This account has no
+NAT gateway and no VPC endpoints, so a VPC-attached function reaches RDS and
+nothing else, while a non-VPC function reaches every AWS API and not RDS. The
+Athena half therefore drives and invokes the Postgres half — the same split, in
+the same direction, as `escalate.mjs`.
+
+**Three deviations from the text below, all forced and none a design change:**
+
+1. **The migration is `011`, not `009`.** 009 and 010 went to announcements.
+2. **The flap rule measures the absence, not the gap.** §3 trap 1 says "drop
+   flaps under ~60s"; that is implemented as *how long the app was in the
+   background*. On the gap reading, a five-minute read followed by a two-second
+   glance at the notification shade counts as a fresh open — so the users who
+   used the app hardest would report the most opens. A test caught this.
+3. **Timestamps are written Hive-format, not ISO-8601.** Athena's `timestamp`
+   silently reads ISO with `T`/`Z` as **NULL**. The alternative — `string`
+   columns plus `from_iso8601_timestamp()` — would cost Metabase (§4) its date
+   pickers and time-series grouping, so the Lambda formats instead.
+
+**The events carry `users.cognito_id`, not `users.id`.** The ingest Lambda
+stamps it from the JWT claims so a client cannot attribute its behaviour to
+somebody else, and it deliberately cannot reach Postgres to resolve the numeric
+id. Anything needing that join does it where Postgres already is — the nightly
+rollup of step 6.
 
 ---
 
@@ -402,42 +453,55 @@ this decision is engineering time, not AWS spend.
 
 ---
 
-## 6. Open question — one, and it only decides the region
+## 6. ~~Open question~~ — answered: *our AWS account*
 
-**Does "must not leave our infrastructure" mean *our AWS account*, or
-*physically inside Taiwan*?**
+**"Must not leave our infrastructure" means our AWS account, not physically
+inside Taiwan.** Robin, 2026-08-14.
 
-- *Our account* → if Firehose/Athena aren't in `ap-east-2` (new region, thin on
-  services — **verify before building**), put the bucket and pipeline in
-  `ap-northeast-1`. Telemetry is the one workload where cross-region is fine.
-- *Inside Taiwan* → hard constraint on region, and if the services aren't in
-  `ap-east-2` the whole pipeline needs rethinking.
+So the region is a convenience choice, not a constraint: **verify Firehose and
+Athena are available in `ap-east-2`** (new region, thin on services) and if they
+are not, put the bucket and pipeline in `ap-northeast-1`. Telemetry is the one
+workload where cross-region is fine — no patient row moves, only event records
+that never leave the account.
 
-Nothing else in the design depends on the answer. The client half (§7 step 1) is
-identical either way and is not blocked on it.
+What this does *not* relax: §3's rejection of PostHog, Amplitude and Firebase
+still stands and stands for the same reason. The constraint was never about
+geography.
 
 ---
 
 ## 7. Suggested order
 
-1. **`utils/telemetry-policy.ts` + tests.** Pure, testable under `node --test`,
+1. ~~**`utils/telemetry-policy.ts` + tests.** Pure, testable under `node --test`,
    no AWS, not blocked on the open question above. Then `utils/telemetry.ts` and
-   the `AppState` listener, buffering locally.
-2. **Migration 009 + the four dose-timing edits.** Independent of all Athena
-   work, and it starts collecting the more valuable metric immediately. Deploys
-   are manual — see [backend/DEPLOY.md](tish-app/backend/DEPLOY.md); the
-   migration is a separate act from shipping Lambda code, and
-   `MIGRATION.md` Track C means it may need applying to both databases.
-3. **Answer §6**, then stand up the bucket, Firehose stream, telemetry Lambda,
-   and the Athena table with partition projection.
-4. **Point the client's flush at the new endpoint.**
-5. **Metabase** against Postgres first — it answers metric 2 with no dashboard
-   code at all. Self-hosting details in §4; budget a `t4g.medium` and its own
-   application database, and add the Athena connection once step 3 exists.
-6. **The nightly EventBridge aggregation job**, only once there is a portal view
-   that needs Athena data. New infrastructure — nothing is scheduled today.
-7. **The per-patient drill-down**, and only whatever else Metabase turns out not
-   to cover — see §4, which cuts the cohort overview entirely.
+   the `AppState` listener, buffering locally.~~ **Done.**
+2. ~~**Migration 009 + the four dose-timing edits.** Independent of all Athena
+   work, and it starts collecting the more valuable metric immediately.~~
+   **Applied as `011` on 2026-08-14.** Deploys are manual — see
+   [backend/DEPLOY.md](tish-app/backend/DEPLOY.md); the migration is a separate
+   act from shipping Lambda code, and `MIGRATION.md` Track C means it may need
+   applying to both databases. **The backend edit and the migration must land
+   together**: the POST branch writes two columns that do not exist until the
+   migration runs, so shipping the Lambda first fails every dose confirmation.
+3. ~~**Answer §6**~~ (answered: our AWS account), then stand up the bucket,
+   Firehose stream, telemetry Lambda, and the Athena table with partition
+   projection. **First check `ap-east-2` actually has Firehose and Athena** —
+   `aws firehose list-delivery-streams --region ap-east-2` and
+   `aws athena list-work-groups --region ap-east-2` answer it in two commands —
+   and fall back to `ap-northeast-1` if not.
+4. ~~**Point the client's flush at the new endpoint.**~~ **Done** —
+   `TELEMETRY_ENDPOINT = '/telemetry'` in `constants/config.ts`.
+5. ~~**Metabase** against Postgres first~~ — **running**, awaiting its first-run
+   wizard (which creates an admin account and password). Runbook and both data
+   source configs: `tish-app/telemetry/metabase/README.md`.
+6. ~~**The nightly EventBridge aggregation job**~~ — **done**, and note it was
+   built ahead of its own precondition: nothing in the portal strictly needed
+   Athena data, since the drill-down below is entirely Postgres. It exists
+   because the work was asked for, not because a view demanded it.
+7. ~~**The per-patient drill-down**~~ — **done**. The cohort overview stays cut.
+   **Built before Metabase had a chance to show what it misses**, which inverts
+   §4's sequencing advice; that was a deliberate instruction, not an oversight.
+   If Metabase turns out to cover this view too, deleting it is cheap.
 
 ## Constraints that still apply
 

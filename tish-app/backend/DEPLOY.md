@@ -7,9 +7,24 @@ Pushing to `main` auto-deploys, all from this one repo:
 
 | Workflow | Triggers on | Target |
 | --- | --- | --- |
-| `deploy-backend.yml` | `tish-app/backend/**` | Lambda `operation-strix` |
+| `deploy-backend.yml` | `tish-app/backend/**` | Lambdas `operation-strix` **and `tish-migrate`** |
+| `deploy-telemetry.yml` | `tish-app/telemetry/**` | Lambda `tish-telemetry-ingest` |
 | `deploy-admin-api.yml` | `dashboard/server/**` | Lambda `tish-admin-api` |
 | `deploy-dashboard.yml` | `dashboard/**` (excl. `server/`) | Amplify app `d1x8yq4r6ivp8n` |
+
+> **Still hand-deployed:** `tish-escalate-db` and `tish-escalate-dispatch`. They
+> run `escalate.mjs` from this same directory, which the backend artifact does
+> not carry, so a change to the escalation job ships only when somebody builds a
+> zip by hand. Adding them is two lines in `deploy-backend.yml` — the file to
+> the `zip` and the names to the deploy loop — plus their ARNs on the deploy
+> role.
+>
+> **Deploying `tish-migrate` does not run a migration.** It has no trigger of
+> any kind; CI only puts the files where the runner can see them. Applying is
+> still `{"command":"status"}` → `up --dry-run` → `up`, by hand. So if a push
+> carries both a migration and code that reads the column it adds, **apply the
+> migration before merging** — CI will otherwise ship the handler against a
+> column that does not exist yet.
 
 > The dashboard used to be a separate repository with its own copy of the first
 > two workflow files. It was imported here as a subtree on 2026-08-08 and those

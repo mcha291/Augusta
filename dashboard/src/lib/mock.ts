@@ -5,10 +5,17 @@
 import enFixture from "@/fixtures/en.json"
 import zhHantFixture from "@/fixtures/zh-Hant.json"
 import type {
+  AdherenceDay,
+  AdherencePatient,
+  AdherencePatientListResponse,
+  AdherenceResponse,
   Announcement,
   AnnouncementListResponse,
   AnnouncementType,
   AnnouncementTypeListResponse,
+  AdherenceDose,
+  DailyOpen,
+  DailyOpensResponse,
   LocaleContent,
   SaveAnnouncementRequest,
   SaveAnnouncementTypeRequest,
@@ -253,4 +260,138 @@ export const mockApi = {
     mockAnnouncements = mockAnnouncements.filter((a) => a.id !== id)
     return { deleted: id }
   },
+
+  // --- Adherence drill-down (TELEMETRY.md §4) -------------------------------
+  //
+  // Generated rather than hand-listed, because the view is only interesting
+  // against a shape: a right-skewed latency distribution with a long tail is
+  // what real confirmation timing looks like, and a flat fixture would make a
+  // broken histogram look correct.
+
+  async listAdherencePatients(): Promise<AdherencePatientListResponse> {
+    await delay(300)
+    return { patients: structuredClone(mockPatients) }
+  },
+
+  async getPatientAdherence(userId: number, range: { from: string; to: string }): Promise<AdherenceResponse> {
+    await delay(450)
+    return { ...generateAdherence(userId, range), from: range.from, to: range.to }
+  },
+
+  async getDailyOpens(range: { from: string; to: string }): Promise<DailyOpensResponse> {
+    await delay(300)
+    const opens: DailyOpen[] = []
+    const start = new Date(range.from)
+    const days = Math.min(Math.max(Math.round((Date.parse(range.to) - Date.parse(range.from)) / 86400000), 1), 60)
+    for (let i = 0; i < days; i++) {
+      const day = new Date(start.getTime() + i * 86400000).toISOString().slice(0, 10)
+      // Notification-driven opens dominate, which is the whole reason §3 tags
+      // the source — a mock where they did not would hide the point.
+      opens.push({ day, source: "notification", opens: 18 + (i % 5), users: 6, refreshed_at: new Date().toISOString() })
+      opens.push({ day, source: "cold", opens: 4 + (i % 3), users: 4, refreshed_at: new Date().toISOString() })
+      opens.push({ day, source: "foreground", opens: 7 + (i % 4), users: 5, refreshed_at: new Date().toISOString() })
+    }
+    return { opens }
+  },
+}
+
+const mockPatients: AdherencePatient[] = [
+  { id: 4, full_name: "陳秀英", username: "hsiuying", doses: 186, confirmed: 171, last_dose_at: new Date().toISOString() },
+  { id: 7, full_name: "林建宏", username: "chienhung", doses: 124, confirmed: 96, last_dose_at: new Date(Date.now() - 86400000).toISOString() },
+  { id: 11, full_name: null, username: "mei", doses: 62, confirmed: 60, last_dose_at: new Date(Date.now() - 3 * 86400000).toISOString() },
+]
+
+/**
+ * A deterministic pseudo-random adherence history.
+ *
+ * Seeded on the patient id so switching between them shows genuinely different
+ * shapes while a reload shows the same one — a fixture that reshuffled on every
+ * render makes it impossible to tell a rendering bug from new data.
+ */
+function generateAdherence(userId: number, range: { from: string; to: string }) {
+  let seed = userId * 7919
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  }
+
+  const days = Math.min(Math.max(Math.round((Date.parse(range.to) - Date.parse(range.from)) / 86400000), 1), 90)
+  const start = new Date(range.from)
+  const adherence = 0.7 + (userId % 3) * 0.1
+
+  const daily: AdherenceDay[] = []
+  const timeline: AdherenceDose[] = []
+  const buckets = new Map<number, number>()
+  let confirmed = 0
+  let missed = 0
+  let snoozed = 0
+  let byCaregiver = 0
+
+  for (let d = 0; d < days; d++) {
+    const dayStart = new Date(start.getTime() + d * 86400000)
+    let dayConfirmed = 0
+    let dayMissed = 0
+
+    for (const hour of [8, 13, 20]) {
+      const scheduled = new Date(dayStart)
+      scheduled.setHours(hour, 0, 0, 0)
+      const took = rand() < adherence
+      const snoozeCount = rand() < 0.18 ? 1 + Math.floor(rand() * 2) : 0
+
+      // Right-skewed: most confirmations are quick, a few are very late.
+      const lagMinutes = took ? Math.round(Math.pow(rand(), 2.4) * 130) : 0
+      const confirmedAt = took ? new Date(scheduled.getTime() + lagMinutes * 60000) : null
+      const caregiver = took && rand() < 0.12
+
+      // **The alarm usually appears on time, and sometimes does not.** That gap
+      // is the entire reason §2 records `alarm_shown_at` separately: a patient
+      // whose phone was in another room scores badly on dose-due-to-pressed and
+      // instantly on alarm-to-pressed, and the two columns only look redundant
+      // until you see a row where they disagree.
+      const alarmDelay = rand() < 0.15 ? Math.round(rand() * Math.min(lagMinutes, 90)) : 0.5
+
+      if (took) {
+        confirmed++
+        dayConfirmed++
+        if (caregiver) byCaregiver++
+        const bucket = Math.min(Math.floor(lagMinutes / 5) + 1, 25)
+        buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1)
+      } else {
+        missed++
+        dayMissed++
+      }
+      if (snoozeCount > 0) snoozed++
+
+      timeline.push({
+        // `d * 3 + hour` collided — day 4's 08:00 and day 0's 20:00 both landed
+        // on 20, so React saw duplicate keys and dropped rows from the table.
+        id: d * 100 + hour,
+        user_id: userId,
+        scheduled_for: scheduled.toISOString(),
+        confirmed_at: confirmedAt?.toISOString() ?? null,
+        confirmed_by: took ? (caregiver ? 99 : userId) : null,
+        confirmed_reported_at: confirmedAt?.toISOString() ?? null,
+        alarm_shown_at: took ? new Date(scheduled.getTime() + alarmDelay * 60000).toISOString() : null,
+        snoozed_until: snoozeCount > 0 ? new Date(scheduled.getTime() + 600000).toISOString() : null,
+        snooze_count: snoozeCount,
+        med_name: hour === 8 ? "Metformin" : hour === 13 ? "Amlodipine" : "Atorvastatin",
+        selected_dosage: hour === 8 ? "500mg" : "10mg",
+        status: took ? ("confirmed" as const) : scheduled.getTime() < Date.now() ? ("missed" as const) : ("scheduled" as const),
+      })
+    }
+
+    daily.push({
+      day: dayStart.toISOString().slice(0, 10),
+      scheduled: 3,
+      confirmed: dayConfirmed,
+      missed: dayMissed,
+    })
+  }
+
+  return {
+    summary: { total: days * 3, confirmed, missed, snoozed, by_caregiver: byCaregiver },
+    daily,
+    latency: [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([bucket, n]) => ({ bucket, n })),
+    timeline: timeline.reverse().slice(0, 500),
+  }
 }

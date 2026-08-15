@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import { apiRequest } from '@/utils/api';
 import { flushDoseQueue } from '@/utils/dose-queue';
 import type { DoseRow } from '@/utils/doses';
+import { flushTelemetry } from '@/utils/telemetry';
 import { planNotificationBudget, reminderCostFor } from '@/utils/notification-budget';
 import type { BudgetPlan, ReminderCost } from '@/utils/notification-budget';
 import { cancelAlarmsForOtherOwners, rememberBudgetPlan, scheduleMedicationNotifications } from '@/utils/notification-helper';
@@ -108,6 +109,19 @@ export function useNotificationSync() {
       // Globally scoped and internally serialised, so running it once per pass
       // costs one storage read rather than a double send.
       await flushDoseQueue();
+
+      // TELEMETRY.md §3 — product analytics rides the same sync rather than
+      // running a timer of its own, which is the whole reason the flush lives
+      // here: this pass already happens at launch and on medications-screen
+      // focus, so telemetry costs no extra wakeups and no extra battery.
+      //
+      // **Deliberately not awaited, unlike the dose queue above.** The two fail
+      // in opposite directions. A dose confirmation that never lands escalates
+      // to a caregiver, so the pass waits for it; an analytics event that never
+      // lands is a row missing from a chart nobody is looking at yet. Making
+      // the reminder sync — the thing that repairs a broken alarm chain — wait
+      // on an analytics POST would be the wrong trade in every case.
+      flushTelemetry().catch((e) => console.warn('[notification-sync] telemetry flush failed', e));
 
       // --- Phase 1: read ---------------------------------------------------
       const fetched: { ownerId?: number; reminders: any[] }[] = [];

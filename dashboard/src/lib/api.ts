@@ -3,10 +3,13 @@ import { useAuth } from "react-oidc-context"
 import { config, MOCK } from "@/lib/config"
 import { mockApi } from "@/lib/mock"
 import type {
+  AdherencePatientListResponse,
+  AdherenceResponse,
   Announcement,
   AnnouncementListResponse,
   AnnouncementType,
   AnnouncementTypeListResponse,
+  DailyOpensResponse,
   SaveAnnouncementRequest,
   SaveAnnouncementTypeRequest,
   SaveTranslationsRequest,
@@ -58,6 +61,9 @@ type Api = {
   createAnnouncementType: (req: SaveAnnouncementTypeRequest) => Promise<{ type: AnnouncementType }>
   updateAnnouncementType: (id: number, req: SaveAnnouncementTypeRequest) => Promise<{ type: AnnouncementType }>
   deleteAnnouncementType: (id: number) => Promise<{ deleted: number }>
+  listAdherencePatients: () => Promise<AdherencePatientListResponse>
+  getPatientAdherence: (userId: number, range: { from: string; to: string }) => Promise<AdherenceResponse>
+  getDailyOpens: (range: { from: string; to: string }) => Promise<DailyOpensResponse>
 }
 
 function useRealApi(): Api {
@@ -106,6 +112,11 @@ function useRealApi(): Api {
       }),
     deleteAnnouncementType: (id) =>
       request<{ deleted: number }>(token, `/announcement-types/${id}`, { method: "DELETE" }),
+    listAdherencePatients: () => request<AdherencePatientListResponse>(token, "/adherence/patients"),
+    getPatientAdherence: (userId, range) =>
+      request<AdherenceResponse>(token, `/adherence/${userId}?${new URLSearchParams(range)}`),
+    getDailyOpens: (range) =>
+      request<DailyOpensResponse>(token, `/daily-opens?${new URLSearchParams(range)}`),
   }
 }
 

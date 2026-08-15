@@ -1,0 +1,56 @@
+name: Deploy telemetry Lambdas
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tish-app/telemetry/**'
+      - '.github/workflows/deploy-telemetry.yml'
+
+# OIDC: the workflow exchanges a GitHub-signed token for short-lived AWS
+# credentials by assuming an IAM role — no long-lived AWS keys are stored in
+# GitHub. One-time setup: tish-app/backend/DEPLOY.md
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tish-app/telemetry
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # No lockfile is committed for this package — a single dependency, and
+      # `npm ci` would fail without one. If more are ever added, commit
+      # package-lock.json and switch this to `npm ci --omit=dev`.
+      - name: Install production dependencies
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Syntax check
+        # There is no test suite here yet. This is the minimum gate worth
+        # having: a file that will not parse must never reach a function that
+        # is only exercised in production.
+        run: node --check index.mjs
+
+      - name: Package function
+        run: zip -r function.zip index.mjs package.json node_modules
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Update Lambda code
+        run: |
+          aws lambda update-function-code \
+            --function-name tish-telemetry-ingest \
+            --zip-file fileb://function.zip \
+            --publish

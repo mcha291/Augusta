@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { LandingPage } from "@/features/auth/LandingPage"
 import { SignUpPage } from "@/features/auth/SignUpPage"
+import { AdherencePage } from "@/features/adherence/AdherencePage"
+import { AnalyticsPage } from "@/features/analytics/AnalyticsPage"
 import { DatabasePage } from "@/features/database/DatabasePage"
 import { NewsPage } from "@/features/news/NewsPage"
 import { TranslationsPage } from "@/features/translations/TranslationsPage"
@@ -113,6 +115,8 @@ export default function App() {
         <Route path="/news" element={<NewsPage />} />
         <Route path="/translations" element={<TranslationsPage />} />
         <Route path="/database" element={<DatabasePage />} />
+        <Route path="/adherence" element={<AdherencePage />} />
+        <Route path="/analytics" element={<AnalyticsPage />} />
         <Route path="*" element={<Navigate to="/news" replace />} />
       </Route>
     </Routes>

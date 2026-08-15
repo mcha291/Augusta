@@ -16,6 +16,28 @@
 
 export const API_BASE_URL = 'https://u91xzojfja.execute-api.ap-east-2.amazonaws.com/production';
 
+// --- Product analytics ingest (TELEMETRY.md §3) ----------------------------
+
+/**
+ * Where `utils/telemetry.ts` flushes buffered events, or `null` for a build
+ * that should buffer locally and never send.
+ *
+ * **This is an explicit API Gateway resource, not a path the `/{proxy+}` catch-
+ * all handles**, and that distinction is the whole of §3's ingestion argument.
+ * `/{proxy+}` routes to `operation-strix`, which is VPC-attached and holds a
+ * `pg` pool against a `db.t4g.micro` — putting high-frequency telemetry on it
+ * would contend with the query path that decides whether an alarm fires, which
+ * is precisely the contention that moved product analytics out of Postgres in
+ * the first place. API Gateway prefers the more specific resource, so
+ * `/telemetry` reaches `tish-telemetry-ingest` instead: non-VPC, no database
+ * client, no ENI cold start.
+ *
+ * Setting this back to `null` is a complete and safe off switch. The buffer
+ * still fills, still collapses flaps and still prunes past its age cap; it
+ * simply stops sending, and nothing else in the app changes.
+ */
+export const TELEMETRY_ENDPOINT: string | null = '/telemetry';
+
 // --- Verification delivery -------------------------------------------------
 
 /**

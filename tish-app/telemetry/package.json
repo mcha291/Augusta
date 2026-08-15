@@ -1,0 +1,10 @@
+{
+  "name": "tish-telemetry-ingest",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Product-analytics ingest Lambda (TELEMETRY.md 3). Deliberately has no database client.",
+  "dependencies": {
+    "@aws-sdk/client-firehose": "^3.700.0"
+  }
+}

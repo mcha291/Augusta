@@ -65,6 +65,9 @@ export function requiredEnvFor(routeName) {
     case 'createAnnouncementType':
     case 'updateAnnouncementType':
     case 'deleteAnnouncementType':
+    case 'listAdherencePatients':
+    case 'getPatientAdherence':
+    case 'getDailyOpens':
       return [...DB_ENV, 'ALLOWED_ORIGIN'];
     case 'getTranslations':
     case 'putTranslations':
@@ -327,6 +330,41 @@ export function isApproved(event) {
 
 // Route matching on the request path, which never includes a stage prefix
 // (see eventPath) — documented in AWS-SETUP.md.
+/**
+ * The date range for an adherence query, defaulted and bounded.
+ *
+ * Exported so it is testable on its own: an unbounded or inverted range is the
+ * difference between a query that reads a few hundred rows and one that scans a
+ * table growing at ~3,000 rows per user per year, on a `db.t4g.micro` that is
+ * also answering the question of whether an alarm should fire.
+ *
+ * Dates are passed through as strings rather than parsed and re-formatted —
+ * Postgres casts them, and a client sending nonsense gets a 400 from the driver
+ * rather than a silently-shifted window from a `new Date()` here.
+ */
+export function adherenceRange(q = {}) {
+  const DAY = 24 * 60 * 60 * 1000;
+  const MAX_DAYS = 366;
+
+  const parsed = (v) => {
+    const t = Date.parse(String(v));
+    return Number.isFinite(t) ? t : null;
+  };
+
+  const now = Date.now();
+  let toMs = parsed(q.to) ?? now;
+  let fromMs = parsed(q.from) ?? toMs - 30 * DAY;
+
+  // An inverted range returns zero rows and reads as "this patient has no
+  // doses", which is the wrong answer to a malformed question.
+  if (fromMs > toMs) [fromMs, toMs] = [toMs, fromMs];
+  // Capped rather than rejected: a year of one patient's doses is a legitimate
+  // thing to want, and ten years is a typo.
+  if (toMs - fromMs > MAX_DAYS * DAY) fromMs = toMs - MAX_DAYS * DAY;
+
+  return { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() };
+}
+
 export function routeOf(method, path) {
   const clean = path.replace(/\/+$/, '') || '/';
   if (method === 'OPTIONS') return { name: 'preflight' };
@@ -342,6 +380,13 @@ export function routeOf(method, path) {
   const articleMatch = clean.match(/^\/announcements\/(\d+)$/);
   if (method === 'PUT' && articleMatch) return { name: 'updateAnnouncement', id: Number(articleMatch[1]) };
   if (method === 'DELETE' && articleMatch) return { name: 'deleteAnnouncement', id: Number(articleMatch[1]) };
+  // TELEMETRY.md §4 — the per-patient drill-down, the one view §4 says earns
+  // its keep. `/adherence/patients` is matched before the numeric id below so
+  // the literal segment cannot be read as a user id.
+  if (method === 'GET' && clean === '/adherence/patients') return { name: 'listAdherencePatients' };
+  const adherenceMatch = clean.match(/^\/adherence\/(\d+)$/);
+  if (method === 'GET' && adherenceMatch) return { name: 'getPatientAdherence', userId: Number(adherenceMatch[1]) };
+  if (method === 'GET' && clean === '/daily-opens') return { name: 'getDailyOpens' };
   if (method === 'GET' && clean === '/announcement-types') return { name: 'listAnnouncementTypes' };
   if (method === 'POST' && clean === '/announcement-types') return { name: 'createAnnouncementType' };
   const typeMatch = clean.match(/^\/announcement-types\/(\d+)$/);
@@ -473,6 +518,136 @@ export async function handler(event) {
         const countRes = await db.query(`SELECT COUNT(*)::int AS count FROM ${route.table}`);
 
         return json(200, { columns, rows: rowsRes.rows, total: countRes.rows[0].count, limit, offset, sort, dir });
+      }
+
+      // --- TELEMETRY.md §4: the per-patient drill-down --------------------
+      //
+      // **Every one of these aggregates in Postgres and returns tens of rows.**
+      // §4 calls this the decision that makes or breaks the view: a latency
+      // histogram over 50,000 doses should cross the wire as 24 buckets, not as
+      // 50,000 rows the browser reduces. The existing `GET /medication-doses`
+      // on the app backend has `LIMIT 500` and cannot back a chart at all,
+      // which is why these are new actions here rather than a reuse of it.
+
+      case 'listAdherencePatients': {
+        const db = getPool();
+        // Only people who actually have materialised doses. A picker listing
+        // every user, most with nothing to show, makes the useful ones harder
+        // to find rather than easier.
+        const res = await db.query(`
+          SELECT u.id,
+                 u.full_name,
+                 u.username,
+                 COUNT(d.id)::int                                        AS doses,
+                 MAX(d.scheduled_for)                                    AS last_dose_at,
+                 COUNT(*) FILTER (WHERE d.confirmed_at IS NOT NULL)::int AS confirmed
+          FROM users u
+          JOIN medication_doses d ON d.user_id = u.id
+          GROUP BY u.id, u.full_name, u.username
+          ORDER BY last_dose_at DESC NULLS LAST
+          LIMIT 200`);
+        return json(200, { patients: res.rows });
+      }
+
+      case 'getPatientAdherence': {
+        const db = getPool();
+        const q = event.queryStringParameters ?? {};
+        const { from, to } = adherenceRange(q);
+
+        // One round trip per shape rather than one query doing all four: they
+        // group differently, and a single query with four FILTER'd CTEs is
+        // harder to read than it is fast.
+        const [summary, daily, latency, timeline] = await Promise.all([
+          db.query(`
+            SELECT COUNT(*)::int                                                          AS total,
+                   COUNT(*) FILTER (WHERE confirmed_at IS NOT NULL)::int                  AS confirmed,
+                   COUNT(*) FILTER (WHERE confirmed_at IS NULL
+                                      AND scheduled_for < now())::int                     AS missed,
+                   COUNT(*) FILTER (WHERE snooze_count > 0)::int                          AS snoozed,
+                   -- D-1: a caregiver confirming is different behaviour and §2
+                   -- says it must be segmented, not averaged in.
+                   COUNT(*) FILTER (WHERE confirmed_at IS NOT NULL
+                                      AND confirmed_by IS DISTINCT FROM user_id)::int     AS by_caregiver
+            FROM medication_doses
+            WHERE user_id = $1 AND scheduled_for BETWEEN $2 AND $3`, [route.userId, from, to]),
+
+          db.query(`
+            -- Taipei days, resolved in SQL. §4: a dashboard opened from another
+            -- timezone would otherwise silently shift every daily count.
+            SELECT date_trunc('day', scheduled_for AT TIME ZONE 'Asia/Taipei')::date      AS day,
+                   COUNT(*)::int                                                          AS scheduled,
+                   COUNT(*) FILTER (WHERE confirmed_at IS NOT NULL)::int                  AS confirmed,
+                   COUNT(*) FILTER (WHERE confirmed_at IS NULL
+                                      AND scheduled_for < now())::int                     AS missed
+            FROM medication_doses
+            WHERE user_id = $1 AND scheduled_for BETWEEN $2 AND $3
+            GROUP BY 1 ORDER BY 1`, [route.userId, from, to]),
+
+          db.query(`
+            -- §4's histogram, verbatim in shape: 24 five-minute buckets over
+            -- two hours. COALESCE prefers the device's reported press time over
+            -- when the POST landed — which for a confirm replayed from 4.4's
+            -- offline queue differ by hours (§2).
+            SELECT width_bucket(
+                     EXTRACT(epoch FROM COALESCE(confirmed_reported_at, confirmed_at) - scheduled_for) / 60,
+                     0, 120, 24)::int AS bucket,
+                   COUNT(*)::int      AS n
+            FROM medication_doses
+            WHERE user_id = $1
+              AND confirmed_at IS NOT NULL
+              AND scheduled_for BETWEEN $2 AND $3
+              -- §2: latency can legitimately be negative — the POST resolves to
+              -- the nearest dose within ±12h, so confirming at 07:00 for an
+              -- 08:00 dose matches the 08:00 row. Excluded here rather than
+              -- clamped into bucket 0, which would invent punctuality.
+              AND COALESCE(confirmed_reported_at, confirmed_at) >= scheduled_for
+            GROUP BY 1 ORDER BY 1`, [route.userId, from, to]),
+
+          db.query(`
+            -- The timeline. **The join to medication_reminders is the whole
+            -- point** (§4) — without the medication name this is a list of
+            -- timestamps nobody can act on.
+            SELECT d.id, d.scheduled_for, d.confirmed_at, d.confirmed_by,
+                   d.confirmed_reported_at, d.alarm_shown_at,
+                   d.snoozed_until, d.snooze_count, d.user_id,
+                   l.name AS med_name, r.selected_dosage,
+                   -- **Decided here, against the server's clock.** The browser
+                   -- must not be the thing that rules a dose missed: it would
+                   -- disagree with the summary counts beside it whenever the
+                   -- viewer's clock is off, and "missed" is the one label on
+                   -- this page that reads as a judgement about a person (D-4).
+                   CASE WHEN d.confirmed_at IS NOT NULL THEN 'confirmed'
+                        WHEN d.scheduled_for < now()   THEN 'missed'
+                        ELSE 'scheduled' END AS status
+            FROM medication_doses d
+            JOIN medication_reminders r ON r.id = d.reminder_id
+            JOIN medication_library   l ON l.id = r.med_id
+            WHERE d.user_id = $1 AND d.scheduled_for BETWEEN $2 AND $3
+            ORDER BY d.scheduled_for DESC
+            LIMIT 500`, [route.userId, from, to]),
+        ]);
+
+        return json(200, {
+          from, to,
+          summary: summary.rows[0],
+          daily: daily.rows,
+          latency: latency.rows,
+          timeline: timeline.rows,
+        });
+      }
+
+      case 'getDailyOpens': {
+        const db = getPool();
+        const q = event.queryStringParameters ?? {};
+        const { from, to } = adherenceRange(q);
+        // Straight out of the nightly rollup (§4 / migration 012). No Athena
+        // call on the request path — that is the entire point of the job.
+        const res = await db.query(`
+          SELECT day, source, opens, users, refreshed_at
+          FROM telemetry_daily_opens
+          WHERE day BETWEEN $1::date AND $2::date
+          ORDER BY day`, [from, to]);
+        return json(200, { opens: res.rows });
       }
 
       case 'getTranslations': {

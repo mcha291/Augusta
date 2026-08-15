@@ -1,0 +1,49 @@
+-- TELEMETRY.md §2 — metric 2, how long it takes a user to confirm taking a dose.
+--
+-- **TELEMETRY.md calls this migration `009`. It is `011`.** 009 and 010 went to
+-- the localised announcements work between that document being written and this
+-- being built; nothing else about §2 changed.
+--
+-- **Why two new columns rather than reading the one that already exists.**
+-- `medication_doses` has materialised one row per scheduled dose since 003, so
+-- `confirmed_at - scheduled_for` is a latency that can be queried today with no
+-- code at all. It is also wrong in two specific ways, and both of them are
+-- invisible in the result:
+--
+-- 1. `confirmed_at` is when the **POST landed**, not when the button was
+--    pressed. `utils/dose-queue.ts` has captured the press time since 4.4 and
+--    used it only to pick the right dose on replay. An offline confirm replayed
+--    at the next launch therefore records a latency hours too long — and the
+--    patients whose phones are least reliable are exactly the cohort a
+--    confirmation-latency metric is being read to find.
+-- 2. "Dose due → pressed" and "alarm rang → pressed" are different questions. A
+--    patient who left the phone in another room scores badly on the first and
+--    instantly on the second. The second is unobtainable without the device
+--    saying when the overlay opened, which is what `alarm_shown_at` is.
+--
+-- **`confirmed_at` is deliberately not touched.** It feeds 5.4's escalation
+-- sweep and 5.7's missed list, and making a safety-critical column come from a
+-- device clock in order to serve a metric is the one thing that must not happen
+-- here. Both columns below are telemetry-only, nullable, and read by nothing
+-- else. The server clamps them on write (`index.mjs`, the POST branch of
+-- `/medication-doses`) so a phone with a wrong clock can produce a missing
+-- number but never a false one.
+--
+-- Cost: zero new rows, ~16 bytes on rows that already exist — roughly
+-- 48 KB/user/year against a table already growing at ~3,000 rows/user/year.
+--
+-- No index. Both columns are read by ad-hoc aggregates over a bounded
+-- `scheduled_for` range, which `medication_doses_user_scheduled_idx` already
+-- serves; an index here would cost every materialisation write to speed up a
+-- query nobody runs in a request path.
+
+ALTER TABLE medication_doses
+    -- When the alarm overlay actually appeared on the patient's screen, from the
+    -- device clock. Null for every dose confirmed from anywhere but the overlay
+    -- — the dashboard, a caregiver acting from a list — and for every build
+    -- older than this one.
+    ADD COLUMN IF NOT EXISTS alarm_shown_at        TIMESTAMPTZ,
+    -- When the patient pressed Confirm, from the device clock, as distinct from
+    -- when the write reached us. Equal to `confirmed_at` within a round trip in
+    -- the ordinary case; hours earlier when 4.4's queue replayed it.
+    ADD COLUMN IF NOT EXISTS confirmed_reported_at TIMESTAMPTZ;

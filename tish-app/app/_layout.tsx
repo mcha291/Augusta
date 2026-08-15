@@ -2,7 +2,7 @@ import { Amplify } from 'aws-amplify';
 import * as Notifications from 'expo-notifications';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, LogBox, Platform, View } from 'react-native';
+import { ActivityIndicator, AppState, LogBox, Platform, View } from 'react-native';
 import { MD3LightTheme, Provider as PaperProvider } from 'react-native-paper';
 
 // Correct imports
@@ -13,6 +13,7 @@ import { initI18n } from '../i18n';
 import { DEFAULT_SNOOZE_MINUTES, snoozeMinutesFor } from '../utils/alarm-settings';
 import { cancelAlarmBurst, dismissPresentedAlarms, notificationPermissionRequest, rescheduleNextOccurrence, setupNotificationChannels } from '../utils/notification-helper';
 import { registerPushToken } from '../utils/push-token';
+import { noteNotificationOpen, trackAppState, trackLaunch } from '../utils/telemetry';
 
 // --- 1. CONFIGURATION ---
 LogBox.ignoreLogs(['Unknown event handler property', 'onResponderTerminate', 'Invalid DOM property', 'transform-origin']);
@@ -55,6 +56,55 @@ export default function RootLayout() {
   const responseListener = React.useRef<Notifications.Subscription | undefined>(undefined);
 
   useEffect(() => { initI18n().then(() => setI18nReady(true)); }, []);
+
+  // TELEMETRY.md §3 — metric 1, how often a user opens the app.
+  //
+  // **The first `AppState` usage anywhere in this app**, and it sits in the
+  // outer component rather than `AuthProtection` on purpose: an open is an open
+  // whether or not anyone is signed in. §3 accepts the consequence explicitly —
+  // an open before sign-in has no token, buffers, and is attributed to whoever
+  // authenticates first, which is the wrong person on a shared device. The
+  // alternative is losing every pre-sign-in open, including the whole of a first
+  // launch.
+  //
+  // Nothing here is awaited and nothing renders from it. `utils/telemetry.ts`
+  // swallows its own failures, so a broken buffer cannot cost the alarm path
+  // anything — which is the only reason this is allowed to run before i18n has
+  // even finished loading.
+  useEffect(() => {
+    // Whether the OS launched us from a reminder tap, which §3 calls the trap
+    // that decides whether this metric measures anything at all: this is an
+    // alarm-driven app, so a large share of opens are the OS acting rather than
+    // the user. Counted together, "how often do they open the app" mostly
+    // measures how many medications someone is on.
+    //
+    // `getLastNotificationResponseAsync` is the only thing that can answer this
+    // for a *cold* start — by the time a response listener is attached, the
+    // launching tap has already happened. It is known to return a response from
+    // an earlier session on some platforms, so a response carrying a usable
+    // date has to be recent to count; one carrying no date is trusted, since
+    // the alternative is discarding the signal entirely.
+    const launchSource = async () => {
+      if (Platform.OS === 'web') return 'cold' as const;
+      const response = await Notifications.getLastNotificationResponseAsync();
+      if (!response) return 'cold' as const;
+
+      const firedAt = Number(response.notification?.date);
+      if (Number.isFinite(firedAt) && Date.now() - firedAt > 60 * 1000) return 'cold' as const;
+      return 'notification' as const;
+    };
+
+    launchSource()
+      .then(trackLaunch)
+      .catch(() => trackLaunch('cold'));
+
+    // Every transition, `inactive` included — the policy needs the whole
+    // sequence to tell a genuine return from the `active → inactive → active`
+    // that a permissions dialog or an incoming call produces without the app
+    // ever leaving the screen.
+    const subscription = AppState.addEventListener('change', trackAppState);
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => {
     async function initNotifications() {
@@ -138,6 +188,14 @@ export default function RootLayout() {
     });
 
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
+      // TELEMETRY.md §3 — a tap is the OS opening the app, not the user, and
+      // this is the warm-start half of that (the cold-start half is answered by
+      // `getLastNotificationResponseAsync` above). It records nothing on its
+      // own: it either retags the `app.open` the `AppState` listener has already
+      // buffered or leaves a claim for the one about to be, because the two
+      // listeners fire in no guaranteed order. Safe on a cold start too, where
+      // this fires again for the launching response — a claim is not an open.
+      noteNotificationOpen();
       showAlarm(response.notification.request.content.data as any);
     });
 

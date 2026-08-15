@@ -55,6 +55,31 @@ export interface DoseActionRequest {
   action: 'confirm' | 'snooze';
   minutes?: number;
   timeStr?: string | null;
+  /**
+   * When the button was actually pressed, device clock. Defaults to now, which
+   * is right for every caller that is not replaying something.
+   */
+  occurredAt?: number;
+  /** When the alarm overlay appeared, device clock (TELEMETRY.md §2). */
+  alarmShownAt?: number | null;
+}
+
+/**
+ * The two device timestamps metric 2 needs, as the server expects them.
+ *
+ * **Telemetry-only, and the server treats them as such**: it clamps both on
+ * write and drops anything a wrong clock makes impossible. Nothing about the
+ * dose action depends on them, which is why they are appended to a body rather
+ * than threaded through the resolution logic — a build that omits them records
+ * exactly the same dose.
+ */
+function timingFields(occurredAt: number, alarmShownAt?: number | null) {
+  return {
+    occurred_at: new Date(occurredAt).toISOString(),
+    ...(Number.isFinite(Number(alarmShownAt))
+      ? { alarm_shown_at: new Date(Number(alarmShownAt)).toISOString() }
+      : {}),
+  };
 }
 
 /**
@@ -70,7 +95,11 @@ export interface DoseActionRequest {
  * the *replay* names a dose explicitly; see `pickDose` for why the two differ.
  */
 export async function recordDoseAction(request: DoseActionRequest): Promise<void> {
-  const occurredAt = Date.now();
+  // Supplied by the alarm overlay, which stamps it at the press. Falling back
+  // to now covers every other caller and is exactly what this used to do.
+  const occurredAt = Number.isFinite(Number(request.occurredAt))
+    ? Number(request.occurredAt)
+    : Date.now();
 
   try {
     const res = await apiRequest('/medication-doses', {
@@ -79,6 +108,11 @@ export async function recordDoseAction(request: DoseActionRequest): Promise<void
         reminder_id: Number(request.reminderId),
         action: request.action,
         ...(request.action === 'snooze' && request.minutes ? { minutes: request.minutes } : {}),
+        // TELEMETRY.md §2. Note this is *not* the `scheduled_for` the comment
+        // above rules out: it says when the button was pressed, not which dose
+        // was meant, and the server still resolves the dose from the reminder
+        // and its own clock exactly as before.
+        ...timingFields(occurredAt, request.alarmShownAt),
       },
     }, request.ownerUserId);
 
@@ -108,6 +142,7 @@ async function queueAction(request: DoseActionRequest, occurredAt: number): Prom
     minutes: request.minutes,
     timeStr: request.timeStr ?? null,
     occurredAt,
+    alarmShownAt: request.alarmShownAt ?? null,
     attempts: 0,
   }));
 }
@@ -189,6 +224,12 @@ async function replay(entry: QueuedDoseAction): Promise<'done' | 'retry'> {
         // lookup matches on equality.
         scheduled_for: dose.scheduled_for,
         ...(entry.action === 'snooze' && entry.minutes ? { minutes: entry.minutes } : {}),
+        // TELEMETRY.md §2 — **this is the case the whole change exists for.**
+        // A confirm pressed offline and replayed at the next launch lands in
+        // `confirmed_at` hours late; without these two the metric would report
+        // that lag as the patient's reaction time, and would report it worst
+        // for exactly the patients whose connectivity is worst.
+        ...timingFields(entry.occurredAt, entry.alarmShownAt),
       },
     }, entry.ownerUserId);
 

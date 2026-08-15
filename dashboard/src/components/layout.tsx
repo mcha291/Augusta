@@ -1,4 +1,4 @@
-import { Database, Languages, LogOut, Newspaper } from "lucide-react"
+import { Activity, ChartNoAxesCombined, Database, Languages, LogOut, Newspaper } from "lucide-react"
 import { NavLink, Outlet } from "react-router-dom"
 
 import { Badge } from "@/components/ui/badge"
@@ -11,6 +11,8 @@ import { cn } from "@/lib/utils"
 const NAV_ITEMS = [
   { to: "/news", label: "News", icon: Newspaper },
   { to: "/translations", label: "Translations", icon: Languages },
+  { to: "/adherence", label: "Adherence", icon: Activity },
+  { to: "/analytics", label: "Analytics", icon: ChartNoAxesCombined },
   { to: "/database", label: "Database", icon: Database },
 ]
 

@@ -6,7 +6,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, ALLOWED_TABLES, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
+import { handler, _setPoolForTests, ALLOWED_TABLES, adherenceRange, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
 
 const ENV = {
   DB_HOST: 'db.local', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'postgres',
@@ -607,4 +607,149 @@ test('CORS advertises the write methods the editor actually uses', async () => {
   for (const m of ['POST', 'PUT', 'DELETE']) {
     assert.match(res.headers['Access-Control-Allow-Methods'], new RegExp(m));
   }
+});
+
+// ---------------------------------------------------------------------------
+// Per-patient adherence (TELEMETRY.md §4)
+// ---------------------------------------------------------------------------
+
+test('the date range defaults to the last 30 days', () => {
+  const { from, to } = adherenceRange({});
+  const days = (Date.parse(to) - Date.parse(from)) / 86400000;
+  assert.ok(Math.abs(days - 30) < 0.01, `got ${days} days`);
+});
+
+test('AN INVERTED RANGE IS CORRECTED, NOT SILENTLY EMPTIED', () => {
+  // from > to returns zero rows, which reads as "this patient has no doses" —
+  // the wrong answer to a malformed question, and indistinguishable from the
+  // right one.
+  const { from, to } = adherenceRange({ from: '2026-08-31', to: '2026-08-01' });
+  assert.ok(Date.parse(from) < Date.parse(to));
+  assert.match(from, /^2026-08-01/);
+});
+
+test('an absurd range is capped rather than scanning the table', () => {
+  const { from, to } = adherenceRange({ from: '1970-01-01', to: '2026-08-31' });
+  const days = (Date.parse(to) - Date.parse(from)) / 86400000;
+  assert.ok(days <= 366, `got ${days} days`);
+});
+
+test('an unparseable date falls back instead of producing Invalid Date', () => {
+  const { from, to } = adherenceRange({ from: 'last tuesday', to: 'soon' });
+  assert.ok(Number.isFinite(Date.parse(from)));
+  assert.ok(Number.isFinite(Date.parse(to)));
+});
+
+test('GET /adherence/patients lists only people who have doses', async () => {
+  let text;
+  _setPoolForTests(makePool([
+    { match: /FROM users u/, result: (t) => { text = t; return { rows: [{ id: 4, doses: 12 }] }; } },
+  ]));
+  const res = await handler(httpEvent({ path: '/adherence/patients' }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).patients.length, 1);
+  // An inner join, not a left join: a picker full of users with nothing to show
+  // makes the useful ones harder to find.
+  assert.match(text, /JOIN medication_doses/);
+});
+
+test('/adherence/patients is not read as a user id', async () => {
+  // The literal segment has to be matched before the numeric pattern, or the
+  // picker route 404s and the page has nothing to populate itself from.
+  _setPoolForTests(makePool([{ match: /FROM users u/, result: { rows: [] } }]));
+  const res = await handler(httpEvent({ path: '/adherence/patients' }));
+  assert.equal(res.statusCode, 200);
+});
+
+test('a non-numeric patient id is a 404 before any query runs', async () => {
+  _setPoolForTests(makePool([]));
+  const res = await handler(httpEvent({ path: '/adherence/not-a-number' }));
+  assert.equal(res.statusCode, 404);
+  assert.equal(pool.calls.length, 0);
+});
+
+test('GET /adherence/{id} aggregates in SQL and returns four shapes', async () => {
+  const seen = [];
+  _setPoolForTests(makePool([
+    { match: /width_bucket/, result: (t) => { seen.push(t); return { rows: [{ bucket: 1, n: 5 }] }; } },
+    { match: /date_trunc/, result: (t) => { seen.push(t); return { rows: [{ day: '2026-08-14' }] }; } },
+    { match: /JOIN medication_reminders/, result: (t) => { seen.push(t); return { rows: [{ id: 1 }] }; } },
+    { match: /COUNT/, result: (t) => { seen.push(t); return { rows: [{ total: 9, confirmed: 7 }] }; } },
+  ]));
+
+  const res = await handler(httpEvent({ path: '/adherence/4', query: { from: '2026-08-01', to: '2026-08-15' } }));
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+  assert.deepEqual(Object.keys(body).sort(), ['daily', 'from', 'latency', 'summary', 'timeline', 'to']);
+  // §4's binding decision: the histogram crosses the wire as buckets, not rows.
+  assert.equal(body.latency[0].n, 5);
+});
+
+test('THE HISTOGRAM PREFERS THE DEVICE PRESS TIME OVER WHEN THE POST LANDED', async () => {
+  // §2's whole point. For a confirm replayed from the offline queue the two
+  // differ by hours, and using confirmed_at would report that lag as the
+  // patient's reaction time — worst for the patients with the worst signal.
+  let histogram;
+  _setPoolForTests(makePool([
+    { match: /width_bucket/, result: (t) => { histogram = t; return { rows: [] }; } },
+    { match: /./, result: { rows: [{}] } },
+  ]));
+  await handler(httpEvent({ path: '/adherence/4' }));
+  assert.match(histogram, /COALESCE\(confirmed_reported_at, confirmed_at\)/);
+});
+
+test('negative latency is excluded from the histogram, not clamped into bucket 0', async () => {
+  // §2: confirming at 07:00 for an 08:00 dose legitimately matches the 08:00
+  // row, so the lag is negative. Clamping would invent punctuality.
+  let histogram;
+  _setPoolForTests(makePool([
+    { match: /width_bucket/, result: (t) => { histogram = t; return { rows: [] }; } },
+    { match: /./, result: { rows: [{}] } },
+  ]));
+  await handler(httpEvent({ path: '/adherence/4' }));
+  assert.match(histogram, />= scheduled_for/);
+});
+
+test('caregiver confirms are counted separately, not averaged in', async () => {
+  let summary;
+  _setPoolForTests(makePool([
+    { match: /width_bucket/, result: { rows: [] } },
+    { match: /date_trunc/, result: { rows: [] } },
+    { match: /JOIN medication_reminders/, result: { rows: [] } },
+    { match: /by_caregiver/, result: (t) => { summary = t; return { rows: [{}] }; } },
+  ]));
+  await handler(httpEvent({ path: '/adherence/4' }));
+  assert.match(summary, /confirmed_by IS DISTINCT FROM user_id/);
+});
+
+test('daily counts are bucketed in Taipei, not the viewer timezone', async () => {
+  let daily;
+  _setPoolForTests(makePool([
+    { match: /width_bucket/, result: { rows: [] } },
+    { match: /date_trunc/, result: (t) => { daily = t; return { rows: [] }; } },
+    { match: /./, result: { rows: [{}] } },
+  ]));
+  await handler(httpEvent({ path: '/adherence/4' }));
+  assert.match(daily, /AT TIME ZONE 'Asia\/Taipei'/);
+});
+
+test('GET /daily-opens reads the rollup and never calls Athena', async () => {
+  let text;
+  _setPoolForTests(makePool([
+    { match: /telemetry_daily_opens/, result: (t) => { text = t; return { rows: [{ day: '2026-08-14', source: 'cold', opens: 2 }] }; } },
+  ]));
+  const res = await handler(httpEvent({ path: '/daily-opens' }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).opens.length, 1);
+  // Reading the nightly rollup's output is the entire reason the job exists.
+  assert.match(text, /FROM telemetry_daily_opens/);
+});
+
+test('the adherence routes are behind the same approval gate as everything else', async () => {
+  _setPoolForTests(makePool([]));
+  for (const path of ['/adherence/patients', '/adherence/4', '/daily-opens']) {
+    const res = await handler(httpEvent({ path, groups: [] }));
+    assert.equal(res.statusCode, 403, path);
+  }
+  assert.equal(pool.calls.length, 0);
 });

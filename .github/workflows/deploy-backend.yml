@@ -37,7 +37,13 @@ jobs:
         run: npm test
 
       - name: Package function
-        run: zip -r function.zip index.mjs package.json node_modules
+        # `migrate.mjs` and `migrations/` are in the artifact because
+        # `tish-migrate` runs from this same zip and differs only by handler.
+        # They were previously omitted, which meant a new migration file could
+        # be committed, pushed and merged while `tish-migrate status` still
+        # reported nothing pending — the migration did not exist as far as the
+        # runner was concerned until somebody hand-built a zip containing it.
+        run: zip -r function.zip index.mjs migrate.mjs migrations package.json node_modules
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -45,9 +51,22 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # **Deploying the runner does not run anything.** `tish-migrate` has no
+      # trigger and no API Gateway integration; this only puts the migration
+      # files where it can see them. Applying them stays a deliberate manual
+      # act — `{"command":"status"}`, then `up --dry-run`, then `up`.
+      #
+      # **Which means the ordering hazard is yours to manage, not CI's.** If a
+      # push carries both a migration and handler code that reads the column it
+      # adds, this workflow ships the handler while the column does not exist
+      # yet, and every request touching it fails until the migration is run.
+      # Apply the migration *before* merging schema-dependent code.
       - name: Update Lambda code
         run: |
-          aws lambda update-function-code \
-            --function-name "${{ vars.BACKEND_FUNCTION_NAME }}" \
-            --zip-file fileb://function.zip \
-            --publish
+          for fn in "${{ vars.BACKEND_FUNCTION_NAME }}" tish-migrate; do
+            echo "Deploying $fn..."
+            aws lambda update-function-code \
+              --function-name "$fn" \
+              --zip-file fileb://function.zip \
+              --publish
+          done

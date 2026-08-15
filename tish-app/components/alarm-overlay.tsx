@@ -6,7 +6,7 @@ import { DEFAULT_SNOOZE_MINUTES } from '@/utils/alarm-settings';
 import { dismissPresentedAlarms, scheduleSnoozeAlert } from '@/utils/notification-helper';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAudioPlayer } from 'expo-audio';
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal, StyleSheet, View } from 'react-native';
 import { Button, Surface, Text } from 'react-native-paper';
@@ -55,12 +55,37 @@ export default function AlarmOverlay({
   const isForSomeoneElse =
     ownerUserId != null && user?.id != null && Number(ownerUserId) !== Number(user.id);
 
+  /**
+   * When this alarm actually appeared on screen (TELEMETRY.md §2).
+   *
+   * The third of the three timestamps metric 2 needs, and the only one that
+   * exists nowhere else: `scheduled_for` says when the dose was due and
+   * `confirmed_at` says when the write landed, but "how long after the alarm
+   * rang did they press it" is unanswerable without the device saying when it
+   * rang. A patient who left the phone in another room scores badly on
+   * dose-due-to-pressed and instantly on this one, and the difference between
+   * those two readings is the whole reason to collect it.
+   *
+   * A ref rather than state: nothing renders from it, and re-rendering a
+   * ringing alarm to record a metric would be the wrong trade.
+   */
+  const shownAt = useRef<number | null>(null);
+
   useEffect(() => {
     if (isVisible) {
+      // **Only on the transition to visible.** This effect also re-runs when
+      // the sound changes, and re-stamping there would silently shorten every
+      // reaction time that happened to span one — a measurement error that
+      // looks exactly like a fast patient.
+      if (shownAt.current == null) shownAt.current = Date.now();
       player.loop = true;
       player.seekTo(0);
       player.play();
     } else {
+      // Armed for the next showing. Safe against the press path, which reads
+      // the ref synchronously before `onDismiss` schedules the state update
+      // that brings us back here.
+      shownAt.current = null;
       player.pause();
     }
   }, [isVisible, soundKey, player]);
@@ -128,6 +153,19 @@ export default function AlarmOverlay({
         ownerUserId: owner,
         action,
         timeStr,
+        // TELEMETRY.md §2 — the press time and the alarm time, both from this
+        // device, both telemetry-only. They land in `confirmed_reported_at` and
+        // `alarm_shown_at`; `confirmed_at` stays the server's own clock,
+        // because 5.4's escalation and 5.7's missed list read it and a
+        // safety-critical column must not come from a phone.
+        //
+        // Stamped here rather than inside `recordDoseAction` so an offline
+        // confirm replayed at the next launch reports when the button was
+        // pressed instead of when the replay happened — which is the specific
+        // error §2 exists to remove, and it biases exactly the patients whose
+        // connectivity is worst.
+        occurredAt: Date.now(),
+        alarmShownAt: shownAt.current,
         // The value the device actually re-armed on, not the reminder's column:
         // the two are the same in the ordinary case, and when they are not it is
         // this one the patient will experience. `snoozed_until` has to point at

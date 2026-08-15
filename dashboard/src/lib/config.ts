@@ -11,6 +11,25 @@ export const config = {
   cognitoDomain: import.meta.env.VITE_COGNITO_DOMAIN as string | undefined,
   /** HTTP API invoke URL, no trailing slash */
   apiUrl: import.meta.env.VITE_API_URL as string | undefined,
+
+  /**
+   * Metabase's own base URL, e.g. `https://bi.ti-smarthealth.com`. Used for the
+   * "open Metabase" link, which goes to its own login — Metabase has its own
+   * accounts, and SSO from Cognito is a paid feature (TELEMETRY.md §4).
+   */
+  metabaseUrl: import.meta.env.VITE_METABASE_URL as string | undefined,
+
+  /**
+   * A **signed static-embed URL** for one dashboard, e.g.
+   * `https://bi.../embed/dashboard/<jwt>#bordered=false&titled=false`.
+   *
+   * Optional, and the page is correct without it — see `AnalyticsPage` for the
+   * three things that have to be true before an embed can render at all.
+   * Deliberately not the Metabase base URL: the app itself sends
+   * `X-Frame-Options: DENY` and `frame-ancestors 'none'`, so only `/embed/*`
+   * routes are frameable and the login page can never be.
+   */
+  metabaseEmbedUrl: import.meta.env.VITE_METABASE_EMBED_URL as string | undefined,
 }
 
 export function missingConfig(): string[] {
