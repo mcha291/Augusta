@@ -57,6 +57,14 @@ jobs:
           VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID }}
           VITE_COGNITO_DOMAIN: ${{ vars.VITE_COGNITO_DOMAIN }}
           VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # Metabase's base URL, for the "Open Metabase" link on the Analytics
+          # page. Unset is a supported state — the page says so rather than
+          # rendering a dead link.
+          VITE_METABASE_URL: ${{ vars.VITE_METABASE_URL }}
+          # Optional signed static-embed URL for one dashboard. Not the base URL
+          # above: Metabase serves X-Frame-Options: DENY on the app itself, so
+          # only /embed/* routes can be framed.
+          VITE_METABASE_EMBED_URL: ${{ vars.VITE_METABASE_EMBED_URL }}
         run: npm run build
 
       - name: Fail if the build came out in mock mode

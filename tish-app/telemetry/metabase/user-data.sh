@@ -28,6 +28,12 @@
 set -euxo pipefail
 
 REGION=ap-east-2
+HOSTNAME=bi.ti-smarthealth.com
+# **Pinned, not `latest`.** A rebuild from this script would otherwise install
+# whatever version is current and run Metabase's application-database
+# migrations forward against restored data — and those do not go backwards, so
+# a newer image against an older snapshot is unrecoverable without a re-restore.
+MB_IMAGE=metabase/metabase:v0.63.13
 PASSWORD_PARAM=/tish/metabase/db-password
 # **Mounted at `/var/lib/postgresql`, not `/var/lib/postgresql/data`.** From 18
 # onward the official image stores data in a major-version subdirectory
@@ -68,18 +74,52 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
+# **Nothing published on the host.** Metabase is reached only through Caddy on
+# the docker network below, so port 3000 is not listening on any interface and
+# the plaintext port cannot be hit even from an allowlisted address.
 docker run -d \
   --name metabase \
   --restart unless-stopped \
   --network metabase-net \
-  -p 3000:3000 \
   -e MB_DB_TYPE=postgres \
   -e MB_DB_DBNAME=metabase \
   -e MB_DB_PORT=5432 \
   -e MB_DB_USER=metabase \
   -e MB_DB_PASS="$APPDB_PASSWORD" \
   -e MB_DB_HOST=metabase-db \
+  -e MB_SITE_URL="https://$HOSTNAME" \
   -e JAVA_TOOL_OPTIONS="-Xmx2g" \
-  metabase/metabase:latest
+  "$MB_IMAGE"
 
 unset APPDB_PASSWORD
+
+# --- TLS ------------------------------------------------------------------
+#
+# Caddy obtains and renews a Let's Encrypt certificate on its own, which is why
+# this is a reverse proxy on the box rather than an Application Load Balancer:
+# the ALB is ~$17/month for one internal instance, and this is free.
+#
+# The HTTP-01 challenge requires port 80 reachable from Let's Encrypt's
+# validation servers, whose addresses are not published — so 80 is open to the
+# world and serves nothing but the challenge and a redirect. **443 stays on the
+# single-IP allowlist**, so adding TLS did not widen who can reach the data.
+#
+# `/data` is a volume because it holds the certificate and the ACME account
+# key. Losing it on every restart would re-issue certificates and walk into
+# Let's Encrypt's rate limits.
+mkdir -p /etc/caddy /var/lib/caddy-data /var/lib/caddy-config
+cat > /etc/caddy/Caddyfile <<EOF
+$HOSTNAME {
+    reverse_proxy metabase:3000
+}
+EOF
+
+docker run -d \
+  --name caddy \
+  --restart unless-stopped \
+  --network metabase-net \
+  -p 80:80 -p 443:443 \
+  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+  -v /var/lib/caddy-data:/data \
+  -v /var/lib/caddy-config:/config \
+  caddy:2-alpine

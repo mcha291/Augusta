@@ -33,7 +33,7 @@ The two metrics asked for:
 | Glue / Athena | database `tish_telemetry`, table `events`, partition projection — DDL in `tish-app/telemetry/athena/events.sql` |
 | IAM | `tish-telemetry-firehose` (S3 write), `tish-telemetry-ingest-role` (Firehose write + logs) |
 | Rollup | `tish-telemetry-rollup` (non-VPC, Athena) → `tish-telemetry-rollup-db` (VPC, Postgres), EventBridge `tish-telemetry-rollup-schedule` |
-| Metabase | EC2 `i-091db41c5b16cf5e5`, app database in a Postgres container on the same box, nightly EBS snapshots; runbook in `tish-app/telemetry/metabase/README.md` |
+| Metabase | `https://bi.ti-smarthealth.com` — EC2 `i-091db41c5b16cf5e5`, app database in a Postgres container on the same box, Caddy + Let's Encrypt, nightly EBS snapshots; runbook in `tish-app/telemetry/metabase/README.md` |
 
 **The rollup is two Lambdas, not one, and that is forced.** This account has no
 NAT gateway and no VPC endpoints, so a VPC-attached function reaches RDS and

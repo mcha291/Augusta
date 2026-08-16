@@ -1,8 +1,17 @@
+import { useQuery } from "@tanstack/react-query"
 import { ExternalLink } from "lucide-react"
+import { useMemo, useState } from "react"
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
+import type { ChartConfig } from "@/components/ui/chart"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
+import { useApi } from "@/lib/api"
 import { config } from "@/lib/config"
+import type { DailyOpen } from "@/lib/types"
 
 /**
  * TELEMETRY.md §4 — Metabase, brought into the portal as far as it can be.
@@ -32,6 +41,18 @@ function isMixedContent(url: string | undefined): boolean {
   return window.location.protocol === "https:" && url.startsWith("http://")
 }
 
+const RANGES = [
+  { value: "14", label: "Last 14 days" },
+  { value: "30", label: "Last 30 days" },
+  { value: "90", label: "Last 90 days" },
+]
+
+const opensConfig = {
+  cold: { label: "Cold start", color: "var(--chart-1)" },
+  foreground: { label: "Returned", color: "var(--chart-2)" },
+  notification: { label: "From a reminder", color: "var(--chart-3)" },
+} satisfies ChartConfig
+
 export function AnalyticsPage() {
   const base = config.metabaseUrl
   const embed = config.metabaseEmbedUrl
@@ -43,7 +64,7 @@ export function AnalyticsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
           <p className="text-sm text-muted-foreground">
-            Ad-hoc questions over both stores — care data in Postgres, product analytics in Athena.
+            What's in the telemetry data, and where to go when you need more than this.
           </p>
         </div>
 
@@ -61,13 +82,15 @@ export function AnalyticsPage() {
         ) : null}
       </div>
 
+      <TelemetryOverview />
+
       {!base ? (
         <Card>
           <CardHeader>
             <CardTitle>Metabase isn't configured</CardTitle>
             <CardDescription>
-              Set <code>VITE_METABASE_URL</code> to its base URL — in{" "}
-              <code>.env.local</code> for dev, or the Amplify Hosting console for deploys.
+              Set the <code>VITE_METABASE_URL</code> repo variable to its base URL and re-run
+              the dashboard deploy — the value is baked into the bundle at build time.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -84,6 +107,11 @@ export function AnalyticsPage() {
             <p>
               Both data sources are connected there: <strong>TISH App</strong> for doses,
               reminders and patients, and <strong>TISH Analytics</strong> for app-open events.
+            </p>
+            <p className="pt-2">
+              It may be switched off between beta programmes to save running costs. Nothing is
+              lost while it is — dashboards and accounts live on its own disk, and the
+              collection below carries on regardless.
             </p>
           </CardContent>
         </Card>
@@ -114,6 +142,196 @@ export function AnalyticsPage() {
       </Card>
     </div>
   )
+}
+
+/**
+ * What is actually in the telemetry data, without Metabase running.
+ *
+ * **This exists so that turning Metabase on is an informed decision rather than
+ * a hopeful one.** It costs ~$25/month to leave running and the plan is to
+ * switch it off between beta programmes, so the question "is there enough here
+ * to be worth starting it?" gets asked repeatedly — and answering it by
+ * starting the thing you were trying to avoid starting is a poor trade.
+ *
+ * Reads `telemetry_daily_opens`, which the nightly rollup writes (TELEMETRY.md
+ * §4). **No Athena query happens on this page load**, which is the entire point
+ * of that job: Athena is asynchronous and polled, bills a 10 MB minimum per
+ * query, and is minutes stale anyway, so a live query would be slow, billed per
+ * viewer, and no fresher than this.
+ */
+function TelemetryOverview() {
+  const api = useApi()
+  const [days, setDays] = useState("30")
+
+  const range = useMemo(() => {
+    const to = new Date()
+    const from = new Date(to.getTime() - Number(days) * 86400000)
+    return { from: from.toISOString(), to: to.toISOString() }
+  }, [days])
+
+  const query = useQuery({
+    queryKey: ["daily-opens", range.from, range.to],
+    queryFn: () => api.getDailyOpens(range),
+  })
+
+  // Memoised rather than `?? []` inline: a fresh array literal on every render
+  // makes both memos below recompute every time, which defeats the point of
+  // having them.
+  const rows: DailyOpen[] = useMemo(() => query.data?.opens ?? [], [query.data])
+  const summary = useMemo(() => summarise(rows), [rows])
+  const chart = useMemo(() => toChartRows(rows), [rows])
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1.5">
+          <CardTitle>App opens</CardTitle>
+          <CardDescription>
+            From the nightly rollup, so this page never queries Athena. Enough to tell whether
+            there's anything worth digging into.
+          </CardDescription>
+        </div>
+        <Select value={days} onValueChange={setDays}>
+          <SelectTrigger className="w-[150px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {RANGES.map((r) => (
+              <SelectItem key={r.value} value={r.value}>
+                {r.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </CardHeader>
+
+      <CardContent className="space-y-6">
+        {query.isPending ? <Skeleton className="h-[300px] w-full" /> : null}
+
+        {query.error ? (
+          <p className="text-sm text-destructive">{(query.error as Error).message}</p>
+        ) : null}
+
+        {/*
+          Gated on the open count, not the row count. The rollup can hold rows
+          that sum to zero, and a page of zeroed tiles beside an empty chart
+          reads as broken rather than as "nothing has happened yet".
+        */}
+        {!query.isPending && !query.error && summary.opens === 0 ? (
+          <div className="rounded-md border border-dashed p-6 text-sm text-muted-foreground">
+            <p className="font-medium text-foreground">No app opens recorded in this range.</p>
+            <p className="pt-2">
+              Either nobody has opened the app, or no build carrying telemetry has shipped yet.
+              Events buffer on the device and flush on the next launch, and the rollup runs
+              once a night at 04:10 — so a first data point can be a day behind the first use.
+            </p>
+          </div>
+        ) : null}
+
+        {summary.opens > 0 ? (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Stat label="Opens" value={String(summary.opens)} detail={`over ${summary.days} days with activity`} />
+              <Stat
+                label="Busiest day"
+                value={summary.peak ? String(summary.peak.opens) : "—"}
+                detail={summary.peak ? shortDay(summary.peak.day) : "no data"}
+              />
+              <Stat
+                label="From a reminder"
+                value={summary.opens > 0 ? `${Math.round((summary.notification / summary.opens) * 100)}%` : "—"}
+                // §3 trap 2: counted together with spontaneous opens, this
+                // metric mostly measures how many medications someone is on.
+                detail="the OS opening the app, not the user"
+              />
+              <Stat
+                label="Last rolled up"
+                value={summary.refreshedAt ? shortDay(summary.refreshedAt) : "never"}
+                detail={summary.stale ? "stale — check the nightly job" : "nightly at 04:10 Taipei"}
+              />
+            </div>
+
+            <ChartContainer config={opensConfig} className="h-[260px] w-full">
+              <BarChart data={chart} margin={{ left: 4, right: 8, top: 8 }}>
+                <CartesianGrid vertical={false} />
+                <XAxis dataKey="day" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={shortDay} />
+                <YAxis tickLine={false} axisLine={false} width={28} allowDecimals={false} />
+                <ChartTooltip content={<ChartTooltipContent />} />
+                <ChartLegend content={<ChartLegendContent />} />
+                {/* Stacked, because the split between them is the whole point. */}
+                <Bar dataKey="cold" stackId="a" fill="var(--color-cold)" radius={[0, 0, 2, 2]} />
+                <Bar dataKey="foreground" stackId="a" fill="var(--color-foreground)" />
+                <Bar dataKey="notification" stackId="a" fill="var(--color-notification)" radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ChartContainer>
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  )
+}
+
+function Stat({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="rounded-lg border p-4">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="pt-1 text-2xl font-semibold tabular-nums">{value}</div>
+      <div className="pt-1 text-xs text-muted-foreground">{detail}</div>
+    </div>
+  )
+}
+
+/**
+ * **`users` is deliberately not summed anywhere here.** The rollup counts
+ * distinct users per day *and per source*, so somebody who opened from a
+ * reminder and again from cold appears in two rows — adding them up would
+ * invent people. Opens are additive; users are not.
+ */
+function summarise(rows: DailyOpen[]) {
+  const byDay = new Map<string, number>()
+  let opens = 0
+  let notification = 0
+  let refreshedAt: string | null = null
+
+  for (const row of rows) {
+    opens += row.opens
+    if (row.source === "notification") notification += row.opens
+    byDay.set(row.day, (byDay.get(row.day) ?? 0) + row.opens)
+    if (!refreshedAt || row.refreshed_at > refreshedAt) refreshedAt = row.refreshed_at
+  }
+
+  // **Days with opens, not days with rows.** The rollup can legitimately hold a
+  // row of zero — a day whose events were deleted, or recomputed after the
+  // source data went away — and counting those as "days with activity" reports
+  // a busy fortnight that never happened.
+  let activeDays = 0
+  for (const n of byDay.values()) if (n > 0) activeDays++
+
+  let peak: { day: string; opens: number } | null = null
+  for (const [day, n] of byDay) {
+    if (!peak || n > peak.opens) peak = { day, opens: n }
+  }
+
+  // A nightly job that quietly stopped looks exactly like a quiet fortnight,
+  // which is why the tile says so rather than just showing a date.
+  const stale = refreshedAt ? Date.now() - Date.parse(refreshedAt) > 36 * 3600 * 1000 : false
+
+  return { opens, notification, days: activeDays, peak, refreshedAt, stale }
+}
+
+/** One row per day with a column per source, which is what a stacked bar needs. */
+function toChartRows(rows: DailyOpen[]) {
+  const byDay = new Map<string, Record<string, string | number>>()
+  for (const row of rows) {
+    const entry = byDay.get(row.day) ?? { day: row.day, cold: 0, foreground: 0, notification: 0 }
+    entry[row.source] = (Number(entry[row.source]) || 0) + row.opens
+    byDay.set(row.day, entry)
+  }
+  return [...byDay.values()].sort((a, b) => String(a.day).localeCompare(String(b.day)))
+}
+
+function shortDay(day: string): string {
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "short" }).format(new Date(day))
 }
 
 /**

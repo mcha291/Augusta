@@ -19,15 +19,25 @@ for exactly this reason.
 | Thing | Value |
 | --- | --- |
 | Instance | `i-091db41c5b16cf5e5`, `t4g.medium`, `ap-east-2`, 30 GB encrypted gp3 |
-| URL | `http://43.212.31.152:3000` |
+| Address | Elastic IP `43.213.218.198` (`eipalloc-0451650c399708dbf`), A record in zone `Z0492003C3ORSSH0BIWC` |
+| TLS | Caddy + Let's Encrypt, auto-renewing. Port 80 world-open for the ACME challenge only; **443 restricted to one IP** |
+| URL | **https://bi.ti-smarthealth.com** |
 | App database | Postgres 18 container **on this instance**, data at `/var/lib/metabase-pg` |
-| Security group | `sg-0fe31be0cccb4f341` — **port 3000 open to one IP only** |
+| Security group | `sg-0fe31be0cccb4f341` — 443 to one IP, 80 world-open for ACME only, 3000 closed |
 | Instance role | `tish-metabase-role` — Athena + Glue read, S3 results, SSM |
 | Snapshots | DLM `policy-018c8d8a84a2d0768` — nightly 03:00 Taipei, 7 kept |
 | Boot script | [`user-data.sh`](user-data.sh) |
-| Version | v0.63.13 OSS, `postgres` and `athena` drivers both present |
+| Version | **pinned** to `metabase/metabase:v0.63.13`; `postgres` and `athena` drivers both present |
 
-Roughly **$28/month** all in: ~$25 instance, ~$2.50 EBS, ~$1 snapshots.
+Roughly **$32/month** running: ~$25 instance, ~$3.60 Elastic IP, ~$2.50 EBS, ~$1 snapshots.
+TLS and DNS add nothing — the certificate is free and the hosted zone already existed.
+
+**Stopped it costs ~$7/month** (EBS, snapshots, and the Elastic IP, which is
+charged while detached from a running instance). Dashboards, accounts, data
+sources and query history all survive on the EBS volume, and the address no
+longer changes, so restarting is just a start — nothing to reconfigure. The
+telemetry pipeline keeps collecting the whole time; Metabase is purely a
+consumer.
 
 Setup is complete and both data sources are connected: `TISH App` (postgres,
 against `season1`) and `TISH Analytics` (athena). If either ever needs
@@ -74,19 +84,22 @@ aws ssm start-session --target i-091db41c5b16cf5e5 --region ap-east-2 --document
 
 ## Things that will bite
 
-- **Port 3000 is open to exactly one IP** (`115.186.235.35/32`, the address this
-  was set up from). From anywhere else the page will simply hang. To change it:
+- **Port 443 is open to exactly one IP** (`115.186.235.35/32`, the address this
+  was set up from). From anywhere else the page will simply hang. To add one:
 
   ```bash
-  aws ec2 authorize-security-group-ingress --group-id sg-0fe31be0cccb4f341 --protocol tcp --port 3000 --cidr YOUR.IP.HERE/32 --region ap-east-2
+  aws ec2 authorize-security-group-ingress --group-id sg-0fe31be0cccb4f341 --protocol tcp --port 443 --cidr YOUR.IP.HERE/32 --region ap-east-2
   ```
 
-- **It is plain HTTP.** Fine for a single-IP allowlist; not fine the moment it is
-  opened wider. TLS needs a load balancer or a reverse proxy and a name, and that
-  is a prerequisite for any broader access, not an optimisation.
-- **The public IP is not elastic.** Stopping and starting the instance changes
-  it, which also invalidates the `MB_SITE_URL` baked at boot. Allocate an Elastic
-  IP if this becomes something people bookmark.
+- **Port 80 is open to the world and must stay that way.** Let's Encrypt's
+  HTTP-01 challenge comes from unpublished addresses, so it cannot be
+  allowlisted. Caddy serves nothing there but the challenge and a 308 to HTTPS —
+  but closing it will break renewal ~60 days later, silently, and the failure
+  will look like an expired certificate rather than a firewall change.
+- **Certificates renew automatically and the state that makes that work is a
+  volume.** `/var/lib/caddy-data` holds the certificate and the ACME account
+  key; wiping it re-issues from scratch and walks toward Let's Encrypt's rate
+  limits.
 - **No SSH key and no port 22.** Use Session Manager:
 
   ```bash
