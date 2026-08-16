@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query"
-import { ExternalLink } from "lucide-react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { ExternalLink, Loader2, Power } from "lucide-react"
 import { useMemo, useState } from "react"
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts"
 
@@ -9,9 +9,10 @@ import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartToo
 import type { ChartConfig } from "@/components/ui/chart"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Badge } from "@/components/ui/badge"
 import { useApi } from "@/lib/api"
 import { config } from "@/lib/config"
-import type { DailyOpen } from "@/lib/types"
+import type { DailyOpen, MetabaseState } from "@/lib/types"
 
 /**
  * TELEMETRY.md §4 — Metabase, brought into the portal as far as it can be.
@@ -95,26 +96,7 @@ export function AnalyticsPage() {
           </CardHeader>
         </Card>
       ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle>Signing in</CardTitle>
-            <CardDescription>
-              Metabase keeps its own accounts, so it asks for a separate login rather than
-              reusing this one. SSO would need the paid tier.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">
-            <p>
-              Both data sources are connected there: <strong>TISH App</strong> for doses,
-              reminders and patients, and <strong>TISH Analytics</strong> for app-open events.
-            </p>
-            <p className="pt-2">
-              It may be switched off between beta programmes to save running costs. Nothing is
-              lost while it is — dashboards and accounts live on its own disk, and the
-              collection below carries on regardless.
-            </p>
-          </CardContent>
-        </Card>
+        <PowerCard />
       )}
 
       <Card>
@@ -141,6 +123,133 @@ export function AnalyticsPage() {
         </CardContent>
       </Card>
     </div>
+  )
+}
+
+const STATE_LABELS: Record<MetabaseState, string> = {
+  running: "Running",
+  stopped: "Stopped",
+  pending: "Starting…",
+  stopping: "Stopping…",
+  "shutting-down": "Stopping…",
+  terminated: "Terminated",
+  unknown: "Unknown",
+}
+
+/**
+ * Start and stop the Metabase host from here.
+ *
+ * **Because it is meant to be off most of the time.** §4 stands it up to find
+ * out which questions get asked repeatedly, and it costs ~$25/month running
+ * against ~$7 stopped — so switching it off between beta programmes is the
+ * plan, not an exception. A cost control that requires a console trip is one
+ * that quietly stops being used.
+ *
+ * Nothing is lost by stopping it: the application database is a container on
+ * the instance's own EBS volume, so dashboards, accounts and data sources all
+ * survive, and the Elastic IP means the address does not change.
+ */
+function PowerCard() {
+  const api = useApi()
+  const queryClient = useQueryClient()
+  const [confirmingStop, setConfirmingStop] = useState(false)
+
+  const status = useQuery({
+    queryKey: ["metabase-status"],
+    queryFn: api.getMetabaseStatus,
+    // **Polls only while something is in flight.** Starting takes a couple of
+    // minutes, and a page that sat on "Starting…" until manually reloaded would
+    // send people to the console to find out — which is the thing this replaces.
+    refetchInterval: (query) => (query.state.data?.transitional ? 4000 : false),
+  })
+
+  const power = useMutation({
+    mutationFn: (action: "start" | "stop") => api.setMetabasePower(action),
+    onSuccess: () => {
+      setConfirmingStop(false)
+      queryClient.invalidateQueries({ queryKey: ["metabase-status"] })
+    },
+  })
+
+  const state = status.data?.state
+  const busy = status.data?.transitional === true || power.isPending
+  const running = state === "running"
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
+        <div className="space-y-1.5">
+          <CardTitle className="flex items-center gap-2">
+            Metabase
+            {status.isPending ? (
+              <Skeleton className="h-5 w-20" />
+            ) : (
+              <Badge variant={running ? "secondary" : "outline"}>
+                {busy ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                {STATE_LABELS[state ?? "unknown"]}
+              </Badge>
+            )}
+          </CardTitle>
+          <CardDescription>
+            Off between beta programmes — roughly $25/month running, $7 stopped. Dashboards,
+            accounts and both data sources survive a stop; the address doesn't change.
+          </CardDescription>
+        </div>
+
+        <div className="flex gap-2">
+          {running && confirmingStop ? (
+            <>
+              <Button variant="destructive" disabled={busy} onClick={() => power.mutate("stop")}>
+                Confirm stop
+              </Button>
+              <Button variant="outline" onClick={() => setConfirmingStop(false)}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant={running ? "outline" : "default"}
+              disabled={busy || state === "terminated" || state === "unknown"}
+              // **Stopping asks twice, starting does not.** Starting costs
+              // money and two minutes; stopping cuts off anyone mid-query.
+              onClick={() => (running ? setConfirmingStop(true) : power.mutate("start"))}
+            >
+              {busy ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Power className="mr-2 h-4 w-4" />
+              )}
+              {running ? "Stop" : "Start"}
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-2 text-sm text-muted-foreground">
+        {power.error ? (
+          <p className="text-destructive">{(power.error as Error).message}</p>
+        ) : null}
+        {status.error ? (
+          <p className="text-destructive">
+            Couldn't read the instance state: {(status.error as Error).message}
+          </p>
+        ) : null}
+
+        {state === "stopped" ? (
+          <p>Starting takes a couple of minutes before the login page answers.</p>
+        ) : null}
+        {running && status.data?.since ? (
+          <p>Running since {new Date(status.data.since).toLocaleString("en-GB")}.</p>
+        ) : null}
+
+        <p>
+          Metabase keeps its own accounts, so it asks for a separate login rather than reusing
+          this one — SSO would need the paid tier. Both data sources are connected there:{" "}
+          <strong>TISH App</strong> for doses, reminders and patients, and{" "}
+          <strong>TISH Analytics</strong> for app-open events.
+        </p>
+      </CardContent>
+    </Card>
   )
 }
 

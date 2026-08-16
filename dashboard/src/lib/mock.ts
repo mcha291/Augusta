@@ -16,6 +16,8 @@ import type {
   AdherenceDose,
   DailyOpen,
   DailyOpensResponse,
+  MetabasePowerResult,
+  MetabaseStatus,
   LocaleContent,
   SaveAnnouncementRequest,
   SaveAnnouncementTypeRequest,
@@ -278,6 +280,29 @@ export const mockApi = {
     return { ...generateAdherence(userId, range), from: range.from, to: range.to }
   },
 
+  // Power control, with the transitions actually simulated — a mock that
+  // flipped straight from stopped to running would hide the state the real UI
+  // spends most of its visible time in.
+  async getMetabaseStatus(): Promise<MetabaseStatus> {
+    await delay(250)
+    return { ...mockMetabase }
+  },
+
+  async setMetabasePower(action: "start" | "stop"): Promise<MetabasePowerResult> {
+    await delay(400)
+    const settled = action === "start" ? "running" : "stopped"
+    if (mockMetabase.state === settled) return { state: settled, changed: false }
+
+    mockMetabase.state = action === "start" ? "pending" : "stopping"
+    mockMetabase.transitional = true
+    setTimeout(() => {
+      mockMetabase.state = settled
+      mockMetabase.transitional = false
+      mockMetabase.since = settled === "running" ? new Date().toISOString() : null
+    }, 6000)
+    return { state: mockMetabase.state, changed: true }
+  },
+
   async getDailyOpens(range: { from: string; to: string }): Promise<DailyOpensResponse> {
     await delay(300)
     const opens: DailyOpen[] = []
@@ -294,6 +319,8 @@ export const mockApi = {
     return { opens }
   },
 }
+
+const mockMetabase: MetabaseStatus = { state: "stopped", since: null, transitional: false }
 
 const mockPatients: AdherencePatient[] = [
   { id: 4, full_name: "陳秀英", username: "hsiuying", doses: 186, confirmed: 171, last_dose_at: new Date().toISOString() },

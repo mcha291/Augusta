@@ -188,3 +188,28 @@ export interface DailyOpen {
 export interface DailyOpensResponse {
   opens: DailyOpen[]
 }
+
+// --- Metabase power control (TELEMETRY.md §4) ------------------------------
+
+export type MetabaseState =
+  | "running"
+  | "stopped"
+  | "pending"
+  | "stopping"
+  | "shutting-down"
+  | "terminated"
+  | "unknown"
+
+export interface MetabaseStatus {
+  state: MetabaseState
+  /** When it last started. Null while stopped. */
+  since: string | null
+  /** Mid-transition, so nothing can be asked of it yet. */
+  transitional: boolean
+}
+
+export interface MetabasePowerResult {
+  state: MetabaseState
+  /** False when it was already in the requested state — not an error. */
+  changed: boolean
+}

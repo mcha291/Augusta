@@ -6,7 +6,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setPoolForTests, ALLOWED_TABLES, adherenceRange, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
+import { handler, _setEc2ForTests, _setPoolForTests, ALLOWED_TABLES, adherenceRange, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
 
 const ENV = {
   DB_HOST: 'db.local', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'postgres',
@@ -753,3 +753,155 @@ test('the adherence routes are behind the same approval gate as everything else'
   }
   assert.equal(pool.calls.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Metabase power control (TELEMETRY.md §4)
+// ---------------------------------------------------------------------------
+
+/** A scripted EC2 control plane. `state` is what describe reports. */
+function fakeEc2(state, { onStart, onStop } = {}) {
+  const calls = []
+  return {
+    calls,
+    describe: async () => ({
+      Reservations: [{ Instances: [{ State: { Name: state }, LaunchTime: new Date('2026-08-15T00:00:00Z') }] }],
+    }),
+    start: async (id) => {
+      calls.push(['start', id])
+      onStart?.()
+      return { StartingInstances: [{ CurrentState: { Name: 'pending' } }] }
+    },
+    stop: async (id) => {
+      calls.push(['stop', id])
+      onStop?.()
+      return { StoppingInstances: [{ CurrentState: { Name: 'stopping' } }] }
+    },
+  }
+}
+
+function withInstanceId() {
+  process.env.METABASE_INSTANCE_ID = 'i-test123'
+}
+
+test('GET /metabase/status reports the instance state', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  _setEc2ForTests(fakeEc2('running'))
+
+  const res = await handler(httpEvent({ path: '/metabase/status' }))
+  assert.equal(res.statusCode, 200)
+  assert.equal(parse(res).state, 'running')
+  assert.equal(parse(res).transitional, false)
+})
+
+test('a mid-transition state is flagged so the UI can show it as busy', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  _setEc2ForTests(fakeEc2('pending'))
+
+  const res = await handler(httpEvent({ path: '/metabase/status' }))
+  assert.equal(parse(res).transitional, true)
+})
+
+test('starting a stopped instance starts it', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  const ec2 = fakeEc2('stopped')
+  _setEc2ForTests(ec2)
+
+  const res = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action: 'start' } }))
+  assert.equal(res.statusCode, 200)
+  assert.equal(parse(res).changed, true)
+  assert.equal(parse(res).state, 'pending')
+  assert.deepEqual(ec2.calls, [['start', 'i-test123']])
+})
+
+test('STARTING AN ALREADY-RUNNING INSTANCE IS A NO-OP, NOT AN ERROR', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  const ec2 = fakeEc2('running')
+  _setEc2ForTests(ec2)
+
+  // Two admins clicking Start seconds apart is the ordinary case. The second
+  // one should be told it is running, not shown a failure.
+  const res = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action: 'start' } }))
+  assert.equal(res.statusCode, 200)
+  assert.equal(parse(res).changed, false)
+  assert.equal(ec2.calls.length, 0, 'no EC2 call is made when there is nothing to do')
+})
+
+test('stopping an already-stopped instance is a no-op too', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  const ec2 = fakeEc2('stopped')
+  _setEc2ForTests(ec2)
+
+  const res = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action: 'stop' } }))
+  assert.equal(res.statusCode, 200)
+  assert.equal(parse(res).changed, false)
+  assert.equal(ec2.calls.length, 0)
+})
+
+test('A TRANSITION IN FLIGHT CANNOT BE REVERSED MID-FLIGHT', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  const ec2 = fakeEc2('stopping')
+  _setEc2ForTests(ec2)
+
+  // EC2 rejects a start while an instance is stopping. Catching it here gives a
+  // sentence someone can act on instead of an SDK error surfacing as a 500.
+  const res = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action: 'stop' } }))
+  assert.equal(parse(res).changed, false, 'stop while stopping is already satisfied')
+
+  const start = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action: 'start' } }))
+  assert.equal(start.statusCode, 409)
+  assert.match(parse(start).error, /stopping/)
+  assert.equal(ec2.calls.length, 0)
+})
+
+test('an unknown action is refused before any EC2 call', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  const ec2 = fakeEc2('running')
+  _setEc2ForTests(ec2)
+
+  for (const action of ['terminate', 'reboot', '', undefined]) {
+    const res = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action } }))
+    assert.equal(res.statusCode, 400, String(action))
+  }
+  assert.equal(ec2.calls.length, 0, 'nothing reaches EC2')
+})
+
+test('power control needs neither the database nor a GitHub token', () => {
+  for (const r of ['getMetabaseStatus', 'setMetabasePower']) {
+    assert.deepEqual(requiredEnvFor(r).filter((k) => k.startsWith('DB_')), [], r)
+    assert.deepEqual(requiredEnvFor(r).filter((k) => k.startsWith('GITHUB')), [], r)
+    assert.ok(requiredEnvFor(r).includes('METABASE_INSTANCE_ID'), r)
+  }
+})
+
+test('POWER CONTROL IS BEHIND THE SAME APPROVAL GATE AS EVERYTHING ELSE', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  const ec2 = fakeEc2('running')
+  _setEc2ForTests(ec2)
+
+  const status = await handler(httpEvent({ path: '/metabase/status', groups: [] }))
+  const power = await handler(httpEvent({ path: '/metabase/power', method: 'POST', body: { action: 'stop' }, groups: [] }))
+
+  assert.equal(status.statusCode, 403)
+  assert.equal(power.statusCode, 403)
+  assert.equal(ec2.calls.length, 0, 'an unapproved caller never reaches the instance')
+})
+
+test('a malformed body is a 400, not a 500', async (t) => {
+  t.after(() => _setEc2ForTests(null))
+  withInstanceId()
+  _setEc2ForTests(fakeEc2('running'))
+
+  const res = await handler({
+    ...httpEvent({ path: '/metabase/power', method: 'POST' }),
+    body: 'not json',
+  })
+  assert.equal(res.statusCode, 400)
+})

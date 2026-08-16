@@ -18,7 +18,8 @@
 // only in VPC attachment and which env vars they carry:
 //
 //   tish-admin-api           VPC-attached  -> /tables routes, reaches private RDS
-//   tish-admin-translations  no VPC        -> /translations routes, reaches github.com
+//   tish-admin-translations  no VPC        -> /translations and /metabase routes,
+//                                             reaches github.com and the EC2 API
 //
 // The split is forced by networking, not by design taste. A VPC-attached
 // Lambda in these subnets has *no route to the internet* — the subnets point
@@ -72,6 +73,11 @@ export function requiredEnvFor(routeName) {
     case 'getTranslations':
     case 'putTranslations':
       return [...GITHUB_ENV, 'ALLOWED_ORIGIN'];
+    // Needs neither database nor GitHub — the instance id identifies what to
+    // act on, and the permission to act comes from the execution role.
+    case 'getMetabaseStatus':
+    case 'setMetabasePower':
+      return ['METABASE_INSTANCE_ID', 'ALLOWED_ORIGIN'];
     default:
       return ['ALLOWED_ORIGIN'];
   }
@@ -184,6 +190,59 @@ let pool; // lazily created so pure helpers can be imported without env/DB
 // Test seam: lets index.test.mjs substitute a scripted pool so the handler
 // can be exercised functionally without a database connection.
 export function _setPoolForTests(fakePool) { pool = fakePool; }
+
+/**
+ * EC2 states that are mid-transition. Nothing may be asked of the instance
+ * while it is in one of these, and the UI shows them as "working on it".
+ */
+export const TRANSITIONAL = new Set(['pending', 'stopping', 'shutting-down']);
+
+/**
+ * Test seam for the EC2 control plane, matching `_setPoolForTests`.
+ *
+ * Same argument as `escalate.mjs` makes for its Lambda invoker: starting and
+ * stopping a real instance is not something a test can do, so it is exactly
+ * the part most worth being able to fake.
+ */
+let ec2Impl = null;
+export function _setEc2ForTests(fake) { ec2Impl = fake; }
+
+async function ec2() {
+  if (ec2Impl) return ec2Impl;
+  // Imported lazily so the pure helpers in this file stay importable without
+  // the SDK present, and so the VPC-attached function never loads a client it
+  // has no route to use.
+  const { EC2Client, DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand } =
+    await import('@aws-sdk/client-ec2');
+  const client = new EC2Client({});
+  return {
+    describe: (id) => client.send(new DescribeInstancesCommand({ InstanceIds: [id] })),
+    start: (id) => client.send(new StartInstancesCommand({ InstanceIds: [id] })),
+    stop: (id) => client.send(new StopInstancesCommand({ InstanceIds: [id] })),
+  };
+}
+
+/** Current state of the Metabase instance, and when it last changed. */
+async function describeMetabase() {
+  const id = process.env.METABASE_INSTANCE_ID;
+  const res = await (await ec2()).describe(id);
+  const instance = res?.Reservations?.[0]?.Instances?.[0];
+  return {
+    state: instance?.State?.Name ?? 'unknown',
+    // `LaunchTime` is when it last *started*, which is the useful anchor for
+    // "how long has this been costing money".
+    since: instance?.LaunchTime ? new Date(instance.LaunchTime).toISOString() : null,
+  };
+}
+
+/** Returns the state EC2 reports immediately after the call. */
+async function setMetabasePower(action) {
+  const id = process.env.METABASE_INSTANCE_ID;
+  const api = await ec2();
+  const res = action === 'start' ? await api.start(id) : await api.stop(id);
+  const changes = res?.StartingInstances ?? res?.StoppingInstances ?? [];
+  return changes[0]?.CurrentState?.Name ?? 'unknown';
+}
 
 function getPool() {
   if (!pool) {
@@ -387,6 +446,10 @@ export function routeOf(method, path) {
   const adherenceMatch = clean.match(/^\/adherence\/(\d+)$/);
   if (method === 'GET' && adherenceMatch) return { name: 'getPatientAdherence', userId: Number(adherenceMatch[1]) };
   if (method === 'GET' && clean === '/daily-opens') return { name: 'getDailyOpens' };
+  // TELEMETRY.md §4 — Metabase is expected to be off between beta programmes,
+  // so starting it is a routine action rather than an ops task.
+  if (method === 'GET' && clean === '/metabase/status') return { name: 'getMetabaseStatus' };
+  if (method === 'POST' && clean === '/metabase/power') return { name: 'setMetabasePower' };
   if (method === 'GET' && clean === '/announcement-types') return { name: 'listAnnouncementTypes' };
   if (method === 'POST' && clean === '/announcement-types') return { name: 'createAnnouncementType' };
   const typeMatch = clean.match(/^\/announcement-types\/(\d+)$/);
@@ -648,6 +711,57 @@ export async function handler(event) {
           WHERE day BETWEEN $1::date AND $2::date
           ORDER BY day`, [from, to]);
         return json(200, { opens: res.rows });
+      }
+
+      // --- Metabase power control (TELEMETRY.md §4) ------------------------
+      //
+      // **Served by the non-VPC function**, and that is forced rather than
+      // arbitrary: the EC2 control-plane API is on the internet, which a
+      // VPC-attached Lambda in these subnets cannot reach. Same boundary that
+      // put the translations routes here.
+      //
+      // Metabase costs ~$25/month running and is expected to be switched off
+      // between beta programmes. Making that a button rather than a console
+      // trip is the difference between a cost control that gets used and one
+      // that does not.
+
+      case 'getMetabaseStatus': {
+        const { state, since } = await describeMetabase();
+        return json(200, { state, since, transitional: TRANSITIONAL.has(state) });
+      }
+
+      case 'setMetabasePower': {
+        let body;
+        try {
+          body = JSON.parse(event.body ?? '');
+        } catch {
+          return json(400, { error: 'Request body must be JSON' });
+        }
+        const action = body?.action;
+        if (action !== 'start' && action !== 'stop') {
+          return json(400, { error: "action must be 'start' or 'stop'" });
+        }
+
+        const { state } = await describeMetabase();
+
+        // **Idempotent, and deliberately not an error.** Two admins clicking
+        // Start within a few seconds is the ordinary case, and the second one
+        // should see "it's starting", not a failure.
+        if (action === 'start' && (state === 'running' || state === 'pending')) {
+          return json(200, { state, changed: false });
+        }
+        if (action === 'stop' && (state === 'stopped' || state === 'stopping')) {
+          return json(200, { state, changed: false });
+        }
+
+        // A transition already in flight cannot be reversed mid-flight — EC2
+        // rejects a start while stopping. Saying so beats a 400 from the SDK.
+        if (TRANSITIONAL.has(state)) {
+          return json(409, { error: `Instance is ${state}; wait for it to settle.`, state });
+        }
+
+        const next = await setMetabasePower(action);
+        return json(200, { state: next, changed: true });
       }
 
       case 'getTranslations': {
