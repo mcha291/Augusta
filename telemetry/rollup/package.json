@@ -1,0 +1,13 @@
+{
+  "name": "tish-telemetry-rollup",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Nightly Athena -> Postgres rollup (TELEMETRY.md 4). Two handlers, deployed as two Lambdas either side of the VPC boundary.",
+  "dependencies": {
+    "pg": "^8.16.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

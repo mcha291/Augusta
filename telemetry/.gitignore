@@ -1,0 +1,5 @@
+# Installed per-package at deploy time, and by CI before it zips.
+node_modules/
+
+# Build artefacts from a hand-run deploy.
+function.zip

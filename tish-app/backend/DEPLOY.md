@@ -8,7 +8,7 @@ Pushing to `main` auto-deploys, all from this one repo:
 | Workflow | Triggers on | Target |
 | --- | --- | --- |
 | `deploy-backend.yml` | `tish-app/backend/**` | Lambdas `operation-strix` **and `tish-migrate`** |
-| `deploy-telemetry.yml` | `tish-app/telemetry/**` | Lambda `tish-telemetry-ingest` |
+| `deploy-telemetry.yml` | `telemetry/**` | Lambdas `tish-telemetry-ingest`, `tish-telemetry-rollup`, `tish-telemetry-rollup-db` |
 | `deploy-admin-api.yml` | `dashboard/server/**` | Lambda `tish-admin-api` |
 | `deploy-dashboard.yml` | `dashboard/**` (excl. `server/`) | Amplify app `d1x8yq4r6ivp8n` |
 

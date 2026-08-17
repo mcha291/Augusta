@@ -213,3 +213,27 @@ export interface MetabasePowerResult {
   /** False when it was already in the requested state — not an error. */
   changed: boolean
 }
+
+// --- Operational health ----------------------------------------------------
+
+export type AlarmState = "OK" | "ALARM" | "INSUFFICIENT_DATA"
+
+export interface Alarm {
+  name: string
+  description: string | null
+  state: AlarmState
+  reason: string | null
+  since: string | null
+  /** False when nothing is subscribed — the alarm is a dashboard decoration. */
+  notifies: boolean
+}
+
+export interface AlarmsResponse {
+  alarms: Alarm[]
+  inAlarm: number
+  /**
+   * Confirmed subscriptions on the alarm topics. Zero means no alarm reaches a
+   * human, however many are configured. Null if it could not be determined.
+   */
+  subscribers: number | null
+}

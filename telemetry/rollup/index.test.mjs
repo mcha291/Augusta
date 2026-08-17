@@ -19,7 +19,7 @@ import {
     _setPoolForTests,
     rollupDbHandler,
     rollupHandler,
-} from './rollup.mjs';
+} from './index.mjs';
 
 function restore() {
     _setAthenaForTests(null);

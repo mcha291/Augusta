@@ -19,7 +19,7 @@ The two metrics asked for:
 | 3. Bucket, Firehose, telemetry Lambda, Athena table | **Done**, all in `ap-east-2` — Firehose, Athena and Glue are all available there, so no `ap-northeast-1` fallback was needed. See the inventory below. |
 | 4. Point the client's flush at the endpoint | **Done.** `TELEMETRY_ENDPOINT = '/telemetry'`. |
 | 5. Metabase | **Running and configured**, `t4g.medium`, both data sources connected. Its app database was moved off a dedicated RDS instance onto the box itself (2026-08-15) to save ~$14/month; nightly EBS snapshots replace RDS backups. |
-| 6. Nightly EventBridge aggregation | **Done.** Migration `012_telemetry_daily_opens.sql`, `backend/rollup.mjs` (+12 tests), Lambdas `tish-telemetry-rollup` (non-VPC, Athena) and `tish-telemetry-rollup-db` (VPC, Postgres), EventBridge `cron(10 20 * * ? *)` = 04:10 Taipei. |
+| 6. Nightly EventBridge aggregation | **Done.** Migration `012_telemetry_daily_opens.sql`, `telemetry/rollup/` (+12 tests), Lambdas `tish-telemetry-rollup` (non-VPC, Athena) and `tish-telemetry-rollup-db` (VPC, Postgres), EventBridge `cron(10 20 * * ? *)` = 04:10 Taipei. |
 | 7. Per-patient drill-down | **Done.** `GET /adherence/patients`, `/adherence/{id}`, `/daily-opens` in `dashboard/server/index.mjs` (+17 tests), `dashboard/src/features/adherence/AdherencePage.tsx`. |
 
 ### What exists in AWS (all `ap-east-2`)
@@ -28,12 +28,12 @@ The two metrics asked for:
 | --- | --- |
 | S3 bucket | `tish-telemetry-180891490019` — `events/`, `errors/`, `athena-results/` (30-day expiry), public access blocked, SSE-S3 |
 | Firehose | `tish-telemetry` — DirectPut → S3, GZIP, 5 MB / 300 s buffer, `events/YYYY/MM/dd/HH/` |
-| Lambda | `tish-telemetry-ingest` — nodejs24.x, **non-VPC, no database client**, source in `tish-app/telemetry/` |
+| Lambda | `tish-telemetry-ingest` — nodejs24.x, **non-VPC, no database client**, source in `telemetry/` |
 | API route | `POST /telemetry` on `TISCv1`, behind the existing `CognitoAuthorizer` |
-| Glue / Athena | database `tish_telemetry`, table `events`, partition projection — DDL in `tish-app/telemetry/athena/events.sql` |
+| Glue / Athena | database `tish_telemetry`, table `events`, partition projection — DDL in `telemetry/athena/events.sql` |
 | IAM | `tish-telemetry-firehose` (S3 write), `tish-telemetry-ingest-role` (Firehose write + logs) |
 | Rollup | `tish-telemetry-rollup` (non-VPC, Athena) → `tish-telemetry-rollup-db` (VPC, Postgres), EventBridge `tish-telemetry-rollup-schedule` |
-| Metabase | `https://bi.ti-smarthealth.com` — EC2 `i-091db41c5b16cf5e5`, app database in a Postgres container on the same box, Caddy + Let's Encrypt, nightly EBS snapshots; runbook in `tish-app/telemetry/metabase/README.md` |
+| Metabase | `https://bi.ti-smarthealth.com` — EC2 `i-091db41c5b16cf5e5`, app database in a Postgres container on the same box, Caddy + Let's Encrypt, nightly EBS snapshots; runbook in `telemetry/metabase/README.md` |
 
 **The rollup is two Lambdas, not one, and that is forced.** This account has no
 NAT gateway and no VPC endpoints, so a VPC-attached function reaches RDS and
@@ -493,7 +493,7 @@ geography.
    `TELEMETRY_ENDPOINT = '/telemetry'` in `constants/config.ts`.
 5. ~~**Metabase** against Postgres first~~ — **running**, awaiting its first-run
    wizard (which creates an admin account and password). Runbook and both data
-   source configs: `tish-app/telemetry/metabase/README.md`.
+   source configs: `telemetry/metabase/README.md`.
 6. ~~**The nightly EventBridge aggregation job**~~ — **done**, and note it was
    built ahead of its own precondition: nothing in the portal strictly needed
    Athena data, since the drill-down below is entirely Postgres. It exists

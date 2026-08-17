@@ -78,6 +78,10 @@ export function requiredEnvFor(routeName) {
     case 'getMetabaseStatus':
     case 'setMetabasePower':
       return ['METABASE_INSTANCE_ID', 'ALLOWED_ORIGIN'];
+    // Reads CloudWatch by naming convention, so it needs no configuration of
+    // its own beyond the permission on the execution role.
+    case 'getAlarms':
+      return ['ALLOWED_ORIGIN'];
     default:
       return ['ALLOWED_ORIGIN'];
   }
@@ -196,6 +200,42 @@ export function _setPoolForTests(fakePool) { pool = fakePool; }
  * while it is in one of these, and the UI shows them as "working on it".
  */
 export const TRANSITIONAL = new Set(['pending', 'stopping', 'shutting-down']);
+
+/** Worst first, so a firing alarm is never below a healthy one. */
+const SEVERITY = { ALARM: 3, INSUFFICIENT_DATA: 2, OK: 1 };
+
+/** Test seam for CloudWatch, matching the EC2 one below. */
+let cloudwatchImpl = null;
+export function _setCloudWatchForTests(fake) { cloudwatchImpl = fake; }
+
+async function cloudwatch() {
+  if (cloudwatchImpl) return cloudwatchImpl;
+  const { CloudWatchClient, DescribeAlarmsCommand } = await import('@aws-sdk/client-cloudwatch');
+  return { cw: new CloudWatchClient({}), DescribeAlarmsCommand };
+}
+
+/**
+ * How many confirmed subscriptions the alarm topics have between them.
+ *
+ * Pending confirmations do not count: an email invitation nobody clicked
+ * delivers nothing, and counting it would restore exactly the false assurance
+ * this figure exists to remove.
+ */
+async function countSubscribers(topicArns) {
+  if (topicArns.length === 0) return 0;
+  if (cloudwatchImpl?.countSubscribers) return cloudwatchImpl.countSubscribers(topicArns);
+
+  const { SNSClient, ListSubscriptionsByTopicCommand } = await import('@aws-sdk/client-sns');
+  const sns = new SNSClient({});
+  let total = 0;
+  for (const arn of topicArns) {
+    const res = await sns.send(new ListSubscriptionsByTopicCommand({ TopicArn: arn }));
+    total += (res.Subscriptions ?? []).filter(
+      (s) => s.SubscriptionArn && s.SubscriptionArn.startsWith('arn:aws:sns:')
+    ).length;
+  }
+  return total;
+}
 
 /**
  * Test seam for the EC2 control plane, matching `_setPoolForTests`.
@@ -448,6 +488,7 @@ export function routeOf(method, path) {
   if (method === 'GET' && clean === '/daily-opens') return { name: 'getDailyOpens' };
   // TELEMETRY.md §4 — Metabase is expected to be off between beta programmes,
   // so starting it is a routine action rather than an ops task.
+  if (method === 'GET' && clean === '/alarms') return { name: 'getAlarms' };
   if (method === 'GET' && clean === '/metabase/status') return { name: 'getMetabaseStatus' };
   if (method === 'POST' && clean === '/metabase/power') return { name: 'setMetabasePower' };
   if (method === 'GET' && clean === '/announcement-types') return { name: 'listAnnouncementTypes' };
@@ -711,6 +752,57 @@ export async function handler(event) {
           WHERE day BETWEEN $1::date AND $2::date
           ORDER BY day`, [from, to]);
         return json(200, { opens: res.rows });
+      }
+
+      // --- Operational health ---------------------------------------------
+      //
+      // **CloudWatch alarms were the largest gap in this stack**: nothing
+      // alerted on anything, so the escalation sweep — the job that decides
+      // whether a caregiver is told about a missed dose — could fail for a
+      // fortnight in silence. The alarms now exist and publish to an SNS topic;
+      // until something subscribes to that topic, this page is the only place a
+      // firing alarm is visible, which is why it is a page rather than a note.
+      //
+      // Discovered by naming convention (`tish-*`) rather than a hard-coded
+      // list, so an alarm added later shows up here without a deploy.
+      case 'getAlarms': {
+        const { DescribeAlarmsCommand, cw } = await cloudwatch();
+        const res = await cw.send(new DescribeAlarmsCommand({ AlarmNamePrefix: 'tish-', MaxRecords: 100 }));
+
+        const alarms = (res.MetricAlarms ?? []).map((a) => ({
+          name: a.AlarmName,
+          description: a.AlarmDescription ?? null,
+          state: a.StateValue,
+          reason: a.StateReason ?? null,
+          since: a.StateUpdatedTimestamp ? new Date(a.StateUpdatedTimestamp).toISOString() : null,
+          // Has somewhere to publish to. **Necessary but not sufficient** — see
+          // `subscribers` below, which is the half that decides whether a human
+          // ever hears about it.
+          notifies: (a.AlarmActions ?? []).length > 0,
+        })).sort((a, b) => SEVERITY[b.state] - SEVERITY[a.state] || a.name.localeCompare(b.name));
+
+        // **An alarm wired to a topic nobody subscribes to is still silent**,
+        // and reporting it as "notifies" would be the most dangerous kind of
+        // wrong on this page: it would say alerting works when it does not.
+        // Counting real subscriptions is the only way to tell the difference.
+        const topics = [...new Set(
+          (res.MetricAlarms ?? []).flatMap((a) => a.AlarmActions ?? []).filter((t) => t.startsWith('arn:aws:sns:'))
+        )];
+        let subscribers = 0;
+        try {
+          subscribers = await countSubscribers(topics);
+        } catch (e) {
+          // Missing SNS permission must not take the whole page down — the
+          // alarm states are the point, this is the caveat.
+          console.warn('admin-api: could not count alarm subscribers:', e.message);
+          subscribers = null;
+        }
+
+        return json(200, {
+          alarms,
+          inAlarm: alarms.filter((a) => a.state === 'ALARM').length,
+          subscribers,
+        });
       }
 
       // --- Metabase power control (TELEMETRY.md §4) ------------------------

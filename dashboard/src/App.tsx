@@ -8,6 +8,7 @@ import { SignUpPage } from "@/features/auth/SignUpPage"
 import { AdherencePage } from "@/features/adherence/AdherencePage"
 import { AnalyticsPage } from "@/features/analytics/AnalyticsPage"
 import { DatabasePage } from "@/features/database/DatabasePage"
+import { HealthPage } from "@/features/health/HealthPage"
 import { NewsPage } from "@/features/news/NewsPage"
 import { TranslationsPage } from "@/features/translations/TranslationsPage"
 import { useAdminAuth } from "@/lib/auth"
@@ -117,6 +118,7 @@ export default function App() {
         <Route path="/database" element={<DatabasePage />} />
         <Route path="/adherence" element={<AdherencePage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/health" element={<HealthPage />} />
         <Route path="*" element={<Navigate to="/news" replace />} />
       </Route>
     </Routes>

@@ -9,6 +9,7 @@ import type {
   AnnouncementListResponse,
   AnnouncementType,
   AnnouncementTypeListResponse,
+  AlarmsResponse,
   DailyOpensResponse,
   MetabasePowerResult,
   MetabaseStatus,
@@ -66,6 +67,7 @@ type Api = {
   listAdherencePatients: () => Promise<AdherencePatientListResponse>
   getPatientAdherence: (userId: number, range: { from: string; to: string }) => Promise<AdherenceResponse>
   getDailyOpens: (range: { from: string; to: string }) => Promise<DailyOpensResponse>
+  getAlarms: () => Promise<AlarmsResponse>
   getMetabaseStatus: () => Promise<MetabaseStatus>
   setMetabasePower: (action: "start" | "stop") => Promise<MetabasePowerResult>
 }
@@ -121,6 +123,7 @@ function useRealApi(): Api {
       request<AdherenceResponse>(token, `/adherence/${userId}?${new URLSearchParams(range)}`),
     getDailyOpens: (range) =>
       request<DailyOpensResponse>(token, `/daily-opens?${new URLSearchParams(range)}`),
+    getAlarms: () => request<AlarmsResponse>(token, "/alarms"),
     getMetabaseStatus: () => request<MetabaseStatus>(token, "/metabase/status"),
     setMetabasePower: (action) =>
       request<MetabasePowerResult>(token, "/metabase/power", {

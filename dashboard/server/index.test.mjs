@@ -6,7 +6,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handler, _setEc2ForTests, _setPoolForTests, ALLOWED_TABLES, adherenceRange, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
+import { handler, _setCloudWatchForTests, _setEc2ForTests, _setPoolForTests, ALLOWED_TABLES, adherenceRange, groupsFrom, requiredEnvFor, validateAnnouncement, validateAnnouncementType } from './index.mjs';
 
 const ENV = {
   DB_HOST: 'db.local', DB_USER: 'u', DB_PASSWORD: 'p', DB_NAME: 'postgres',
@@ -904,4 +904,71 @@ test('a malformed body is a 400, not a 500', async (t) => {
     body: 'not json',
   })
   assert.equal(res.statusCode, 400)
+})
+
+// ---------------------------------------------------------------------------
+// Operational health
+// ---------------------------------------------------------------------------
+
+function fakeCloudWatch(alarms) {
+  return {
+    DescribeAlarmsCommand: class { constructor(input) { this.input = input } },
+    cw: { send: async (cmd) => { fakeCloudWatch.lastInput = cmd.input; return { MetricAlarms: alarms } } },
+  }
+}
+
+test('GET /alarms discovers alarms by naming convention, not a hard-coded list', async (t) => {
+  t.after(() => _setCloudWatchForTests(null))
+  _setCloudWatchForTests(fakeCloudWatch([
+    { AlarmName: 'tish-operation-strix-errors', StateValue: 'OK', AlarmActions: ['arn:sns'] },
+  ]))
+
+  const res = await handler(httpEvent({ path: '/alarms' }))
+  assert.equal(res.statusCode, 200)
+  // An alarm added later must appear without a code change.
+  assert.equal(fakeCloudWatch.lastInput.AlarmNamePrefix, 'tish-')
+})
+
+test('FIRING ALARMS SORT ABOVE HEALTHY ONES', async (t) => {
+  t.after(() => _setCloudWatchForTests(null))
+  _setCloudWatchForTests(fakeCloudWatch([
+    { AlarmName: 'tish-a-ok', StateValue: 'OK', AlarmActions: [] },
+    { AlarmName: 'tish-z-broken', StateValue: 'ALARM', AlarmActions: ['arn:sns'] },
+    { AlarmName: 'tish-m-nodata', StateValue: 'INSUFFICIENT_DATA', AlarmActions: [] },
+  ]))
+
+  // Alphabetical would bury the only one that matters at the bottom.
+  const body = parse(await handler(httpEvent({ path: '/alarms' })))
+  assert.deepEqual(body.alarms.map((a) => a.state), ['ALARM', 'INSUFFICIENT_DATA', 'OK'])
+  assert.equal(body.inAlarm, 1)
+})
+
+test('an alarm with no action is reported as not notifying anyone', async (t) => {
+  t.after(() => _setCloudWatchForTests(null))
+  _setCloudWatchForTests(fakeCloudWatch([
+    { AlarmName: 'tish-wired', StateValue: 'OK', AlarmActions: ['arn:sns'] },
+    { AlarmName: 'tish-decorative', StateValue: 'OK', AlarmActions: [] },
+  ]))
+
+  // An alarm nothing is subscribed to is a dashboard decoration. That should be
+  // visible rather than assumed.
+  const body = parse(await handler(httpEvent({ path: '/alarms' })))
+  assert.equal(body.alarms.find((a) => a.name === 'tish-wired').notifies, true)
+  assert.equal(body.alarms.find((a) => a.name === 'tish-decorative').notifies, false)
+})
+
+test('/alarms needs no database, no GitHub token and no instance id', () => {
+  assert.deepEqual(requiredEnvFor('getAlarms'), ['ALLOWED_ORIGIN'])
+})
+
+test('/alarms is behind the approval gate', async (t) => {
+  t.after(() => _setCloudWatchForTests(null))
+  let called = false
+  _setCloudWatchForTests({
+    DescribeAlarmsCommand: class {},
+    cw: { send: async () => { called = true; return { MetricAlarms: [] } } },
+  })
+  const res = await handler(httpEvent({ path: '/alarms', groups: [] }))
+  assert.equal(res.statusCode, 403)
+  assert.equal(called, false)
 })

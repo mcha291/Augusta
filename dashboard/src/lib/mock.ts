@@ -14,6 +14,8 @@ import type {
   AnnouncementType,
   AnnouncementTypeListResponse,
   AdherenceDose,
+  Alarm,
+  AlarmsResponse,
   DailyOpen,
   DailyOpensResponse,
   MetabasePowerResult,
@@ -283,6 +285,19 @@ export const mockApi = {
   // Power control, with the transitions actually simulated — a mock that
   // flipped straight from stopped to running would hide the state the real UI
   // spends most of its visible time in.
+  // One firing, one with nothing wired to it, one healthy — the three states
+  // the page has to render differently, and the middle one is the easiest to
+  // overlook when everything happens to be green.
+  async getAlarms(): Promise<AlarmsResponse> {
+    await delay(300)
+    const alarms: Alarm[] = [
+      { name: 'tish-escalation-schedule-stalled', description: 'Escalation sweep has not run for 15 minutes - the schedule itself has stopped', state: 'ALARM', reason: 'Threshold Crossed: no datapoints were received', since: new Date(Date.now() - 25 * 60000).toISOString(), notifies: true },
+      { name: 'tish-rds-storage-low', description: 'season1 has under 4 GB free - writes will fail when it runs out', state: 'INSUFFICIENT_DATA', reason: 'Insufficient Data', since: new Date(Date.now() - 3 * 3600000).toISOString(), notifies: false },
+      { name: 'tish-operation-strix-errors', description: 'App API erroring repeatedly - reminders, doses or auth may be affected', state: 'OK', reason: 'Threshold Crossed: no datapoints breaching', since: new Date(Date.now() - 26 * 3600000).toISOString(), notifies: true },
+    ]
+    return { alarms, inAlarm: alarms.filter((a) => a.state === 'ALARM').length, subscribers: 0 }
+  },
+
   async getMetabaseStatus(): Promise<MetabaseStatus> {
     await delay(250)
     return { ...mockMetabase }

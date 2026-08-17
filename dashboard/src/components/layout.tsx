@@ -1,4 +1,4 @@
-import { Activity, ChartNoAxesCombined, Database, Languages, LogOut, Newspaper } from "lucide-react"
+import { Activity, ChartNoAxesCombined, Database, HeartPulse, Languages, LogOut, Newspaper } from "lucide-react"
 import { NavLink, Outlet } from "react-router-dom"
 
 import { Badge } from "@/components/ui/badge"
@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { to: "/adherence", label: "Adherence", icon: Activity },
   { to: "/analytics", label: "Analytics", icon: ChartNoAxesCombined },
   { to: "/database", label: "Database", icon: Database },
+  { to: "/health", label: "Health", icon: HeartPulse },
 ]
 
 export function Layout() {

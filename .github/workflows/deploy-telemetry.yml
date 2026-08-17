@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'tish-app/telemetry/**'
+      - 'telemetry/**'
       - '.github/workflows/deploy-telemetry.yml'
 
 # OIDC: the workflow exchanges a GitHub-signed token for short-lived AWS
@@ -15,29 +15,44 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  # **Two packages, two jobs, and the split is load-bearing.** The ingest
+  # Lambda must never carry a database client — that is the property the whole
+  # separate-directory arrangement exists to protect (TELEMETRY.md §3), and one
+  # shared package.json would ship `pg` into its zip whether it imported it or
+  # not. Separate installs make the guarantee structural rather than a comment.
+  ingest:
+    name: Ingest
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: tish-app/telemetry
+        working-directory: telemetry/ingest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: telemetry/ingest/package-lock.json
 
-      # No lockfile is committed for this package — a single dependency, and
-      # `npm ci` would fail without one. If more are ever added, commit
-      # package-lock.json and switch this to `npm ci --omit=dev`.
       - name: Install production dependencies
-        run: npm install --omit=dev --no-audit --no-fund
+        run: npm ci --omit=dev
 
       - name: Syntax check
-        # There is no test suite here yet. This is the minimum gate worth
-        # having: a file that will not parse must never reach a function that
-        # is only exercised in production.
+        # No test suite here yet. This is the minimum gate worth having: a file
+        # that will not parse must never reach a function only exercised in
+        # production.
         run: node --check index.mjs
+
+      - name: Fail if a database client crept in
+        # The guarantee above, enforced. `pg` in this tree means the routing
+        # rule in §1 has been broken — a care fact is being written from the
+        # analytics pipeline — and that is worth failing a deploy over.
+        run: |
+          if [ -d node_modules/pg ]; then
+            echo "::error::telemetry/ingest must not depend on a database client - see TELEMETRY.md section 3"
+            exit 1
+          fi
 
       - name: Package function
         run: zip -r function.zip index.mjs package.json node_modules
@@ -54,3 +69,48 @@ jobs:
             --function-name tish-telemetry-ingest \
             --zip-file fileb://function.zip \
             --publish
+
+  # One artifact, two functions, differing only by handler — the same pattern
+  # the escalation pair uses, and forced by the same networking. This account
+  # has no NAT gateway and no VPC endpoints, so the Athena half must sit outside
+  # the VPC and the Postgres half inside it.
+  rollup:
+    name: Rollup
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: telemetry/rollup
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install production dependencies
+        # No lockfile is committed for this package, so `npm ci` would fail.
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Run functional tests
+        # Deploy gate. These assert the things that fail silently in a nightly
+        # job — the wrong day bucket, a dropped late arrival, a truncated page.
+        run: npm test
+
+      - name: Package function
+        run: zip -r function.zip index.mjs package.json node_modules
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Update Lambda code
+        run: |
+          for fn in tish-telemetry-rollup tish-telemetry-rollup-db; do
+            echo "Deploying $fn..."
+            aws lambda update-function-code \
+              --function-name "$fn" \
+              --zip-file fileb://function.zip \
+              --publish
+          done
